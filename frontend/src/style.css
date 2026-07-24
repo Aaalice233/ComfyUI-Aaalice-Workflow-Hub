@@ -36,6 +36,11 @@ body,
   margin: 0;
 }
 
+html {
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+}
+
 body {
   min-height: 100vh;
   overflow-x: hidden;
@@ -73,9 +78,9 @@ p {
 }
 
 .app-shell {
-  --theme-rgb: 119 203 185;
-  --accent: #77cbb9;
-  --accent-hover: #91dfcf;
+  --theme-rgb: 110 168 255;
+  --accent: #6ea8ff;
+  --accent-hover: #8bb9ff;
   display: grid;
   min-height: 100vh;
   background:
@@ -86,9 +91,9 @@ p {
 }
 
 .app-shell.theme-publish {
-  --theme-rgb: 216 169 104;
-  --accent: #d8a968;
-  --accent-hover: #e8bd82;
+  --theme-rgb: 242 139 184;
+  --accent: #f28bb8;
+  --accent-hover: #f5a4c7;
 }
 
 .nav-rail {
@@ -102,7 +107,7 @@ p {
   padding: 10px 14px;
   align-items: center;
   background: rgb(17 18 20 / 88%);
-  box-shadow: inset 0 -1px rgb(255 255 255 / 4%), 0 12px 32px rgb(0 0 0 / 13%);
+  box-shadow: inset 0 -1px rgb(var(--theme-rgb) / 12%), 0 12px 32px rgb(0 0 0 / 13%);
   backdrop-filter: blur(22px);
 }
 
@@ -126,7 +131,7 @@ p {
   height: 40px;
   border-radius: 11px;
   color: #161719;
-  background: linear-gradient(145deg, #f0efeb, #aaa9a4);
+  background: linear-gradient(145deg, rgb(var(--theme-rgb) / 88%), #aaa9a4);
   box-shadow: 0 8px 26px rgb(0 0 0 / 28%), inset 0 1px rgb(255 255 255 / 72%), 0 0 24px rgb(var(--theme-rgb) / 8%);
   transition: box-shadow 0.3s ease;
 }
@@ -209,8 +214,8 @@ p {
 
 .primary-nav button:hover,
 .rail-action:hover {
-  color: var(--text-soft);
-  background: rgb(255 255 255 / 4%);
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 6%);
 }
 
 .primary-nav button.active {
@@ -308,7 +313,9 @@ p {
 }
 
 .account-card:hover {
+  color: var(--accent);
   background: var(--surface-raised);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px rgb(var(--theme-rgb) / 13%);
 }
 
 .account-card img {
@@ -490,9 +497,9 @@ p {
   width: 36px;
   height: 36px;
   border-radius: 11px;
-  color: var(--text-soft);
-  background: var(--surface-soft);
-  box-shadow: inset 0 1px rgb(255 255 255 / 5%);
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 8%);
+  box-shadow: inset 0 0 0 1px rgb(var(--theme-rgb) / 9%);
 }
 
 .panel-heading h2 {
@@ -503,8 +510,8 @@ p {
 
 .source-form {
   display: flex;
-  width: min(620px, 100%);
-  min-height: 46px;
+  width: 100%;
+  min-height: 42px;
   padding: 5px 5px 5px 14px;
   border-radius: 12px;
   align-items: center;
@@ -521,6 +528,11 @@ p {
 .source-form input {
   min-width: 0;
   padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.source-form input:focus {
   background: transparent;
   box-shadow: none;
 }
@@ -642,7 +654,8 @@ select:focus {
 
 .secondary:hover:not(:disabled),
 .ghost:hover:not(:disabled) {
-  background: var(--surface-hover);
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 7%);
 }
 
 .ghost {
@@ -678,6 +691,7 @@ select:focus {
 
 .source-toggle {
   display: inline-flex;
+  flex: none;
   min-height: 40px;
   padding: 0 10px;
   border-radius: 10px;
@@ -687,6 +701,7 @@ select:focus {
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%);
   gap: 7px;
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .source-toggle:hover,
@@ -712,10 +727,15 @@ select:focus {
   font-style: normal;
 }
 
+.source-toggle.active i {
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 10%);
+}
+
 .source-composer {
   margin: 0 0 16px;
-  padding: 16px;
-  border-radius: 14px;
+  padding: 8px;
+  border-radius: 12px;
   background: var(--surface-raised);
   box-shadow: 0 14px 34px rgb(0 0 0 / 18%), inset 0 1px rgb(255 255 255 / 5%), inset 3px 0 rgb(var(--theme-rgb) / 42%);
   animation: composer-enter 0.18s ease-out;
@@ -724,19 +744,6 @@ select:focus {
 @keyframes composer-enter {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-.source-composer-head {
-  display: flex;
-  min-height: 30px;
-  margin-bottom: 9px;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.source-composer-head strong {
-  font-size: 11px;
-  font-weight: 620;
 }
 
 .search-field {
@@ -760,6 +767,12 @@ select:focus {
 .search-field input {
   min-height: auto;
   padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.search-field input:focus {
   background: transparent;
   box-shadow: none;
 }
@@ -777,6 +790,12 @@ select:focus {
   font-size: 9px;
 }
 
+.search-field:focus-within kbd {
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 9%);
+  box-shadow: inset 0 0 0 1px rgb(var(--theme-rgb) / 14%);
+}
+
 .segmented,
 .choice {
   display: flex;
@@ -786,8 +805,30 @@ select:focus {
   gap: 3px;
 }
 
+.segmented {
+  position: relative;
+  min-width: 244px;
+  --filter-index: 0;
+}
+
+.segmented::before {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: calc((100% - 8px) / 4);
+  border-radius: 8px;
+  background: rgb(var(--theme-rgb) / 12%);
+  box-shadow: inset 0 0 0 1px rgb(var(--theme-rgb) / 13%), 0 4px 14px rgb(var(--theme-rgb) / 7%);
+  content: "";
+  transform: translateX(calc(var(--filter-index) * 100%));
+  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.25s ease, box-shadow 0.25s ease;
+}
+
 .segmented button,
 .choice button {
+  position: relative;
+  z-index: 1;
   min-height: 32px;
   padding: 0 11px;
   border-radius: 8px;
@@ -797,16 +838,27 @@ select:focus {
   white-space: nowrap;
 }
 
+.segmented button {
+  min-width: 0;
+  padding-inline: 8px;
+  flex: 1;
+}
+
 .segmented button:hover,
 .choice button:hover {
   color: var(--text-soft);
 }
 
-.segmented button.active,
 .choice button.active {
-  color: var(--text);
-  background: var(--surface-soft);
-  box-shadow: 0 3px 10px rgb(0 0 0 / 24%), inset 0 1px rgb(255 255 255 / 5%);
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 10%);
+  box-shadow: 0 3px 10px rgb(0 0 0 / 24%), inset 0 0 0 1px rgb(var(--theme-rgb) / 10%);
+}
+
+.segmented button.active {
+  color: var(--accent);
+  background: transparent;
+  box-shadow: none;
 }
 
 .catalog {
@@ -878,7 +930,7 @@ select:focus {
   top: 10px;
   padding: 5px 8px;
   border-radius: 8px;
-  color: #d8d8d4;
+  color: var(--accent);
   background: rgb(15 16 18 / 78%);
   box-shadow: inset 0 1px rgb(255 255 255 / 8%);
   backdrop-filter: blur(12px);
@@ -931,8 +983,8 @@ select:focus {
 .tags span {
   padding: 4px 7px;
   border-radius: 7px;
-  color: #a7a9ad;
-  background: var(--surface-soft);
+  color: color-mix(in srgb, var(--accent) 62%, #a7a9ad);
+  background: rgb(var(--theme-rgb) / 7%);
   font-size: 9px;
 }
 
@@ -975,19 +1027,9 @@ select:focus {
   margin-bottom: 20px;
   border-radius: 22px;
   place-items: center;
-  color: #a3a5a5;
-  background: var(--surface-soft);
-  box-shadow: var(--shadow-sm), inset 0 1px rgb(255 255 255 / 6%);
-}
-
-.empty-orbit::before {
-  position: absolute;
-  width: 90px;
-  height: 90px;
-  border: 1px solid rgb(255 255 255 / 5%);
-  border-radius: 28px;
-  content: "";
-  transform: rotate(12deg);
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 8%);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px rgb(var(--theme-rgb) / 10%), 0 0 28px rgb(var(--theme-rgb) / 6%);
 }
 
 .empty-state h2 {
@@ -1030,6 +1072,11 @@ select:focus {
   background: var(--surface);
   cursor: pointer;
   font-size: 10px;
+}
+
+.publish-utilities summary:hover {
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 7%);
 }
 
 .publish-utilities details[open] {
@@ -1077,6 +1124,12 @@ select:focus {
   height: 1px;
   background: rgb(255 255 255 / 7%);
   content: "";
+  transition: background-color 0.28s ease, box-shadow 0.28s ease;
+}
+
+.wizard-steps li:has(button.complete):not(:last-child)::after {
+  background: rgb(var(--theme-rgb) / 44%);
+  box-shadow: 0 0 9px rgb(var(--theme-rgb) / 13%);
 }
 
 .wizard-steps button {
@@ -1127,8 +1180,8 @@ select:focus {
 }
 
 .wizard-steps button.complete > span {
-  color: var(--success);
-  background: rgb(143 186 161 / 9%);
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 10%);
 }
 
 .wizard-content {
@@ -1174,7 +1227,7 @@ select:focus {
 .workflow-dropzone:hover,
 .workflow-dropzone:focus-within {
   background-color: #131416;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 18%), 0 0 0 4px rgb(255 255 255 / 4%);
+  box-shadow: inset 0 0 0 1px rgb(var(--theme-rgb) / 30%), 0 0 0 4px rgb(var(--theme-rgb) / 5%);
 }
 
 .upload-icon {
@@ -1184,9 +1237,9 @@ select:focus {
   margin-bottom: 8px;
   border-radius: 19px;
   place-items: center;
-  color: #b8bab8;
-  background: var(--surface-soft);
-  box-shadow: var(--shadow-sm), inset 0 1px rgb(255 255 255 / 6%);
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 9%);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px rgb(var(--theme-rgb) / 10%), 0 0 24px rgb(var(--theme-rgb) / 6%);
 }
 
 .workflow-dropzone strong {
@@ -1225,6 +1278,10 @@ select:focus {
   min-width: 0;
   align-items: center;
   gap: 9px;
+}
+
+.selected-file > div > svg {
+  color: var(--accent);
 }
 
 .selected-file > div > span {
@@ -1296,7 +1353,7 @@ select:focus {
   padding: 0 12px;
   border-radius: 10px;
   align-items: center;
-  color: var(--muted);
+  color: var(--accent);
   background: var(--field);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%);
   gap: 9px;
@@ -1338,7 +1395,7 @@ code {
   padding: 12px 18px;
   align-items: center;
   background: #141517;
-  box-shadow: inset 0 1px rgb(255 255 255 / 4%);
+  box-shadow: inset 0 1px rgb(var(--theme-rgb) / 10%);
   gap: 8px;
 }
 

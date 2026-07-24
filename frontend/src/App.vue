@@ -124,6 +124,7 @@ const visibleProducts = computed(() => {
     return [item.name, item.summary, item.description, ...item.tags].join(" ").toLocaleLowerCase().includes(query);
   });
 });
+const filterIndex = computed(() => (["all", "downloaded", "updates", "archived"] as const).indexOf(filter.value));
 const canAdvancePublish = computed(() => {
   if (publishStep.value === 1) return !!workflow.value;
   if (publishStep.value === 2) {
@@ -177,6 +178,13 @@ function handleWorkspaceShortcut(event: KeyboardEvent) {
   } else if (event.key === "Escape" && document.activeElement === searchInput.value && search.value) {
     search.value = "";
   }
+}
+function closeHubPage() {
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: "AAALICE_WORKFLOW_HUB_CLOSE" }, window.location.origin);
+    return;
+  }
+  window.close();
 }
 async function openSourceComposer() {
   sourceComposerOpen.value = true;
@@ -542,22 +550,27 @@ onBeforeUnmount(() => {
 
       <div class="rail-spacer" />
       <div class="rail-actions">
-        <button class="rail-action" @click="drawer = !drawer">
+        <button class="rail-action" :title="t('activities')" :aria-label="t('activities')" @click="drawer = !drawer">
           <ActivityIcon :size="17" /><span>{{ t("activities") }}</span>
           <i v-if="operations.some(o => o.status === 'running')" class="pulse" />
         </button>
-        <button class="rail-action" @click="toggleLocale">
+        <button class="rail-action" :title="locale === 'zh' ? '切换为 English' : 'Switch to 简体中文'"
+          :aria-label="locale === 'zh' ? '切换为 English' : 'Switch to 简体中文'" @click="toggleLocale">
           <Languages :size="17" /><span>{{ locale === "zh" ? "English" : "简体中文" }}</span>
         </button>
-        <button v-if="status?.github.authenticated" class="account-card" @click="logout">
+        <button v-if="status?.github.authenticated" class="account-card" :title="t('logout')" :aria-label="t('logout')" @click="logout">
           <img v-if="status.github.user?.avatar_url" :src="status.github.user.avatar_url" alt="" />
           <CircleUserRound v-else :size="18" />
           <span><strong>{{ status.github.user?.login || t("signedIn") }}</strong><small>{{ t("logout") }}</small></span>
           <LogOut :size="15" />
         </button>
-        <button v-else class="account-card" :disabled="!status?.github.configured || !!busy" @click="startLogin">
+        <button v-else class="account-card" :title="t('login')" :aria-label="t('login')"
+          :disabled="!status?.github.configured || !!busy" @click="startLogin">
           <GitBranch :size="18" /><span><strong>{{ t("login") }}</strong><small>{{ locale === "zh" ? "用于发布和管理" : "Publish and manage" }}</small></span>
           <ArrowRight :size="15" />
+        </button>
+        <button class="rail-action" :title="t('close')" :aria-label="t('close')" @click="closeHubPage">
+          <X :size="18" />
         </button>
       </div>
     </aside>
@@ -565,10 +578,10 @@ onBeforeUnmount(() => {
     <section class="workspace">
       <main class="workspace-body">
         <div v-if="error" class="message error">
-          <AlertCircle :size="18" /><span>{{ error }}</span><button :aria-label="t('close')" @click="error = ''"><X :size="17" /></button>
+          <AlertCircle :size="18" /><span>{{ error }}</span><button :title="t('close')" :aria-label="t('close')" @click="error = ''"><X :size="17" /></button>
         </div>
         <div v-if="notice" class="message success">
-          <CheckCircle2 :size="18" /><span>{{ notice }}</span><button :aria-label="t('close')" @click="notice = ''"><X :size="17" /></button>
+          <CheckCircle2 :size="18" /><span>{{ notice }}</span><button :title="t('close')" :aria-label="t('close')" @click="notice = ''"><X :size="17" /></button>
         </div>
         <div v-if="status && !status.manager.available" class="message warning">
           <TriangleAlert :size="18" /><span>{{ t("managerUnavailable") }}</span>
@@ -591,7 +604,8 @@ onBeforeUnmount(() => {
                 <kbd>/</kbd>
               </label>
               <div class="toolbar-actions">
-                <div class="segmented" role="group" :aria-label="locale === 'zh' ? '工作流筛选' : 'Workflow filters'">
+                <div class="segmented" role="group" :aria-label="locale === 'zh' ? '工作流筛选' : 'Workflow filters'"
+                  :style="{ '--filter-index': String(filterIndex) }">
                   <button v-for="item in (['all','downloaded','updates','archived'] as const)" :key="item"
                     :class="{ active: filter === item }" @click="filter = item">{{ t(item) }}</button>
                 </div>
@@ -602,10 +616,6 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-if="sourceComposerOpen" class="source-composer">
-              <div class="source-composer-head">
-                <strong>{{ t("addSource") }}</strong>
-                <button class="icon-button" :aria-label="t('close')" @click="sourceComposerOpen = false"><X :size="16" /></button>
-              </div>
               <div class="source-form">
                 <GitBranch :size="18" />
                 <input ref="sourceInput" v-model="sourceUrl" :placeholder="t('sourcePlaceholder')" @keyup.enter="addSource" />
@@ -617,8 +627,8 @@ onBeforeUnmount(() => {
                 <div v-for="item in sources" :key="item.url" class="source-chip" :class="{ invalid: item.error }" :title="item.error || item.url">
                   <AlertCircle v-if="item.error" :size="15" /><FolderGit2 v-else :size="15" />
                   <span>{{ item.owner }}/{{ item.repo }}</span>
-                  <button :title="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="14" /></button>
-                  <button :title="t('remove')" @click="removeSource(item)"><Trash2 :size="14" /></button>
+                  <button :title="t('refresh')" :aria-label="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="14" /></button>
+                  <button :title="t('remove')" :aria-label="t('remove')" @click="removeSource(item)"><Trash2 :size="14" /></button>
                 </div>
               </div>
             </div>
@@ -752,7 +762,7 @@ onBeforeUnmount(() => {
 
     <div v-if="selected" class="backdrop" @click.self="selected = null">
       <aside class="detail">
-        <button class="icon-button close" :aria-label="t('close')" @click="selected = null"><X :size="18" /></button>
+        <button class="icon-button close" :title="t('close')" :aria-label="t('close')" @click="selected = null"><X :size="18" /></button>
         <p class="eyebrow"><GitBranch :size="14" />{{ selected.source.owner }}/{{ selected.source.repo }}</p>
         <h1>{{ selected.name }}</h1><p class="detail-copy">{{ selected.description || selected.summary }}</p>
         <img v-if="latest(selected)?.preview" class="detail-preview" :src="latest(selected)?.preview?.url" :alt="selected.name" />
@@ -792,7 +802,7 @@ onBeforeUnmount(() => {
     </div>
 
     <aside v-if="drawer" class="activity-drawer">
-      <div class="drawer-head"><div><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div><button class="icon-button" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button></div>
+      <div class="drawer-head"><div><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button></div>
       <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
       <article v-for="item in operations" :key="item.id" class="operation">
         <div><strong>{{ item.kind }}</strong><span :class="`status ${item.status}`">{{ item.stage }}</span></div>

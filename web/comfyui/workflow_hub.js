@@ -6,13 +6,11 @@ const ICON_CLASS = "aaalice-workflow-hub-icon";
 const ICON_STYLE_ID = "aaalice-workflow-hub-icon-style";
 const MODAL_ID = "aaalice-workflow-hub-modal";
 const LIBRARY_BIG_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="18" x="3" y="3" rx="1"/><path d="M7 3v18"/><path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z"/></svg>`;
-const X_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 
 function installIconStyle() {
   if (document.getElementById(ICON_STYLE_ID)) return;
 
   const iconMask = `url("data:image/svg+xml,${encodeURIComponent(LIBRARY_BIG_SVG)}")`;
-  const closeMask = `url("data:image/svg+xml,${encodeURIComponent(X_SVG)}")`;
   const style = document.createElement("style");
   style.id = ICON_STYLE_ID;
   style.textContent = `
@@ -61,53 +59,6 @@ function installIconStyle() {
       flex-direction: column;
     }
 
-    .aaalice-workflow-hub-header {
-      display: flex;
-      min-height: 48px;
-      padding: 0 10px 0 18px;
-      align-items: center;
-      justify-content: space-between;
-      background: rgb(255 255 255 / 3%);
-      box-shadow: inset 0 -1px rgb(255 255 255 / 5%);
-    }
-
-    .aaalice-workflow-hub-title {
-      color: var(--input-text, #e7e9ed);
-      font-size: 14px;
-      font-weight: 600;
-      letter-spacing: 0.01em;
-    }
-
-    .aaalice-workflow-hub-close {
-      display: grid;
-      width: 32px;
-      height: 32px;
-      padding: 0;
-      border: 0;
-      border-radius: 8px;
-      place-items: center;
-      color: var(--input-text, #d3d6dc);
-      background: transparent;
-      cursor: pointer;
-      transition: background-color 0.16s ease, color 0.16s ease;
-    }
-
-    .aaalice-workflow-hub-close:hover,
-    .aaalice-workflow-hub-close:focus-visible {
-      color: #fff;
-      background: rgb(255 255 255 / 9%);
-      outline: none;
-    }
-
-    .aaalice-workflow-hub-close::before {
-      width: 18px;
-      height: 18px;
-      background: currentColor;
-      content: "";
-      -webkit-mask: ${closeMask} center / contain no-repeat;
-      mask: ${closeMask} center / contain no-repeat;
-    }
-
     .aaalice-workflow-hub-frame {
       width: 100%;
       min-height: 0;
@@ -134,6 +85,12 @@ function installIconStyle() {
 function closeHub() {
   document.getElementById(MODAL_ID)?.remove();
   document.removeEventListener("keydown", handleHubKeydown, true);
+  window.removeEventListener("message", handleHubMessage);
+}
+
+function handleHubMessage(event) {
+  if (event.origin !== window.location.origin || event.data?.type !== "AAALICE_WORKFLOW_HUB_CLOSE") return;
+  closeHub();
 }
 
 function handleHubKeydown(event) {
@@ -154,24 +111,10 @@ function openEmbeddedHub() {
   modal.className = "aaalice-workflow-hub-modal";
   modal.setAttribute("role", "dialog");
   modal.setAttribute("aria-modal", "true");
-  modal.setAttribute("aria-labelledby", `${MODAL_ID}-title`);
+  modal.setAttribute("aria-label", "工作流中心 / Workflow Hub");
 
   const panel = document.createElement("section");
   panel.className = "aaalice-workflow-hub-panel";
-
-  const header = document.createElement("header");
-  header.className = "aaalice-workflow-hub-header";
-
-  const title = document.createElement("strong");
-  title.id = `${MODAL_ID}-title`;
-  title.className = "aaalice-workflow-hub-title";
-  title.textContent = "工作流中心 · Workflow Hub";
-
-  const closeButton = document.createElement("button");
-  closeButton.type = "button";
-  closeButton.className = "aaalice-workflow-hub-close";
-  closeButton.setAttribute("aria-label", "关闭工作流中心 / Close Workflow Hub");
-  closeButton.addEventListener("click", closeHub);
 
   const frame = document.createElement("iframe");
   frame.className = "aaalice-workflow-hub-frame";
@@ -179,17 +122,17 @@ function openEmbeddedHub() {
   frame.title = "工作流中心 / Workflow Hub";
   frame.addEventListener("load", () => {
     frame.contentDocument?.addEventListener("keydown", handleHubKeydown, true);
+    frame.focus();
   });
 
-  header.append(title, closeButton);
-  panel.append(header, frame);
+  panel.append(frame);
   modal.append(panel);
   modal.addEventListener("click", (event) => {
     if (event.target === modal) closeHub();
   });
   document.body.appendChild(modal);
   document.addEventListener("keydown", handleHubKeydown, true);
-  closeButton.focus();
+  window.addEventListener("message", handleHubMessage);
 }
 
 function openHub(event) {
