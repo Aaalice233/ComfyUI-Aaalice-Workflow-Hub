@@ -16,6 +16,7 @@ import {
   FileJson,
   FileUp,
   FolderGit2,
+  FolderOpen,
   GitBranch,
   LibraryBig,
   ListFilter,
@@ -35,7 +36,7 @@ import { locale, t } from "./i18n";
 
 type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
 type Version = {
-  version: string; published_at: string; changelog: string;
+  version: string; published_at: string; release_tag: string; changelog: string;
   comfyui: { minimum?: string | null; maximum?: string | null };
   package: { url: string; size: number; sha256: string };
   preview?: { url: string; sha256: string } | null;
@@ -65,6 +66,7 @@ const status = ref<Status | null>(null);
 const sources = ref<Source[]>([]);
 const products = ref<Product[]>([]);
 const selected = ref<Product | null>(null);
+const expandedChangelog = ref<string | null>(null);
 const sourceUrl = ref("");
 const sourceInput = ref<HTMLInputElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -153,6 +155,20 @@ function compareVersions(a: Version, b: Version) {
 function latest(item: Product) {
   return [...item.versions].sort(compareVersions).at(-1);
 }
+function repositoryUrl(item: Product) {
+  return `https://github.com/${encodeURIComponent(item.source.owner)}/${encodeURIComponent(item.source.repo)}`;
+}
+function releaseUrl(item: Product, version: Version) {
+  return `${repositoryUrl(item)}/releases/tag/${encodeURIComponent(version.release_tag)}`;
+}
+function openDetails(item: Product) {
+  selected.value = item;
+  expandedChangelog.value = null;
+}
+function toggleChangelog(item: Product, version: Version) {
+  const key = dependencyKey(item, version);
+  expandedChangelog.value = expandedChangelog.value === key ? null : key;
+}
 function dependencyKey(item: Product, version: Version) {
   return `${item.source.owner}/${item.source.repo}/${item.id}@${version.version}`;
 }
@@ -163,6 +179,10 @@ function humanBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
   return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+function progressPercent(progress: { received: number; total: number }) {
+  if (progress.total <= 0) return 0;
+  return Math.min(100, Math.max(0, (progress.received / progress.total) * 100));
 }
 function clearMessages() {
   error.value = "";
@@ -259,6 +279,13 @@ async function deleteLocalVersion(item: Product, version: Version) {
       owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
     });
     await load();
+  });
+}
+async function revealLocalVersion(item: Product, version: Version) {
+  await withBusy("reveal-local", async () => {
+    await post("/workflows/local/reveal", {
+      owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
+    });
   });
 }
 async function planDependencies(item: Product, version: Version) {
@@ -630,7 +657,7 @@ onBeforeUnmount(() => {
 
             <div v-if="visibleProducts.length" class="catalog">
               <article v-for="item in visibleProducts" :key="`${item.source.owner}/${item.source.repo}/${item.id}`"
-                class="workflow-card" tabindex="0" @click="selected = item" @keyup.enter="selected = item">
+                class="workflow-card" tabindex="0" @click="openDetails(item)" @keyup.enter="openDetails(item)">
                 <div class="preview-wrap">
                   <img v-if="latest(item)?.preview" class="card-preview" :src="latest(item)?.preview?.url" :alt="item.name" loading="lazy" />
                   <div v-else class="preview-placeholder"><LibraryBig :size="28" /></div>
@@ -641,7 +668,11 @@ onBeforeUnmount(() => {
                   <p>{{ item.summary }}</p>
                   <div class="tags"><span v-for="tag in item.tags" :key="tag">{{ tag }}</span></div>
                   <footer>
-                    <span><GitBranch :size="13" />{{ item.source.owner }}/{{ item.source.repo }}</span>
+                    <a class="source-origin" :href="repositoryUrl(item)" target="_blank" rel="noopener"
+                      :title="t('repositoryPage')" :aria-label="`${t('repositoryPage')}: ${item.source.owner}/${item.source.repo}`"
+                      @click.stop @keyup.enter.stop>
+                      <GitBranch :size="13" />{{ item.source.owner }}/{{ item.source.repo }}<ExternalLink :size="11" />
+                    </a>
                     <span v-if="item.downloaded_versions.length" class="downloaded"><Check :size="13" />{{ t("downloadedTag") }}</span>
                   </footer>
                 </div>
@@ -758,8 +789,11 @@ onBeforeUnmount(() => {
     <div v-if="selected" class="backdrop" @click.self="selected = null">
       <aside class="detail">
         <button class="icon-button close" :title="t('close')" :aria-label="t('close')" @click="selected = null"><X :size="18" /></button>
-        <p class="eyebrow"><GitBranch :size="14" />{{ selected.source.owner }}/{{ selected.source.repo }}</p>
-        <h1>{{ selected.name }}</h1><p class="detail-copy">{{ selected.description || selected.summary }}</p>
+        <a class="eyebrow repository-link" :href="repositoryUrl(selected)" target="_blank" rel="noopener"
+          :title="t('repositoryPage')">
+          <GitBranch :size="14" />{{ selected.source.owner }}/{{ selected.source.repo }}<ExternalLink :size="12" />
+        </a>
+        <h1>{{ selected.name }}</h1>
         <img v-if="latest(selected)?.preview" class="detail-preview" :src="latest(selected)?.preview?.url" :alt="selected.name" />
         <div class="tags"><span v-for="tag in selected.tags" :key="tag">{{ tag }}</span></div>
         <div v-if="status?.github.authenticated" class="manage-actions">
@@ -770,13 +804,31 @@ onBeforeUnmount(() => {
         <article v-for="version in [...selected.versions].sort(compareVersions).reverse()" :key="version.version" class="release">
           <div class="release-head"><strong>v{{ version.version }}</strong><span>{{ new Date(version.published_at).toLocaleDateString() }} · {{ humanBytes(version.package.size) }}</span></div>
           <p class="compatibility">ComfyUI {{ version.comfyui.minimum || "—" }} – {{ version.comfyui.maximum || "∞" }}</p>
-          <p class="changelog">{{ version.changelog }}</p>
+          <div class="release-links">
+            <button class="release-link" :aria-expanded="expandedChangelog === dependencyKey(selected, version)"
+              @click="toggleChangelog(selected, version)">
+              <ChevronRight :size="15" :class="{ expanded: expandedChangelog === dependencyKey(selected, version) }" />
+              {{ expandedChangelog === dependencyKey(selected, version) ? t("hideChangelog") : t("viewChangelog") }}
+            </button>
+            <a class="release-link" :href="releaseUrl(selected, version)" target="_blank" rel="noopener">
+              {{ t("releasePage") }}<ExternalLink :size="14" />
+            </a>
+          </div>
+          <Transition name="changelog">
+            <div v-if="expandedChangelog === dependencyKey(selected, version)" class="changelog-panel">
+              <span>{{ t("changelog") }}</span>
+              <p class="changelog">{{ version.changelog }}</p>
+            </div>
+          </Transition>
           <details v-if="version.custom_nodes.length"><summary>{{ t("dependencies") }} ({{ version.custom_nodes.length }})</summary><pre>{{ JSON.stringify(version.custom_nodes, null, 2) }}</pre></details>
           <details v-if="version.models.length"><summary>{{ t("models") }} ({{ version.models.length }})</summary><pre>{{ JSON.stringify(version.models, null, 2) }}</pre></details>
-          <div class="version-actions">
+          <div class="version-actions" :class="{ 'downloaded-actions': selected.downloaded_versions.includes(version.version) }">
             <button v-if="!selected.downloaded_versions.includes(version.version)" class="primary wide" :disabled="!!busy" @click="download(selected, version)"><DownloadIcon :size="17" />{{ t("download") }}</button>
-            <button v-else class="secondary wide" :disabled="!!busy" @click="deleteLocalVersion(selected, version)"><Check :size="17" />{{ t("downloadedTag") }} · {{ locale === "zh" ? "删除本地版本" : "Delete local version" }}</button>
-            <button v-if="version.custom_nodes.length" class="secondary wide" :disabled="!!busy" @click="planDependencies(selected, version)"><ListFilter :size="17" />{{ locale === "zh" ? "生成依赖计划" : "Plan dependencies" }}</button>
+            <template v-else>
+              <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, version)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
+              <button class="ghost wide danger-action" :disabled="!!busy" @click="deleteLocalVersion(selected, version)"><Trash2 :size="16" />{{ t("deleteLocal") }}</button>
+            </template>
+            <button v-if="version.custom_nodes.length" class="secondary wide dependency-action" :disabled="!!busy" @click="planDependencies(selected, version)"><ListFilter :size="17" />{{ locale === "zh" ? "生成依赖计划" : "Plan dependencies" }}</button>
           </div>
           <div v-if="dependencyPlans[dependencyKey(selected, version)]" class="dependency-plan">
             <div v-if="!status?.manager.available || !status?.manager.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("managerUnavailable") }}</span></div>
@@ -801,7 +853,13 @@ onBeforeUnmount(() => {
       <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
       <article v-for="item in operations" :key="item.id" class="operation">
         <div><strong>{{ item.kind }}</strong><span :class="`status ${item.status}`">{{ item.stage }}</span></div>
-        <progress v-if="item.progress?.total" :value="item.progress.received" :max="item.progress.total" />
+        <template v-if="item.status === 'running' && item.progress?.total">
+          <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+            :aria-valuenow="Math.round(progressPercent(item.progress))">
+            <i :style="{ width: `${progressPercent(item.progress)}%` }" />
+          </div>
+          <small class="progress-copy">{{ humanBytes(item.progress.received) }} / {{ humanBytes(item.progress.total) }}</small>
+        </template>
         <pre v-if="item.logs.length">{{ item.logs.join("\n") }}</pre>
       </article>
     </aside>

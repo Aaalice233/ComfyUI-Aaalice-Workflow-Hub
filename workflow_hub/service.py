@@ -4,6 +4,8 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +13,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .catalog import Catalog, Preview, Repository, WorkflowProduct, WorkflowVersion, merge_product
+from .catalog import Catalog, Preview, Repository, WorkflowProduct, WorkflowVersion, merge_product, normalize_version
 from .github import ContentFile, GitHubClient, GitHubError
 from .operations import Operation
 from .packages import build_package, install_workflow
@@ -87,6 +89,42 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
 
     await storage.update_json("subscriptions.json", [], mutate)
     return {"changed": remote is not None, "refreshed_at": refreshed_at}
+
+
+def find_catalog_updates(previous: Catalog, current: Catalog, owner: str, repo: str) -> list[dict[str, str]]:
+    previous_by_id = {product.id: product for product in previous.workflows}
+    updates: list[dict[str, str]] = []
+    for product in current.workflows:
+        old_product = previous_by_id.get(product.id)
+        if old_product is None or product.archived or not old_product.versions:
+            continue
+        old_latest = max(normalize_version(item.version) for item in old_product.versions)
+        newer = [item for item in product.versions if normalize_version(item.version) > old_latest]
+        if not newer:
+            continue
+        latest = max(newer, key=lambda item: normalize_version(item.version))
+        updates.append(
+            {
+                "owner": owner,
+                "repo": repo,
+                "workflow_id": product.id,
+                "name": product.name,
+                "version": latest.version,
+            }
+        )
+    return updates
+
+
+def reveal_in_file_manager(target: Path) -> None:
+    if not target.is_file():
+        raise ValueError("本地工作流文件不存在")
+    folder = str(target.parent)
+    if sys.platform == "win32":
+        os.startfile(folder)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", folder])
+    else:
+        subprocess.Popen(["xdg-open", folder])
 
 
 async def aggregate_catalog(storage: UserStorage) -> list[dict[str, Any]]:

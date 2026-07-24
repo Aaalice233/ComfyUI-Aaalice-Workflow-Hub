@@ -18,9 +18,11 @@ from .service import (
     add_subscription,
     aggregate_catalog,
     download_version,
+    find_catalog_updates,
     list_subscriptions,
     publish,
     refresh_subscription,
+    reveal_in_file_manager,
     update_product,
 )
 from .storage import UserStorage
@@ -30,7 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "web" / "app"
 MAX_JSON = 2 * 1024 * 1024
 _registered = False
-_startup_refreshed_users: set[str] = set()
+_startup_refresh_tasks: dict[str, asyncio.Task[list[dict[str, str]]]] = {}
+_startup_notifications_delivered: set[str] = set()
 
 
 def _origin(request: web.Request) -> str:
@@ -86,9 +89,15 @@ async def _run(operation: Operation, action: Awaitable[dict[str, Any]]) -> None:
         operation.logs.append(str(exc))
 
 
-async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> None:
+async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> list[dict[str, str]]:
+    cache = storage.cache_dir / f"{owner}-{repo}.json"
     try:
-        await refresh_subscription(storage, owner, repo)
+        previous = Catalog.model_validate_json(cache.read_bytes()) if cache.exists() else None
+        result = await refresh_subscription(storage, owner, repo)
+        if not result["changed"] or previous is None:
+            return []
+        current = Catalog.model_validate_json(cache.read_bytes())
+        return find_catalog_updates(previous, current, owner, repo)
     except Exception as exc:
         error_text = str(exc)
 
@@ -99,6 +108,22 @@ async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -
             return items
 
         await storage.update_json("subscriptions.json", [], record_error)
+        return []
+
+
+async def _refresh_startup_sources(storage: UserStorage) -> list[dict[str, str]]:
+    updates: list[dict[str, str]] = []
+    for source in await list_subscriptions(storage):
+        updates.extend(await _refresh_startup_source(storage, source["owner"], source["repo"]))
+    return updates
+
+
+def _startup_refresh(storage: UserStorage) -> asyncio.Task[list[dict[str, str]]]:
+    task = _startup_refresh_tasks.get(storage.key)
+    if task is None:
+        task = asyncio.create_task(_refresh_startup_sources(storage))
+        _startup_refresh_tasks[storage.key] = task
+    return task
 
 
 def register_routes() -> None:
@@ -131,10 +156,7 @@ def register_routes() -> None:
     @endpoint
     async def status(request: web.Request) -> web.StreamResponse:
         storage = UserStorage.from_request(request)
-        if storage.key not in _startup_refreshed_users:
-            _startup_refreshed_users.add(storage.key)
-            for source in await list_subscriptions(storage):
-                asyncio.create_task(_refresh_startup_source(storage, source["owner"], source["repo"]))
+        _startup_refresh(storage)
         credential = await tokens.get_record(storage.key)
         github_user = credential.get("user") if credential and isinstance(credential.get("user"), dict) else None
         manager = local_manager_status()
@@ -151,6 +173,17 @@ def register_routes() -> None:
                 },
             }
         )
+
+    @routes.post(f"{BASE}/update-notifications")
+    @endpoint
+    async def update_notifications(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        storage = UserStorage.from_request(request)
+        updates = await _startup_refresh(storage)
+        if storage.key in _startup_notifications_delivered:
+            return web.json_response({"items": []})
+        _startup_notifications_delivered.add(storage.key)
+        return web.json_response({"items": updates})
 
     @routes.get(f"{BASE}/subscriptions")
     @endpoint
@@ -233,6 +266,27 @@ def register_routes() -> None:
             ],
         )
         return web.json_response({"deleted": True})
+
+    @routes.post(f"{BASE}/workflows/local/reveal")
+    @endpoint
+    async def workflow_local_reveal(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        installed = await storage.read_json("installed.json", [])
+        key = (data["owner"], data["repo"], data["workflow_id"], data["version"])
+        record = next(
+            (
+                item
+                for item in installed
+                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) == key
+            ),
+            None,
+        )
+        if not record:
+            raise ValueError("未找到已记录版本")
+        target = ensure_within(storage.workflows_root, Path(record["path"]))
+        reveal_in_file_manager(target)
+        return web.json_response({"opened": True})
 
     @routes.post(f"{BASE}/workflows/dependencies/plan")
     @endpoint

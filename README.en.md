@@ -13,11 +13,11 @@ A public workflow subscription, publishing, and version-management extension for
 ## Version 1.0 capabilities
 
 - Subscribe to public GitHub repositories that contain `workflow-catalog.json`, then browse version history, release notes, node dependencies, and model declarations.
-- Download and verify Release packages by version. Every version is stored as a separate workflow file and never overwrites an older version.
+- Download and verify Release packages by version. Every version is stored as a separate workflow file, never overwrites an older version, and can be revealed in the system file manager.
 - Upload a local JSON workflow file, validate it through a guided flow, and publish it as a GitHub Release.
 - Sign in through GitHub App Device Flow. Credentials are stored in the system keyring when available and otherwise remain only in the current process.
 - Build custom-node dependency plans and, after explicit confirmation, send install, upgrade, or specifically selected downgrade tasks to ComfyUI-Manager in sequence.
-- Use a Chinese or English interface with real byte-level download progress, a lightweight activity drawer, and per-ComfyUI-user state and cache isolation.
+- Use a Chinese or English interface with startup workflow-update toasts, real byte-level download progress, a lightweight activity drawer, and per-ComfyUI-user state and cache isolation.
 
 Models are declared and displayed but never downloaded automatically. The extension supports public GitHub repositories only; it does not support private repositories, other Git services, or arbitrary download hosts. It never changes the node environment silently and has not been published to Comfy Registry.
 

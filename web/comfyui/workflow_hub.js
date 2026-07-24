@@ -24,6 +24,34 @@ function handleLocaleChange(event) {
   );
 }
 
+async function notifyWorkflowUpdates() {
+  try {
+    const response = await fetch("/workflow-hub/api/v1/update-notifications", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const { items } = await response.json();
+    if (!Array.isArray(items) || items.length === 0) return;
+
+    const isChinese = getComfyLocale()?.toLowerCase().startsWith("zh");
+    const visible = items.slice(0, 3).map((item) => `${item.name} v${item.version}`);
+    const remaining = items.length - visible.length;
+    const detail = remaining > 0
+      ? `${visible.join(isChinese ? "、" : ", ")}${isChinese ? ` 等 ${items.length} 个` : ` and ${remaining} more`}`
+      : visible.join(isChinese ? "、" : ", ");
+    app.extensionManager.toast.add({
+      severity: "info",
+      summary: isChinese ? `工作流中心有 ${items.length} 个新版本` : `${items.length} workflow update${items.length === 1 ? "" : "s"} available`,
+      detail,
+      life: 5000,
+    });
+  } catch (error) {
+    console.warn("[Aaalice Workflow Hub] Failed to check workflow updates.", error);
+  }
+}
+
 function installIconStyle() {
   if (document.getElementById(ICON_STYLE_ID)) return;
 
@@ -166,6 +194,9 @@ app.ui.settings.addEventListener("Comfy.Locale.change", handleLocaleChange);
 
 app.registerExtension({
   name: "Aaalice.WorkflowHub",
+  setup() {
+    void notifyWorkflowUpdates();
+  },
   actionBarButtons: [
     {
       icon: ICON_CLASS,

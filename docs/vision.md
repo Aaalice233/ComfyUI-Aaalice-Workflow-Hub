@@ -11,7 +11,7 @@ ComfyUI-Aaalice-Workflow-Hub 是 ComfyUI 内的双向工作流中心：作者在
 
 ## 1.0 边界
 
-1.0 已实现公共 GitHub 仓库订阅、GitHub Device Flow、Release 直接发布、目录更新、安全包下载、历史版本保留、节点依赖计划、双语界面和用户隔离存储。
+1.0 已实现公共 GitHub 仓库订阅、GitHub Device Flow、Release 直接发布、目录更新、启动时版本通知、安全包下载、历史版本保留、节点依赖计划、双语界面和用户隔离存储。
 
 1.0 不包含私有仓库、其他 Git 服务、模型自动扫描或下载、任意节点 Git 地址、遥测、侧边栏和 Comfy Registry 发布。ComfyUI 自身在工作流加载时仍负责缺失模型提示。
 
