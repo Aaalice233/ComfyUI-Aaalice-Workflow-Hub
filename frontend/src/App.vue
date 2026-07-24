@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import {
   Activity as ActivityIcon,
   AlertCircle,
@@ -7,12 +7,13 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   CircleUserRound,
-  CloudDownload,
   Compass,
   Download as DownloadIcon,
   ExternalLink,
-  FileCheck2,
+  FileJson,
   FileUp,
   FolderGit2,
   GitBranch,
@@ -25,14 +26,12 @@ import {
   RefreshCw,
   Search as SearchIcon,
   ShieldCheck,
-  Sparkles,
   Trash2,
   TriangleAlert,
   UploadCloud,
   X,
 } from "@lucide/vue";
 import { api, post, remove } from "./api";
-import { requestCanvas } from "./channel";
 import { locale, t, toggleLocale } from "./i18n";
 
 type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
@@ -69,6 +68,8 @@ const products = ref<Product[]>([]);
 const selected = ref<Product | null>(null);
 const sourceUrl = ref("");
 const sourceInput = ref<HTMLInputElement | null>(null);
+const searchInput = ref<HTMLInputElement | null>(null);
+const sourceComposerOpen = ref(false);
 const search = ref("");
 const filter = ref<"all" | "downloaded" | "updates" | "archived">("all");
 const busy = ref("");
@@ -76,15 +77,14 @@ const error = ref("");
 const notice = ref("");
 const drawer = ref(false);
 const operations = ref<Operation[]>([]);
-const saved = ref<{ name: string; path: string }[]>([]);
 const repositories = ref<{ full_name: string }[]>([]);
 const createRepositoryName = ref("");
 const drafts = ref<{ id: string; name: string; payload: ReturnType<typeof payload> }[]>([]);
 const pendingPublications = ref<{ tag: string }[]>([]);
-const selectedSaved = ref("");
-const sourceMode = ref<"canvas" | "saved">("canvas");
 const workflow = ref<Record<string, unknown> | null>(null);
 const workflowSourceName = ref("");
+const publishStep = ref(1);
+const furthestPublishStep = ref(1);
 const preview = ref<{ filename: string; data_base64: string } | null>(null);
 const device = ref<{ user_code: string; verification_uri: string; interval: number } | null>(null);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
@@ -124,12 +124,24 @@ const visibleProducts = computed(() => {
     return [item.name, item.summary, item.description, ...item.tags].join(" ").toLocaleLowerCase().includes(query);
   });
 });
-const downloadedCount = computed(() => products.value.filter((item) => item.downloaded_versions.length).length);
-const updateCount = computed(() => products.value.filter((item) => {
-  const version = latest(item)?.version;
-  return !!version && !item.downloaded_versions.includes(version);
-}).length);
-
+const canAdvancePublish = computed(() => {
+  if (publishStep.value === 1) return !!workflow.value;
+  if (publishStep.value === 2) {
+    return !!form.repository_url.trim() && !!form.repository_name.trim() && !!form.author.trim();
+  }
+  if (publishStep.value === 3) return !!form.id.trim() && !!form.name.trim() && !!form.summary.trim();
+  return true;
+});
+const canFinalizePublish = computed(() => {
+  if (!workflow.value || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$/.test(form.version.trim()) || !form.changelog.trim()) {
+    return false;
+  }
+  try {
+    return Array.isArray(JSON.parse(form.custom_nodes)) && Array.isArray(JSON.parse(form.models));
+  } catch {
+    return false;
+  }
+});
 function normalizeVersion(value: string): number[] {
   const parts = value.split(".").map(Number);
   return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
@@ -156,20 +168,33 @@ function clearMessages() {
   error.value = "";
   notice.value = "";
 }
+function handleWorkspaceShortcut(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null;
+  const editing = target?.matches("input, textarea, select, [contenteditable='true']");
+  if (event.key === "/" && !editing && tab.value === "subscribe") {
+    event.preventDefault();
+    searchInput.value?.focus();
+  } else if (event.key === "Escape" && document.activeElement === searchInput.value && search.value) {
+    search.value = "";
+  }
+}
+async function openSourceComposer() {
+  sourceComposerOpen.value = true;
+  await nextTick();
+  sourceInput.value?.focus();
+}
 async function load() {
   clearMessages();
-  const [s, sub, flows, ops, files] = await Promise.all([
+  const [s, sub, flows, ops] = await Promise.all([
     api<Status>("/status"),
     api<{ items: Source[] }>("/subscriptions"),
     api<{ items: Product[] }>("/workflows"),
     api<{ items: Operation[] }>("/operations"),
-    api<{ items: { name: string; path: string }[] }>("/publisher/saved-workflows"),
   ]);
   status.value = s;
   sources.value = sub.items;
   products.value = flows.items;
   operations.value = ops.items;
-  saved.value = files.items;
   if (s.github.authenticated) {
     const [repos, savedDrafts, pending] = await Promise.all([
       api<{ items: { full_name: string }[] }>("/github/repositories"),
@@ -274,27 +299,48 @@ async function pollOperations() {
     ]);
   }
 }
-async function getCanvas() {
-  await withBusy("canvas", async () => {
-    const snapshot = await requestCanvas();
-    workflow.value = snapshot.workflow;
-    workflowSourceName.value = snapshot.name;
-    if (!form.name) form.name = snapshot.name;
+async function readWorkflowFile(file: File) {
+  if (!file.name.toLocaleLowerCase().endsWith(".json") || file.size > 10 * 1024 * 1024) {
+    error.value = locale.value === "zh" ? "请选择不超过 10 MiB 的 JSON 工作流文件。" : "Choose a JSON workflow file no larger than 10 MiB.";
+    return;
+  }
+  await withBusy("workflow-file", async () => {
+    const parsed = JSON.parse(await file.text()) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(locale.value === "zh" ? "工作流文件内容不是有效的 JSON 对象。" : "The workflow file is not a valid JSON object.");
+    }
+    workflow.value = parsed as Record<string, unknown>;
+    workflowSourceName.value = file.name;
+    if (!form.name) form.name = file.name.replace(/\.json$/i, "");
+    furthestPublishStep.value = Math.max(furthestPublishStep.value, 2);
   });
-  if (!workflow.value && !error.value) error.value = t.value("canvasUnavailable");
 }
-async function loadSaved() {
-  if (!selectedSaved.value) return;
-  await withBusy("saved", async () => {
-    const result = await post<{ workflow: Record<string, unknown>; name: string }>("/publisher/load-workflow", { path: selectedSaved.value });
-    workflow.value = result.workflow;
-    workflowSourceName.value = result.name;
-    if (!form.name) form.name = result.name;
-  });
+async function chooseWorkflowFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file) await readWorkflowFile(file);
+  input.value = "";
+}
+async function dropWorkflowFile(event: DragEvent) {
+  const file = event.dataTransfer?.files?.[0];
+  if (file) await readWorkflowFile(file);
+}
+function goToPublishStep(step: number) {
+  if (step < 1 || step > 4 || step > furthestPublishStep.value) return;
+  publishStep.value = step;
+}
+function nextPublishStep() {
+  if (!canAdvancePublish.value || publishStep.value >= 4) return;
+  const next = publishStep.value + 1;
+  furthestPublishStep.value = Math.max(furthestPublishStep.value, next);
+  publishStep.value = next;
+}
+function previousPublishStep() {
+  if (publishStep.value > 1) publishStep.value -= 1;
 }
 async function scanDependencies() {
   await withBusy("scan", async () => {
-    if (!workflow.value) throw new Error(t.value("canvasUnavailable"));
+    if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
     const result = await post<{ items: Record<string, unknown>[] }>("/publisher/scan-dependencies", { workflow: workflow.value });
     form.custom_nodes = JSON.stringify(result.items, null, 2);
     notice.value = locale.value === "zh" ? `已扫描 ${result.items.length} 个节点依赖，请人工复核。` : `Found ${result.items.length} node dependencies. Review before publishing.`;
@@ -358,14 +404,14 @@ function payload() {
 }
 async function validatePublish() {
   await withBusy("validate", async () => {
-    if (!workflow.value) throw new Error(t.value("canvasUnavailable"));
+    if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
     await post("/publisher/validate", payload());
     notice.value = locale.value === "zh" ? "校验通过，可以发布。" : "Validation passed. Ready to publish.";
   });
 }
 async function publishNow() {
   await withBusy("publish", async () => {
-    if (!workflow.value) throw new Error(t.value("canvasUnavailable"));
+    if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
     await post("/publisher/validate", payload());
     const result = await post<{ operation_id: string }>("/publisher/publish", payload());
     notice.value = `${t.value("activities")}: ${result.operation_id}`;
@@ -402,6 +448,8 @@ function loadDraft(draft: { payload: ReturnType<typeof payload> }) {
   workflow.value = value.workflow;
   preview.value = value.preview;
   workflowSourceName.value = value.product.name;
+  publishStep.value = 2;
+  furthestPublishStep.value = 4;
 }
 async function resumePending(tag: string) {
   await withBusy("resume", async () => {
@@ -464,10 +512,12 @@ async function logout() {
   await load();
 }
 onMounted(async () => {
+  document.addEventListener("keydown", handleWorkspaceShortcut);
   try { await load(); await pollOperations(); }
   catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
 });
 onBeforeUnmount(() => {
+  document.removeEventListener("keydown", handleWorkspaceShortcut);
   clearTimeout(operationTimer);
   clearTimeout(loginTimer);
 });
@@ -518,19 +568,6 @@ onBeforeUnmount(() => {
     </aside>
 
     <section class="workspace">
-      <header class="workspace-header">
-        <div>
-          <p class="eyebrow"><Sparkles :size="14" />{{ tab === "subscribe" ? t("libraryLabel") : t("publisherLabel") }}</p>
-          <h1>{{ tab === "subscribe" ? t("subscribeTitle") : t("publishTitle") }}</h1>
-          <p>{{ tab === "subscribe" ? t("subscribeDescription") : t("publishDescription") }}</p>
-        </div>
-        <div v-if="tab === 'subscribe'" class="header-metrics">
-          <div><strong>{{ products.length }}</strong><span>{{ t("workflowsLabel") }}</span></div>
-          <div><strong>{{ downloadedCount }}</strong><span>{{ t("downloaded") }}</span></div>
-          <div><strong>{{ updateCount }}</strong><span>{{ t("updates") }}</span></div>
-        </div>
-      </header>
-
       <main class="workspace-body">
         <div v-if="error" class="message error">
           <AlertCircle :size="18" /><span>{{ error }}</span><button :aria-label="t('close')" @click="error = ''"><X :size="17" /></button>
@@ -544,39 +581,50 @@ onBeforeUnmount(() => {
         <div v-if="status && !status.github.configured && tab === 'publish'" class="message warning">
           <TriangleAlert :size="18" /><span>{{ t("githubNotConfigured") }}</span>
         </div>
+        <div v-if="device" class="device">
+          <div><GitBranch :size="18" /><strong>GitHub Device Flow</strong></div>
+          <code>{{ device.user_code }}</code>
+          <a :href="device.verification_uri" target="_blank" rel="noopener">{{ device.verification_uri }}<ExternalLink :size="14" /></a>
+        </div>
 
         <template v-if="tab === 'subscribe'">
-          <section class="source-command">
-            <div class="section-intro">
-              <span class="section-icon"><Plus :size="19" /></span>
-              <div><h2>{{ t("addSource") }}</h2><p>{{ t("addSourceHint") }}</p></div>
-            </div>
-            <div class="source-form">
-              <GitBranch :size="18" />
-              <input ref="sourceInput" v-model="sourceUrl" :placeholder="t('sourcePlaceholder')" @keyup.enter="addSource" />
-              <button class="primary" :disabled="!sourceUrl || !!busy" @click="addSource">
-                <Plus :size="17" />{{ t("add") }}
-              </button>
-            </div>
-            <div v-if="sources.length" class="source-chips">
-              <div v-for="item in sources" :key="item.url" class="source-chip">
-                <FolderGit2 :size="15" />
-                <span>{{ item.owner }}/{{ item.repo }}</span>
-                <button :title="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="14" /></button>
-                <button :title="t('remove')" @click="removeSource(item)"><Trash2 :size="14" /></button>
-              </div>
-            </div>
-          </section>
-
-          <section class="catalog-section">
+          <section class="library-panel">
             <div class="catalog-toolbar">
               <label class="search-field">
                 <SearchIcon :size="18" />
-                <input v-model="search" :placeholder="t('search')" />
+                <input ref="searchInput" v-model="search" :placeholder="t('search')" />
+                <kbd>/</kbd>
               </label>
-              <div class="segmented" role="group" :aria-label="locale === 'zh' ? '工作流筛选' : 'Workflow filters'">
-                <button v-for="item in (['all','downloaded','updates','archived'] as const)" :key="item"
-                  :class="{ active: filter === item }" @click="filter = item">{{ t(item) }}</button>
+              <div class="toolbar-actions">
+                <div class="segmented" role="group" :aria-label="locale === 'zh' ? '工作流筛选' : 'Workflow filters'">
+                  <button v-for="item in (['all','downloaded','updates','archived'] as const)" :key="item"
+                    :class="{ active: filter === item }" @click="filter = item">{{ t(item) }}</button>
+                </div>
+                <button class="source-toggle" :class="{ active: sourceComposerOpen }" @click="sourceComposerOpen ? sourceComposerOpen = false : openSourceComposer()">
+                  <FolderGit2 :size="16" /><span>{{ t("sourcesLabel") }}</span><i>{{ sources.length }}</i>
+                </button>
+              </div>
+            </div>
+
+            <div v-if="sourceComposerOpen" class="source-composer">
+              <div class="source-composer-head">
+                <strong>{{ t("addSource") }}</strong>
+                <button class="icon-button" :aria-label="t('close')" @click="sourceComposerOpen = false"><X :size="16" /></button>
+              </div>
+              <div class="source-form">
+                <GitBranch :size="18" />
+                <input ref="sourceInput" v-model="sourceUrl" :placeholder="t('sourcePlaceholder')" @keyup.enter="addSource" />
+                <button class="primary" :disabled="!sourceUrl || !!busy" @click="addSource">
+                  <Plus :size="17" />{{ t("add") }}
+                </button>
+              </div>
+              <div v-if="sources.length" class="source-chips">
+                <div v-for="item in sources" :key="item.url" class="source-chip" :class="{ invalid: item.error }" :title="item.error || item.url">
+                  <AlertCircle v-if="item.error" :size="15" /><FolderGit2 v-else :size="15" />
+                  <span>{{ item.owner }}/{{ item.repo }}</span>
+                  <button :title="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="14" /></button>
+                  <button :title="t('remove')" @click="removeSource(item)"><Trash2 :size="14" /></button>
+                </div>
               </div>
             </div>
 
@@ -604,7 +652,7 @@ onBeforeUnmount(() => {
               <span class="empty-orbit"><PackageOpen :size="32" /></span>
               <h2>{{ t("emptyTitle") }}</h2>
               <p>{{ search || filter !== "all" ? t("emptyFiltered") : t("noWorkflows") }}</p>
-              <button v-if="!search && filter === 'all'" class="secondary" @click="sourceInput?.focus()">
+              <button v-if="!search && filter === 'all'" class="secondary" @click="openSourceComposer">
                 <Plus :size="17" />{{ t("addSource") }}
               </button>
             </div>
@@ -612,48 +660,47 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-else>
-          <div class="publish-grid">
-            <aside class="publish-sidebar">
-              <section class="panel source-panel">
-                <div class="panel-heading">
-                  <span class="step">01</span>
-                  <div><h2>{{ t("source") }}</h2><p>{{ locale === "zh" ? "选择要发布的工作流" : "Choose the workflow to publish" }}</p></div>
-                </div>
-                <div class="choice">
-                  <button :class="{ active: sourceMode === 'canvas' }" @click="sourceMode = 'canvas'">{{ t("currentCanvas") }}</button>
-                  <button :class="{ active: sourceMode === 'saved' }" @click="sourceMode = 'saved'">{{ t("savedWorkflow") }}</button>
-                </div>
-                <button v-if="sourceMode === 'canvas'" class="secondary wide" :disabled="!!busy" @click="getCanvas">
-                  <CloudDownload :size="17" />{{ t("requestCanvas") }}
-                </button>
-                <div v-else class="saved-picker">
-                  <select v-model="selectedSaved"><option value="">{{ t("selectFile") }}</option><option v-for="item in saved" :key="item.path" :value="item.path">{{ item.name }}</option></select>
-                  <button class="secondary" @click="loadSaved"><FileCheck2 :size="17" /></button>
-                </div>
-                <div v-if="workflow" class="ready-card">
-                  <CheckCircle2 :size="18" /><span><strong>{{ locale === "zh" ? "已就绪" : "Ready" }}</strong><small>{{ workflowSourceName }}</small></span>
-                </div>
-                <button v-if="workflow" class="ghost wide" :disabled="!!busy" @click="scanDependencies">
-                  <ListFilter :size="17" />{{ locale === "zh" ? "扫描节点依赖" : "Scan node dependencies" }}
-                </button>
-              </section>
+          <div class="publish-flow">
+            <div v-if="drafts.length || pendingPublications.length" class="publish-utilities">
+              <details v-if="drafts.length"><summary>{{ locale === "zh" ? "草稿" : "Drafts" }}</summary>
+                <button v-for="draft in drafts" :key="draft.id" class="ghost" @click="loadDraft(draft)">{{ draft.name }}</button>
+              </details>
+              <details v-if="pendingPublications.length"><summary>{{ locale === "zh" ? "待同步发布" : "Pending publications" }}</summary>
+                <button v-for="item in pendingPublications" :key="item.tag" class="ghost" @click="resumePending(item.tag)">{{ item.tag }}</button>
+              </details>
+            </div>
 
-              <section v-if="drafts.length || pendingPublications.length" class="panel compact-panel">
-                <details v-if="drafts.length"><summary>{{ locale === "zh" ? "草稿" : "Drafts" }}</summary>
-                  <button v-for="draft in drafts" :key="draft.id" class="ghost wide" @click="loadDraft(draft)">{{ draft.name }}</button>
-                </details>
-                <details v-if="pendingPublications.length"><summary>{{ locale === "zh" ? "待同步发布" : "Pending publications" }}</summary>
-                  <button v-for="item in pendingPublications" :key="item.tag" class="ghost wide" @click="resumePending(item.tag)">{{ item.tag }}</button>
-                </details>
-              </section>
-            </aside>
+            <section class="panel publish-wizard">
+              <ol class="wizard-steps">
+                <li v-for="(label, index) in [t('source'), t('repository'), t('workflowInfo'), t('version')]" :key="label">
+                  <button
+                    :class="{ active: publishStep === index + 1, complete: furthestPublishStep > index + 1 }"
+                    :disabled="furthestPublishStep < index + 1"
+                    @click="goToPublishStep(index + 1)"
+                  >
+                    <span><Check v-if="furthestPublishStep > index + 1" :size="14" /><template v-else>{{ index + 1 }}</template></span>
+                    <strong>{{ label }}</strong>
+                  </button>
+                </li>
+              </ol>
 
-            <section class="panel form-panel">
-              <div class="form-section">
-                <div class="panel-heading">
-                  <span class="step">02</span>
-                  <div><h2>{{ t("repository") }}</h2><p>{{ t("publicOnly") }}</p></div>
+              <div class="wizard-content">
+                <div v-if="publishStep === 1" class="wizard-page source-step">
+                  <label class="workflow-dropzone" @dragover.prevent @drop.prevent="dropWorkflowFile">
+                    <span class="upload-icon"><FileJson :size="30" /></span>
+                    <strong>{{ locale === "zh" ? "选择工作流文件" : "Choose a workflow file" }}</strong>
+                    <small>{{ locale === "zh" ? "点击选择或拖入 JSON，最大 10 MiB" : "Click or drop a JSON file, up to 10 MiB" }}</small>
+                    <input class="file-input" type="file" accept="application/json,.json" @change="chooseWorkflowFile" />
+                  </label>
+                  <div v-if="workflow" class="selected-file">
+                    <div><FileJson :size="18" /><span><strong>{{ workflowSourceName }}</strong><small>{{ locale === "zh" ? "文件已读取" : "File loaded" }}</small></span></div>
+                    <button class="secondary" :disabled="!!busy" @click="scanDependencies">
+                      <ListFilter :size="16" />{{ locale === "zh" ? "扫描节点依赖" : "Scan dependencies" }}
+                    </button>
+                  </div>
                 </div>
+
+                <div v-else-if="publishStep === 2" class="wizard-page">
                 <label>{{ t("repository") }}
                   <select v-if="repositories.length" v-model="form.repository_url">
                     <option value="">https://github.com/owner/repo</option>
@@ -661,6 +708,7 @@ onBeforeUnmount(() => {
                   </select>
                   <input v-else v-model="form.repository_url" placeholder="https://github.com/owner/repo" />
                 </label>
+                <p class="field-note">{{ t("publicOnly") }}</p>
                 <div v-if="status?.github.authenticated" class="inline create-repo">
                   <input v-model="createRepositoryName" :placeholder="locale === 'zh' ? '新公共仓库名称' : 'New public repository name'" />
                   <button class="secondary" :disabled="!createRepositoryName" @click="createRepository">
@@ -669,24 +717,16 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="two"><label>{{ t("repositoryName") }}<input v-model="form.repository_name" /></label><label>{{ t("author") }}<input v-model="form.author" /></label></div>
                 <label>{{ t("repositoryDescription") }}<textarea v-model="form.repository_description" rows="2" /></label>
-              </div>
-
-              <div class="form-section">
-                <div class="panel-heading">
-                  <span class="step">03</span>
-                  <div><h2>{{ t("workflowInfo") }}</h2><p>{{ locale === "zh" ? "用于订阅者发现和理解工作流" : "Help subscribers discover and understand it" }}</p></div>
                 </div>
+
+                <div v-else-if="publishStep === 3" class="wizard-page">
                 <div class="two"><label>{{ t("workflowId") }}<input v-model="form.id" placeholder="portrait-basic" /></label><label>{{ t("name") }}<input v-model="form.name" /></label></div>
                 <label>{{ t("summary") }}<input v-model="form.summary" /></label>
                 <label>{{ t("description") }}<textarea v-model="form.description" rows="4" /></label>
                 <label>{{ t("tags") }}<input v-model="form.tags" /></label>
-              </div>
-
-              <div class="form-section">
-                <div class="panel-heading">
-                  <span class="step">04</span>
-                  <div><h2>{{ t("version") }}</h2><p>{{ locale === "zh" ? "声明兼容范围与本次更新" : "Declare compatibility and release changes" }}</p></div>
                 </div>
+
+                <div v-else class="wizard-page">
                 <div class="three"><label>{{ t("version") }}<input v-model="form.version" /></label><label>{{ t("minComfy") }}<input v-model="form.minimum" /></label><label>{{ t("maxComfy") }}<input v-model="form.maximum" /></label></div>
                 <label>{{ t("releaseNotes") }}<textarea v-model="form.changelog" rows="5" /></label>
                 <label class="file-field">{{ locale === "zh" ? "预览图（PNG/WebP，最大 1 MiB）" : "Preview (PNG/WebP, max 1 MiB)" }}
@@ -697,11 +737,19 @@ onBeforeUnmount(() => {
                   <details><summary>{{ t("modelDeps") }}</summary><textarea v-model="form.models" class="code" rows="8" /></details>
                 </div>
               </div>
+              </div>
 
-              <div class="publish-actions">
-                <button class="ghost" :disabled="!!busy" @click="saveDraft">{{ locale === "zh" ? "保存草稿" : "Save draft" }}</button>
-                <button class="secondary" :disabled="!!busy" @click="validatePublish"><ShieldCheck :size="17" />{{ t("validate") }}</button>
-                <button class="primary" :disabled="!!busy || !status?.github.authenticated" @click="publishNow"><UploadCloud :size="17" />{{ t("publishNow") }}</button>
+              <div class="wizard-actions">
+                <button v-if="publishStep > 1" class="ghost" @click="previousPublishStep"><ChevronLeft :size="17" />{{ locale === "zh" ? "上一步" : "Back" }}</button>
+                <span />
+                <button v-if="publishStep < 4" class="primary" :disabled="!canAdvancePublish" @click="nextPublishStep">
+                  {{ locale === "zh" ? "下一步" : "Continue" }}<ChevronRight :size="17" />
+                </button>
+                <template v-else>
+                  <button class="ghost" :disabled="!!busy || !canFinalizePublish" @click="saveDraft">{{ locale === "zh" ? "保存草稿" : "Save draft" }}</button>
+                  <button class="secondary" :disabled="!!busy || !canFinalizePublish" @click="validatePublish"><ShieldCheck :size="17" />{{ t("validate") }}</button>
+                  <button class="primary" :disabled="!!busy || !canFinalizePublish || !status?.github.authenticated" @click="publishNow"><UploadCloud :size="17" />{{ t("publishNow") }}</button>
+                </template>
               </div>
             </section>
           </div>
@@ -760,10 +808,5 @@ onBeforeUnmount(() => {
       </article>
     </aside>
 
-    <div v-if="device" class="device">
-      <div><GitBranch :size="20" /><strong>GitHub Device Flow</strong></div>
-      <code>{{ device.user_code }}</code>
-      <a :href="device.verification_uri" target="_blank" rel="noopener">{{ device.verification_uri }}<ExternalLink :size="14" /></a>
-    </div>
   </div>
 </template>

@@ -4,9 +4,9 @@
 
 确认 ComfyUI Frontend 为 `1.33.9+`，重启 ComfyUI，并在启动日志中检查插件 Python 导入错误。插件使用 `WEB_DIRECTORY` 加载 `web/comfyui/workflow_hub.js`。
 
-## 当前画布不可用
+## 工作流文件无法上传
 
-当前画布通过同源 `BroadcastChannel` 按需读取。保持原 ComfyUI 页面打开，再点击“读取当前画布”；原页面关闭时请选择已保存工作流。
+发布入口只接受不超过 10 MiB 的 JSON 文件。确认文件扩展名为 `.json`、内容是合法 JSON 对象，并且文件没有被其他程序占用。
 
 ## GitHub 登录无法开始
 

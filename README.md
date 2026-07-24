@@ -2,6 +2,10 @@
   <img src="assets/banner.png" alt="ComfyUI-Aaalice-Workflow-Hub" width="100%">
 </p>
 
+<p align="center">
+  <strong>简体中文</strong> · <a href="README.en.md">English</a>
+</p>
+
 # ComfyUI-Aaalice-Workflow-Hub
 
 面向 ComfyUI 的公共工作流订阅、发布和版本管理插件。作者和订阅者使用同一个插件；入口是 ComfyUI 顶栏的“工作流中心”按钮，不创建侧边栏。
@@ -10,7 +14,7 @@
 
 - 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，浏览历史版本、更新日志、节点依赖和模型声明。
 - 按版本下载并校验 Release 包；每个版本保存为独立工作流文件，绝不覆盖旧版本。
-- 从当前画布或用户目录中的已保存工作流直接发布 GitHub Release。
+- 上传本地 JSON 工作流文件，通过分步引导校验并发布 GitHub Release。
 - 使用 GitHub App Device Flow 登录；凭据优先保存在系统 keyring，keyring 不可用时仅保留在当前进程。
 - 生成自定义节点依赖计划，并在用户二次确认后将安装、升级或明确选择的降级任务串行交给 ComfyUI-Manager。
 - 中英文界面、真实下载字节进度、轻量活动抽屉、按 ComfyUI 用户隔离的状态和缓存。

@@ -1,6 +1,5 @@
 import { app } from "../../scripts/app.js";
 
-const CHANNEL_NAME = "aaalice-workflow-hub";
 const PAGE = "/workflow-hub";
 const TOOLTIP = "打开工作流中心（Shift+点击在新窗口打开） / Open Workflow Hub";
 const ICON_CLASS = "aaalice-workflow-hub-icon";
@@ -201,19 +200,6 @@ function openHub(event) {
   }
   openEmbeddedHub();
 }
-
-const channel = new BroadcastChannel(CHANNEL_NAME);
-channel.onmessage = (event) => {
-  if (event.data?.type !== "WORKFLOW_HUB_CANVAS_REQUEST") return;
-  try {
-    const workflow = app.graph?.serialize?.();
-    if (!workflow) return;
-    const name = app.graph?.extra?.workflowName || document.title?.replace(/\s*-\s*ComfyUI.*$/, "") || "workflow";
-    channel.postMessage({ type: "WORKFLOW_HUB_CANVAS_RESPONSE", workflow, name });
-  } catch (error) {
-    console.error("Workflow Hub: unable to serialize current canvas", error);
-  }
-};
 
 installIconStyle();
 
