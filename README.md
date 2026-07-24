@@ -21,7 +21,7 @@
 
 1. 将本仓库放入 `ComfyUI/custom_nodes/`，安装 `pyproject.toml` 中的 Python 依赖。
 2. 重启 ComfyUI，确认 Frontend 为 `1.33.9+`，推荐使用 Manager `4.2.1+`。
-3. 点击顶栏“工作流中心”；普通点击打开或聚焦独立页面，`Shift+点击` 打开新窗口。
+3. 点击顶栏“工作流中心”；普通点击在 ComfyUI 内打开非全屏面板，`Shift+点击` 打开独立窗口。
 4. 订阅无需 GitHub 登录；发布时按页面提示使用 Device Flow 登录。
 
 运行时数据写入当前 ComfyUI 用户数据目录的 `workflow_hub/`，下载文件位于：

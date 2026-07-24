@@ -5,6 +5,12 @@ export const locale = ref<"zh" | "en">((localStorage.getItem("workflow-hub-local
 const messages = {
   zh: {
     title: "工作流中心", subscribe: "订阅工作流", publish: "发布工作流", addSource: "添加订阅源",
+    libraryLabel: "工作流资料库", publisherLabel: "发布工作台",
+    subscribeTitle: "发现并管理工作流", publishTitle: "整理并发布工作流",
+    subscribeDescription: "从可信 GitHub 仓库同步、筛选和管理可复用工作流。",
+    publishDescription: "从当前画布或本地文件创建结构清晰、可追踪的公开版本。",
+    addSourceHint: "粘贴公共 GitHub 仓库地址，目录会自动同步。",
+    workflowsLabel: "工作流", emptyTitle: "资料库等待首次同步", emptyFiltered: "没有符合当前搜索或筛选条件的工作流。",
     sourcePlaceholder: "https://github.com/owner/repo", add: "添加", refresh: "刷新", remove: "移除",
     search: "搜索名称、说明或标签", downloaded: "已下载", updates: "有更新", archived: "已归档",
     all: "全部", noWorkflows: "还没有工作流。先添加一个公共 GitHub 订阅源。",
@@ -24,6 +30,12 @@ const messages = {
   },
   en: {
     title: "Workflow Hub", subscribe: "Subscribe", publish: "Publish", addSource: "Add subscription",
+    libraryLabel: "Workflow library", publisherLabel: "Publishing desk",
+    subscribeTitle: "Discover and manage workflows", publishTitle: "Prepare and publish workflows",
+    subscribeDescription: "Sync, filter, and manage reusable workflows from trusted GitHub repositories.",
+    publishDescription: "Create clear, traceable public releases from the current canvas or a saved workflow.",
+    addSourceHint: "Paste a public GitHub repository URL to keep its catalog in sync.",
+    workflowsLabel: "Workflows", emptyTitle: "Your library is ready for its first sync", emptyFiltered: "No workflows match the current search or filter.",
     sourcePlaceholder: "https://github.com/owner/repo", add: "Add", refresh: "Refresh", remove: "Remove",
     search: "Search names, descriptions, or tags", downloaded: "Downloaded", updates: "Updates", archived: "Archived",
     all: "All", noWorkflows: "No workflows yet. Add a public GitHub subscription.",

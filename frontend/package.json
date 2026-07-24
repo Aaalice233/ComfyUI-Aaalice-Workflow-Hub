@@ -9,6 +9,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@lucide/vue": "^1.26.0",
     "vue": "^3.5.17"
   },
   "devDependencies": {
