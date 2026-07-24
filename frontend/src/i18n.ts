@@ -1,6 +1,12 @@
 import { computed, ref } from "vue";
 
-export const locale = ref<"zh" | "en">((localStorage.getItem("workflow-hub-locale") as "zh" | "en") || "zh");
+export type Locale = "zh" | "en";
+
+export function resolveLocale(value?: string | null): Locale {
+  return value?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+export const locale = ref<Locale>(resolveLocale(navigator.language));
 
 const messages = {
   zh: {
@@ -45,8 +51,22 @@ const messages = {
 
 export type MessageKey = keyof typeof messages.zh;
 export const t = computed(() => (key: MessageKey) => messages[locale.value][key]);
-export function toggleLocale() {
-  locale.value = locale.value === "zh" ? "en" : "zh";
-  localStorage.setItem("workflow-hub-locale", locale.value);
+
+export function setLocale(value?: string | null) {
+  locale.value = resolveLocale(value);
   document.documentElement.lang = locale.value === "zh" ? "zh-CN" : "en";
+}
+
+export async function syncLocaleFromComfy() {
+  const queryLocale = new URLSearchParams(window.location.search).get("locale");
+  if (queryLocale) setLocale(queryLocale);
+
+  try {
+    const response = await fetch("/api/settings/Comfy.Locale");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const comfyLocale: unknown = await response.json();
+    if (typeof comfyLocale === "string" && comfyLocale) setLocale(comfyLocale);
+  } catch (error) {
+    console.warn("Unable to read ComfyUI locale; using the browser locale.", error);
+  }
 }

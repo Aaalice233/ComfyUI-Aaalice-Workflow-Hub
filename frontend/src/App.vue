@@ -17,7 +17,6 @@ import {
   FileUp,
   FolderGit2,
   GitBranch,
-  Languages,
   LibraryBig,
   ListFilter,
   LogOut,
@@ -32,7 +31,7 @@ import {
   X,
 } from "@lucide/vue";
 import { api, post, remove } from "./api";
-import { locale, t, toggleLocale } from "./i18n";
+import { locale, t } from "./i18n";
 
 type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
 type Version = {
@@ -553,10 +552,6 @@ onBeforeUnmount(() => {
         <button class="rail-action" :title="t('activities')" :aria-label="t('activities')" @click="drawer = !drawer">
           <ActivityIcon :size="17" /><span>{{ t("activities") }}</span>
           <i v-if="operations.some(o => o.status === 'running')" class="pulse" />
-        </button>
-        <button class="rail-action" :title="locale === 'zh' ? '切换为 English' : 'Switch to 简体中文'"
-          :aria-label="locale === 'zh' ? '切换为 English' : 'Switch to 简体中文'" @click="toggleLocale">
-          <Languages :size="17" /><span>{{ locale === "zh" ? "English" : "简体中文" }}</span>
         </button>
         <button v-if="status?.github.authenticated" class="account-card" :title="t('logout')" :aria-label="t('logout')" @click="logout">
           <img v-if="status.github.user?.avatar_url" :src="status.github.user.avatar_url" alt="" />

@@ -7,6 +7,23 @@ const ICON_STYLE_ID = "aaalice-workflow-hub-icon-style";
 const MODAL_ID = "aaalice-workflow-hub-modal";
 const LIBRARY_BIG_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="18" x="3" y="3" rx="1"/><path d="M7 3v18"/><path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z"/></svg>`;
 
+function getComfyLocale() {
+  return app.ui.settings.getSettingValue("Comfy.Locale");
+}
+
+function getHubUrl() {
+  const params = new URLSearchParams({ locale: getComfyLocale() });
+  return `${PAGE}?${params}`;
+}
+
+function handleLocaleChange(event) {
+  const frame = document.querySelector(`#${MODAL_ID} .aaalice-workflow-hub-frame`);
+  frame?.contentWindow?.postMessage(
+    { type: "AAALICE_WORKFLOW_HUB_LOCALE", locale: event.detail?.value },
+    window.location.origin,
+  );
+}
+
 function installIconStyle() {
   if (document.getElementById(ICON_STYLE_ID)) return;
 
@@ -118,7 +135,7 @@ function openEmbeddedHub() {
 
   const frame = document.createElement("iframe");
   frame.className = "aaalice-workflow-hub-frame";
-  frame.src = PAGE;
+  frame.src = getHubUrl();
   frame.title = "工作流中心 / Workflow Hub";
   frame.addEventListener("load", () => {
     frame.contentDocument?.addEventListener("keydown", handleHubKeydown, true);
@@ -136,7 +153,7 @@ function openEmbeddedHub() {
 }
 
 function openHub(event) {
-  const url = `${window.location.origin}${PAGE}`;
+  const url = `${window.location.origin}${getHubUrl()}`;
   if (event?.shiftKey) {
     window.open(url, "_blank", "width=1240,height=840,resizable=yes,scrollbars=yes,status=yes");
     return;
@@ -145,6 +162,7 @@ function openHub(event) {
 }
 
 installIconStyle();
+app.ui.settings.addEventListener("Comfy.Locale.change", handleLocaleChange);
 
 app.registerExtension({
   name: "Aaalice.WorkflowHub",
