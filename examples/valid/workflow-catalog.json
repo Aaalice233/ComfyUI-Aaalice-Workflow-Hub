@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "repository": {
+    "name": "Aaalice Example Workflows",
+    "author": "Aaalice233",
+    "description": "Workflow Hub protocol example"
+  },
+  "workflows": [
+    {
+      "id": "portrait-basic",
+      "name": "Portrait Basic",
+      "summary": "A minimal portrait workflow",
+      "description": "Demonstrates a complete catalog entry.",
+      "tags": ["portrait"],
+      "archived": false,
+      "versions": [
+        {
+          "version": "1.12",
+          "published_at": "2026-07-24T00:00:00Z",
+          "release_tag": "portrait-basic-v1.12",
+          "changelog": "Initial stable release.",
+          "comfyui": { "minimum": "0.28.3", "maximum": null },
+          "package": {
+            "url": "https://github.com/Aaalice233/example/releases/download/portrait-basic-v1.12/portrait-basic-v1.12.zip",
+            "size": 1024,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          "preview": null,
+          "custom_nodes": [
+            {
+              "registry_id": "comfyui-impact-pack",
+              "name": "ComfyUI Impact Pack",
+              "version": "8.8.1",
+              "required": true,
+              "manual": false,
+              "source_url": null
+            }
+          ],
+          "models": [
+            {
+              "name": "Example checkpoint",
+              "type": "checkpoints",
+              "filename": "example.safetensors",
+              "source_url": "https://github.com/Aaalice233/example",
+              "sha256": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

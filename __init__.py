@@ -1,5 +1,5 @@
-"""ComfyUI entry point for Aaalice Workflow Hub."""
+"""ComfyUI entry point for ComfyUI-Aaalice-Workflow-Hub."""
 
-from .workflow_hub import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .workflow_hub import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, WEB_DIRECTORY
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

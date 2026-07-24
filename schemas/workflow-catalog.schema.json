@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub/schemas/workflow-catalog.schema.json",
+  "title": "Aaalice Workflow Hub Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "workflows"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "author"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "author": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 500 }
+      }
+    },
+    "workflows": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/workflow" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(\\.(0|[1-9][0-9]*))?$" },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "size", "sha256"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "size": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "registry_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 150 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "version": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+        "required": { "type": "boolean", "default": true },
+        "manual": { "type": "boolean", "default": false },
+        "source_url": { "type": ["string", "null"], "format": "uri" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "filename", "source_url"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "filename": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "source_url": { "type": "string", "format": "uri" },
+        "sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }
+      }
+    },
+    "workflowVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "published_at", "release_tag", "changelog", "package"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "published_at": { "type": "string", "format": "date-time" },
+        "release_tag": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "changelog": { "type": "string", "minLength": 1, "maxLength": 20000 },
+        "comfyui": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minimum": { "type": ["string", "null"] },
+            "maximum": { "type": ["string", "null"] }
+          }
+        },
+        "package": { "$ref": "#/$defs/asset" },
+        "preview": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url", "sha256"],
+              "properties": {
+                "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+                "sha256": { "$ref": "#/$defs/sha256" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "custom_nodes": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/node" } },
+        "models": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/model" } }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "versions"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 80 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "summary": { "type": "string", "maxLength": 300 },
+        "description": { "type": "string", "maxLength": 20000 },
+        "tags": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 40 } },
+        "archived": { "type": "boolean", "default": false },
+        "versions": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/workflowVersion" } }
+      }
+    }
+  }
+}

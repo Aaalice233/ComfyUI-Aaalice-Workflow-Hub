@@ -1,0 +1,489 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
+
+from aiohttp import web
+from pydantic import ValidationError
+
+from .catalog import Catalog, WorkflowProduct
+from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refresh_access_token, start_device_flow, tokens
+from .manager import ManagerAdapter, local_manager_status
+from .operations import Operation, operations
+from .security import ensure_within, parse_public_repository
+from .service import (
+    add_subscription,
+    aggregate_catalog,
+    download_version,
+    list_subscriptions,
+    publish,
+    refresh_subscription,
+    update_product,
+)
+from .storage import UserStorage
+
+BASE = "/workflow-hub/api/v1"
+ROOT = Path(__file__).resolve().parent.parent
+FRONTEND = ROOT / "web" / "app"
+MAX_JSON = 2 * 1024 * 1024
+_registered = False
+_startup_refreshed_users: set[str] = set()
+
+
+def _origin(request: web.Request) -> str:
+    return f"{request.scheme}://{request.host}"
+
+
+async def _json(request: web.Request) -> dict[str, Any]:
+    origin = request.headers.get("Origin")
+    if origin:
+        parsed = urlparse(origin)
+        if parsed.netloc.casefold() != request.host.casefold() or parsed.scheme != request.scheme:
+            raise ValueError("拒绝跨来源写请求")
+    if request.content_type != "application/json":
+        raise ValueError("写接口只接受 application/json")
+    if request.content_length and request.content_length > MAX_JSON:
+        raise ValueError("请求体超过 2 MiB")
+    raw = await request.read()
+    if len(raw) > MAX_JSON:
+        raise ValueError("请求体超过 2 MiB")
+    data = json.loads(raw or b"{}")
+    if not isinstance(data, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    return data
+
+
+def _response_error(exc: Exception) -> web.Response:
+    if isinstance(exc, ValidationError):
+        return web.json_response({"error": "数据校验失败", "details": exc.errors(include_url=False)}, status=400)
+    if isinstance(exc, GitHubError):
+        status = 502 if exc.status >= 500 or exc.status == 0 else 400
+        return web.json_response({"error": str(exc), "github_status": exc.status}, status=status)
+    if isinstance(exc, (ValueError, KeyError, json.JSONDecodeError)):
+        return web.json_response({"error": str(exc).strip("'")}, status=400)
+    return web.json_response({"error": str(exc) or exc.__class__.__name__}, status=500)
+
+
+def endpoint(handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
+    async def wrapped(request: web.Request) -> web.StreamResponse:
+        try:
+            return await handler(request)
+        except Exception as exc:
+            return _response_error(exc)
+
+    return wrapped
+
+
+async def _run(operation: Operation, action: Awaitable[dict[str, Any]]) -> None:
+    try:
+        await action
+    except Exception as exc:
+        operation.status = "failed"
+        operation.stage = "failed"
+        operation.logs.append(str(exc))
+
+
+async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> None:
+    try:
+        await refresh_subscription(storage, owner, repo)
+    except Exception as exc:
+        error_text = str(exc)
+
+        def record_error(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            for item in items:
+                if (item["owner"], item["repo"]) == (owner, repo):
+                    item["error"] = error_text
+            return items
+
+        await storage.update_json("subscriptions.json", [], record_error)
+
+
+def register_routes() -> None:
+    global _registered
+    if _registered:
+        return
+    try:
+        from server import PromptServer
+    except ImportError:
+        return
+    routes = PromptServer.instance.routes
+
+    @routes.get("/workflow-hub")
+    @endpoint
+    async def page(_: web.Request) -> web.StreamResponse:
+        path = FRONTEND / "index.html"
+        if not path.exists():
+            raise RuntimeError("前端构建产物缺失，请重新安装插件")
+        return web.FileResponse(path)
+
+    @routes.get("/workflow-hub/assets/{path:.*}")
+    @endpoint
+    async def assets(request: web.Request) -> web.StreamResponse:
+        target = ensure_within(FRONTEND / "assets", FRONTEND / "assets" / request.match_info["path"])
+        if not target.is_file():
+            raise ValueError("资源不存在")
+        return web.FileResponse(target)
+
+    @routes.get(f"{BASE}/status")
+    @endpoint
+    async def status(request: web.Request) -> web.StreamResponse:
+        storage = UserStorage.from_request(request)
+        if storage.key not in _startup_refreshed_users:
+            _startup_refreshed_users.add(storage.key)
+            for source in await list_subscriptions(storage):
+                asyncio.create_task(_refresh_startup_source(storage, source["owner"], source["repo"]))
+        credential = await tokens.get_record(storage.key)
+        github_user = credential.get("user") if credential and isinstance(credential.get("user"), dict) else None
+        manager = local_manager_status()
+        return web.json_response(
+            {
+                "plugin_version": "1.0.0",
+                "minimum_frontend": "1.33.9",
+                "manager": manager,
+                "github": {
+                    "configured": bool(CLIENT_ID),
+                    "authenticated": bool(credential and credential.get("access_token")),
+                    "user": github_user,
+                    "persistent_credentials": tokens.persistent,
+                },
+            }
+        )
+
+    @routes.get(f"{BASE}/subscriptions")
+    @endpoint
+    async def subscriptions_get(request: web.Request) -> web.StreamResponse:
+        return web.json_response({"items": await list_subscriptions(UserStorage.from_request(request))})
+
+    @routes.post(f"{BASE}/subscriptions")
+    @endpoint
+    async def subscriptions_post(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        item = await add_subscription(UserStorage.from_request(request), str(data.get("url", "")))
+        return web.json_response(item, status=201)
+
+    @routes.delete(f"{BASE}/subscriptions/{{owner}}/{{repo}}")
+    @endpoint
+    async def subscriptions_delete(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        owner, repo = request.match_info["owner"], request.match_info["repo"]
+        storage = UserStorage.from_request(request)
+        await storage.update_json(
+            "subscriptions.json",
+            [],
+            lambda items: [item for item in items if (item["owner"], item["repo"]) != (owner, repo)],
+        )
+        (storage.cache_dir / f"{owner}-{repo}.json").unlink(missing_ok=True)
+        return web.json_response({"removed": True, "downloads_kept": True})
+
+    @routes.post(f"{BASE}/subscriptions/{{owner}}/{{repo}}/refresh")
+    @endpoint
+    async def subscription_refresh(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        result = await refresh_subscription(
+            UserStorage.from_request(request), request.match_info["owner"], request.match_info["repo"]
+        )
+        return web.json_response(result)
+
+    @routes.get(f"{BASE}/workflows")
+    @endpoint
+    async def workflows(request: web.Request) -> web.StreamResponse:
+        return web.json_response({"items": await aggregate_catalog(UserStorage.from_request(request))})
+
+    @routes.post(f"{BASE}/workflows/download")
+    @endpoint
+    async def workflow_download(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        cache = storage.cache_dir / f"{data['owner']}-{data['repo']}.json"
+        catalog = Catalog.model_validate_json(cache.read_bytes())
+        product = next(item for item in catalog.workflows if item.id == data["workflow_id"])
+        version = next(item for item in product.versions if item.version == data["version"])
+        operation = await operations.create("download")
+        asyncio.create_task(_run(operation, download_version(storage, data["owner"], data["repo"], product, version, operation)))
+        return web.json_response({"operation_id": operation.id}, status=202)
+
+    @routes.delete(f"{BASE}/workflows/local")
+    @endpoint
+    async def workflow_local_delete(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        installed = await storage.read_json("installed.json", [])
+        key = (data["owner"], data["repo"], data["workflow_id"], data["version"])
+        record = next(
+            (
+                item
+                for item in installed
+                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) == key
+            ),
+            None,
+        )
+        if not record:
+            raise ValueError("未找到已记录版本")
+        target = ensure_within(storage.workflows_root, Path(record["path"]))
+        target.unlink(missing_ok=True)
+        await storage.write_json(
+            "installed.json",
+            [
+                item
+                for item in installed
+                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) != key
+            ],
+        )
+        return web.json_response({"deleted": True})
+
+    @routes.post(f"{BASE}/workflows/dependencies/plan")
+    @endpoint
+    async def dependency_plan(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        result = await ManagerAdapter(_origin(request)).plan(data.get("dependencies", []))
+        return web.json_response({"items": result})
+
+    @routes.post(f"{BASE}/workflows/dependencies/execute")
+    @endpoint
+    async def dependency_execute(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        if data.get("confirmed") is not True:
+            raise ValueError("必须明确确认后才能修改节点环境")
+        queued = await ManagerAdapter(_origin(request)).execute(data.get("actions", []), str(data.get("client_id", "workflow-hub")))
+        return web.json_response({"queued": queued, "restart_may_be_required": bool(queued)})
+
+    @routes.get(f"{BASE}/github/repositories")
+    @endpoint
+    async def github_repositories(request: web.Request) -> web.StreamResponse:
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        return web.json_response({"items": await GitHubClient(token).list_repositories()})
+
+    @routes.post(f"{BASE}/github/device/start")
+    @endpoint
+    async def github_device_start(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        data = await start_device_flow()
+        storage = UserStorage.from_request(request)
+        await storage.write_json(
+            "device_flow.json",
+            {"device_code": data["device_code"], "expires_in": data["expires_in"], "interval": data["interval"]},
+        )
+        return web.json_response(
+            {
+                "user_code": data["user_code"],
+                "verification_uri": data["verification_uri"],
+                "expires_in": data["expires_in"],
+                "interval": data["interval"],
+            }
+        )
+
+    @routes.post(f"{BASE}/github/device/poll")
+    @endpoint
+    async def github_device_poll(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        storage = UserStorage.from_request(request)
+        flow = await storage.read_json("device_flow.json", None)
+        if not flow:
+            raise ValueError("登录请求不存在或已过期")
+        data = await poll_device_flow(flow["device_code"])
+        if "error" in data:
+            return web.json_response({"pending": data["error"] in {"authorization_pending", "slow_down"}, "error": data["error"]})
+        data["created_at"] = int(__import__("time").time())
+        try:
+            user, _ = await GitHubClient(str(data["access_token"])).request("GET", "https://api.github.com/user")
+            data["user"] = {"login": user["login"], "avatar_url": user["avatar_url"]}
+        except Exception:
+            pass
+        await tokens.set(storage.key, data)
+        await storage.write_json("device_flow.json", {})
+        return web.json_response({"authenticated": True, "credential_storage": "keyring" if tokens.persistent else "session"})
+
+    @routes.post(f"{BASE}/github/refresh")
+    @endpoint
+    async def github_refresh(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        storage = UserStorage.from_request(request)
+        credential = await tokens.get_record(storage.key)
+        if not credential or not credential.get("refresh_token"):
+            raise ValueError("当前 GitHub 凭据不可刷新，请重新登录")
+        refreshed = await refresh_access_token(str(credential["refresh_token"]))
+        await tokens.set(storage.key, refreshed)
+        return web.json_response({"authenticated": True})
+
+    @routes.post(f"{BASE}/github/logout")
+    @endpoint
+    async def github_logout(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        await tokens.delete(UserStorage.from_request(request).key)
+        return web.json_response({"authenticated": False})
+
+    @routes.post(f"{BASE}/github/repositories")
+    @endpoint
+    async def github_repository_create(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        return web.json_response(
+            await GitHubClient(token).create_repository(str(data.get("name", "")), str(data.get("description", ""))),
+            status=201,
+        )
+
+    @routes.get(f"{BASE}/publisher/saved-workflows")
+    @endpoint
+    async def saved_workflows(request: web.Request) -> web.StreamResponse:
+        storage = UserStorage.from_request(request)
+        items = [
+            {"name": path.stem, "path": str(path.relative_to(storage.root / "workflows")).replace("\\", "/")}
+            for path in (storage.root / "workflows").rglob("*.json")
+            if "Workflow Hub" not in path.parts
+        ]
+        return web.json_response({"items": items[:1000]})
+
+    @routes.post(f"{BASE}/publisher/load-workflow")
+    @endpoint
+    async def load_workflow(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        path = ensure_within(storage.root / "workflows", storage.root / "workflows" / str(data["path"]))
+        return web.json_response({"workflow": json.loads(path.read_text(encoding="utf-8")), "name": path.stem})
+
+    @routes.post(f"{BASE}/publisher/validate")
+    @endpoint
+    async def publisher_validate(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        WorkflowProduct.model_validate(data["product"])
+        if not isinstance(data.get("workflow"), dict):
+            raise ValueError("工作流 JSON 必须是对象")
+        return web.json_response({"valid": True})
+
+    @routes.post(f"{BASE}/publisher/scan-dependencies")
+    @endpoint
+    async def publisher_scan_dependencies(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        if not isinstance(data.get("workflow"), dict):
+            raise ValueError("工作流 JSON 必须是对象")
+        items = await ManagerAdapter(_origin(request)).scan(data["workflow"])
+        return web.json_response({"items": items})
+
+    @routes.get(f"{BASE}/publisher/drafts")
+    @endpoint
+    async def publisher_drafts(request: web.Request) -> web.StreamResponse:
+        items = await UserStorage.from_request(request).read_json("drafts.json", [])
+        return web.json_response({"items": items})
+
+    @routes.post(f"{BASE}/publisher/drafts")
+    @endpoint
+    async def publisher_draft_save(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        draft_id = str(data.get("id") or __import__("uuid").uuid4().hex)
+        record = {"id": draft_id, "name": str(data.get("name") or "Untitled"), "payload": data.get("payload", {})}
+        await storage.update_json(
+            "drafts.json", [], lambda items: [item for item in items if item.get("id") != draft_id] + [record]
+        )
+        return web.json_response(record)
+
+    @routes.delete(f"{BASE}/publisher/drafts/{{draft_id}}")
+    @endpoint
+    async def publisher_draft_delete(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        storage = UserStorage.from_request(request)
+        draft_id = request.match_info["draft_id"]
+        await storage.update_json("drafts.json", [], lambda items: [item for item in items if item.get("id") != draft_id])
+        return web.json_response({"deleted": True})
+
+    @routes.get(f"{BASE}/publisher/pending")
+    @endpoint
+    async def publisher_pending(request: web.Request) -> web.StreamResponse:
+        return web.json_response({"items": await UserStorage.from_request(request).read_json("pending_publications.json", [])})
+
+    @routes.post(f"{BASE}/publisher/pending/{{tag}}/resume")
+    @endpoint
+    async def publisher_pending_resume(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        pending = await storage.read_json("pending_publications.json", [])
+        record = next((item for item in pending if item.get("tag") == request.match_info["tag"]), None)
+        if not record:
+            raise ValueError("待同步发布不存在")
+        operation = await operations.create("publish-resume")
+        asyncio.create_task(
+            _run(
+                operation,
+                publish(
+                    storage,
+                    token,
+                    record["owner"],
+                    record["repo"],
+                    record["repository"],
+                    record["product"],
+                    record["workflow"],
+                    operation,
+                    record.get("preview"),
+                ),
+            )
+        )
+        return web.json_response({"operation_id": operation.id}, status=202)
+
+    @routes.post(f"{BASE}/publisher/publish")
+    @endpoint
+    async def publisher_publish(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        owner, repo = parse_public_repository(str(data["repository_url"]))
+        operation = await operations.create("publish")
+        asyncio.create_task(
+            _run(
+                operation,
+                publish(
+                    storage,
+                    token,
+                    owner,
+                    repo,
+                    data["repository"],
+                    data["product"],
+                    data["workflow"],
+                    operation,
+                    data.get("preview"),
+                ),
+            )
+        )
+        return web.json_response({"operation_id": operation.id}, status=202)
+
+    @routes.patch(f"{BASE}/publisher/workflows/{{owner}}/{{repo}}/{{workflow_id}}")
+    @endpoint
+    async def publisher_update(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        result = await update_product(
+            token,
+            request.match_info["owner"],
+            request.match_info["repo"],
+            request.match_info["workflow_id"],
+            data,
+        )
+        return web.json_response(result)
+
+    @routes.get(f"{BASE}/operations")
+    @endpoint
+    async def operations_list(_: web.Request) -> web.StreamResponse:
+        return web.json_response({"items": await operations.list()})
+
+    @routes.get(f"{BASE}/operations/{{operation_id}}")
+    @endpoint
+    async def operation_get(request: web.Request) -> web.StreamResponse:
+        return web.json_response((await operations.get(request.match_info["operation_id"])).public())
+
+    _registered = True

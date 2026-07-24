@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "repository": { "name": "Invalid", "author": "example" },
+  "workflows": [
+    {
+      "id": "duplicate-version",
+      "name": "Duplicate Version",
+      "versions": [
+        {
+          "version": "1.12",
+          "published_at": "2026-07-24T00:00:00Z",
+          "release_tag": "duplicate-version-v1.12",
+          "changelog": "First.",
+          "package": { "url": "https://github.com/a/b", "size": 1, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        },
+        {
+          "version": "1.12.0",
+          "published_at": "2026-07-24T00:00:00Z",
+          "release_tag": "duplicate-version-v1.12.0",
+          "changelog": "Duplicate.",
+          "package": { "url": "https://github.com/a/b", "size": 1, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "workflow_id": "portrait-basic",
+  "name": "Portrait Basic",
+  "version": "1.12",
+  "custom_nodes": [],
+  "models": []
+}

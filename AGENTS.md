@@ -5,7 +5,7 @@
 ## 项目定位
 
 - 本项目是面向 ComfyUI 的通用工作流订阅、分发与版本管理插件。
-- 当前处于设计和初始化阶段，不得把规划中的功能描述为已经可用。
+- 当前 `1.0.0` 已完成可用闭环；文档只能把代码和真实验收已经覆盖的能力描述为已实现。
 - 在用户明确决定前，不得发布到 Comfy Registry，也不得添加自动发布 Registry 的流程。
 
 ## 文档同步规范
@@ -39,4 +39,58 @@
 
 - 提交前至少检查 Python 导入、清单/配置格式、文档链接和资源文件。
 - 行为变化应执行与风险相匹配的最小测试；无法验证的部分必须在交付说明中明确指出。
+- 用户通常已在 `127.0.0.1:8188` 运行日常 ComfyUI。自动验收不得停止、复用、重启或修改该实例。
+- 独立测试实例默认使用 `127.0.0.1:8189`；若端口已占用，依次选择其它空闲端口。
+- 测试实例必须同时隔离 `user-directory`、数据库和日志；只设置 `--user-directory` 不足以保证隔离。
+- 临时目录统一放在 `../../../logs/codex-e2e-<timestamp>/`，验收结束后只清理本轮创建的资源。
+- 启动前记录命令、PID、端口和日志路径；以日志中的 `To see the GUI go to:` 与 `web root:` 判断是否就绪，不凭启动命令猜测。
+- 停止前必须再次核对 PID、命令行和监听端口确属本轮测试实例，禁止误停用户实例。
+- GUI 自动验收只使用 Codex 内置浏览器，并在独立实例的空白工作流中进行；不得覆盖用户未保存的工作流。
+
+独立测试实例示例（端口按实际空闲值替换）：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+
+$comfyRoot = (Resolve-Path '../..').Path
+$python = (Resolve-Path '../../.venv/Scripts/python.exe').Path
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$runRoot = Join-Path (Resolve-Path '../../../logs').Path "codex-e2e-$stamp"
+$userDir = Join-Path $runRoot 'user'
+$dbPath = (Join-Path $runRoot 'comfyui.db').Replace('\', '/')
+$stdoutPath = Join-Path $runRoot 'stdout.log'
+$stderrPath = Join-Path $runRoot 'stderr.log'
+$port = 8189
+
+New-Item -ItemType Directory -Force -Path $userDir | Out-Null
+
+$arguments = @(
+    'main.py',
+    '--listen', '127.0.0.1',
+    '--port', "$port",
+    '--user-directory', $userDir,
+    '--database-url', "sqlite:///$dbPath"
+)
+
+$process = Start-Process -FilePath $python `
+    -ArgumentList $arguments `
+    -WorkingDirectory $comfyRoot `
+    -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath `
+    -WindowStyle Hidden `
+    -PassThru
+
+"PID=$($process.Id) URL=http://127.0.0.1:$port STDOUT=$stdoutPath STDERR=$stderrPath"
+```
+
+停止测试实例前核对：
+
+```powershell
+$candidate = Get-CimInstance Win32_Process -Filter "ProcessId = $($process.Id)"
+$candidate | Select-Object ProcessId, ExecutablePath, CommandLine
+Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+```
+
+确认命令行、PID 和端口属于本轮实例后，才可执行 `Stop-Process -Id $process.Id`。
+
 - 提交信息使用 `type(scope): 中文描述`，标题不超过 72 个字符。

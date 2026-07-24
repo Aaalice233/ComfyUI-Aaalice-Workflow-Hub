@@ -1,9 +1,11 @@
-"""Aaalice Workflow Hub package.
-
-The project is currently in its planning phase, so it does not register nodes yet.
-"""
+"""ComfyUI-Aaalice-Workflow-Hub package."""
 
 NODE_CLASS_MAPPINGS: dict[str, type] = {}
 NODE_DISPLAY_NAME_MAPPINGS: dict[str, str] = {}
+WEB_DIRECTORY = "web/comfyui"
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+from .api import register_routes
+
+register_routes()
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

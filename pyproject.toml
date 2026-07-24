@@ -1,6 +1,6 @@
 [project]
-name = "aaalice-workflow-hub"
-version = "0.0.1"
+name = "ComfyUI-Aaalice-Workflow-Hub"
+version = "1.0.0"
 description = "A workflow subscription and version management hub for ComfyUI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -8,11 +8,15 @@ license = { file = "LICENSE" }
 authors = [
     { name = "Aaalice233" },
 ]
-dependencies = []
+dependencies = [
+    "aiohttp>=3.9",
+    "keyring>=25",
+    "pydantic>=2.8",
+]
 
 [project.urls]
-Repository = "https://github.com/Aaalice233/Aaalice-Workflow-Hub"
-Documentation = "https://github.com/Aaalice233/Aaalice-Workflow-Hub/tree/main/docs"
+Repository = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub"
+Documentation = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub/tree/main/docs"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -20,3 +24,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["workflow_hub"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
