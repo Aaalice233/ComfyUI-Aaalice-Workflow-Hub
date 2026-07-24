@@ -9,10 +9,15 @@
     {
       "id": "portrait-basic",
       "name": "Portrait Basic",
+      "category": "Portrait",
       "summary": "A minimal portrait workflow",
       "description": "Demonstrates a complete catalog entry.",
       "tags": ["portrait"],
       "archived": false,
+      "cover": {
+        "url": "https://raw.githubusercontent.com/Aaalice233/example/main/assets/portrait-basic-cover.webp",
+        "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+      },
       "versions": [
         {
           "version": "1.12",
@@ -36,6 +41,15 @@
               "source_url": null
             }
           ],
+          "inputs": [
+            {
+              "source": "portrait-reference.png",
+              "archive": "inputs/0123456789ab-portrait-reference.png",
+              "size": 2048,
+              "sha256": "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+              "node_ids": ["12"]
+            }
+          ],
           "models": [
             {
               "name": "Example checkpoint",
@@ -43,6 +57,13 @@
               "filename": "example.safetensors",
               "source_url": "https://github.com/Aaalice233/example",
               "sha256": null
+            },
+            {
+              "name": "Example style LoRA",
+              "type": "loras",
+              "filename": "styles/example.safetensors",
+              "source_url": "https://github.com/Aaalice233/example/releases/download/portrait-basic-v1.12/portrait-basic-v1.12-lora-example.safetensors",
+              "sha256": "23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"
             }
           ]
         }

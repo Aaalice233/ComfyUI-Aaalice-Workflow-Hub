@@ -1,11 +1,14 @@
 # 作者发布指南
 
-1. 在“发布工作流”上传不超过 10 MiB 的本地 JSON 工作流文件，并按需扫描节点依赖。
-2. 进入下一步，登录 GitHub 并选择已授权的公共仓库；也可创建公共仓库。新仓库需要先安装公开的 [Aaalice Workflow Hub Publisher](https://github.com/apps/aaalice-workflow-hub-publisher) 并将仓库加入 installation。
-3. 填写稳定 ID 和展示资料。
-4. 填写 `1.12` 或 `1.12.3` 形式的版本和更新日志，并复核节点依赖。能映射到 Comfy Registry 的依赖填写 `registry_id` 和作者测试版本；其余依赖标记 `manual: true`。
-5. 按需声明模型名称、类型、文件名、来源链接和可选 SHA-256。
-6. 在最后一步先校验，再发布。发布顺序为 Draft Release、ZIP 上传、Release 发布、目录条件更新。
+先在 ComfyUI 中打开准备发布的工作流，再从顶栏进入“工作流中心”。发布页会自动读取当前画布并持续显示工作流文件名。
+
+发布表单只有一个页面：
+
+1. 选择已授权的公共仓库。系统会记住上次选择；需要时可以展开“创建仓库”。新仓库仍需加入公开的 [Aaalice Workflow Hub Publisher](https://github.com/apps/aaalice-workflow-hub-publisher) installation。
+2. 选择已有工作流或新建工作流。类别直接读取仓库中已有的单层类别，也可在输入框中创建新类别；不支持树形嵌套。新工作流只需填写名称，稳定 ID 自动生成。
+3. 填写 `1.12` 或 `1.12.3` 形式的版本和更新日志，再确认自动识别的自定义节点、`Load Image` 图片和 Lora Manager 引用。LoRA 是否作为独立可选资源发布仍由作者逐项选择。
+
+发布器不再要求上传封面。最后可直接校验或发布；发布顺序为 Draft Release、ZIP 与所选 LoRA 资源上传、Release 发布、目录条件更新。
 
 发布版本不可覆盖或删除。目录并发修改会自动合并重试一次；若 Release 已发布但目录更新失败，“待同步发布”会保留恢复信息。
 

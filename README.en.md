@@ -14,16 +14,17 @@ A public workflow subscription, publishing, and version-management extension for
 
 - Subscribe to public GitHub repositories that contain `workflow-catalog.json`, then browse version history, release notes, node dependencies, and model declarations.
 - Download and verify Release packages by version. Every version is stored as a separate workflow file, never overwrites an older version, and can be revealed in the system file manager.
-- Upload a local JSON workflow file, validate it through a guided flow, and publish it as a GitHub Release.
+- Capture the current ComfyUI canvas and publish it from one page by choosing a repository and flat category, then entering a name, version, and release notes. The last repository choice is remembered.
+- Local images referenced by `Load Image` nodes are included automatically. The publisher no longer asks for a project cover.
 - Sign in through GitHub App Device Flow. Credentials are stored in the system keyring when available and otherwise remain only in the current process.
 - Build custom-node dependency plans and, after explicit confirmation, send install, upgrade, or specifically selected downgrade tasks to ComfyUI-Manager in sequence.
 - Use a Chinese or English interface with startup workflow-update toasts, real byte-level download progress, a lightweight activity drawer, and per-ComfyUI-user state and cache isolation.
 
-Models are declared and displayed but never downloaded automatically. The extension supports public GitHub repositories only; it does not support private repositories, other Git services, or arbitrary download hosts. It never changes the node environment silently and has not been published to Comfy Registry.
+The publisher detects Lora Manager references. Authors may publish selected LoRAs as separate Release assets or clear those references from the pending workflow copy. LoRAs stay outside the main workflow package, and subscribers choose each download explicitly; they are never downloaded automatically. The extension supports public GitHub repositories only; it does not support private repositories, other Git services, or arbitrary download hosts. It never changes the node environment silently and has not been published to Comfy Registry.
 
 ## Installation and usage
 
-1. Place this repository under `ComfyUI/custom_nodes/` and install the Python dependencies declared in `pyproject.toml`.
+1. Place this repository under `ComfyUI/custom_nodes/` and run `pip install -r requirements.txt`; ComfyUI-Manager handles these dependencies automatically.
 2. Restart ComfyUI. Frontend `1.33.9+` is required, and Manager `4.2.1+` is recommended.
 3. Click **Workflow Hub** in the top bar. A normal click opens a non-fullscreen panel inside ComfyUI; `Shift+click` opens a separate window.
 4. Subscriptions do not require GitHub sign-in. Publishing uses Device Flow when prompted.

@@ -66,6 +66,14 @@ class ModelDependency(StrictModel):
     sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")] | None = None
 
 
+class BundledInput(StrictModel):
+    source: Annotated[str, Field(min_length=1, max_length=240)]
+    archive: Annotated[str, Field(min_length=1, max_length=300)]
+    size: Annotated[int, Field(gt=0, le=67_108_864)]
+    sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    node_ids: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(default_factory=list, max_length=500)
+
+
 class WorkflowVersion(StrictModel):
     version: str
     published_at: datetime
@@ -75,6 +83,7 @@ class WorkflowVersion(StrictModel):
     package: Asset
     preview: Preview | None = None
     custom_nodes: list[NodeDependency] = Field(default_factory=list, max_length=500)
+    inputs: list[BundledInput] = Field(default_factory=list, max_length=500)
     models: list[ModelDependency] = Field(default_factory=list, max_length=500)
 
     @field_validator("version")
@@ -87,10 +96,12 @@ class WorkflowVersion(StrictModel):
 class WorkflowProduct(StrictModel):
     id: Annotated[str, Field(min_length=1, max_length=80)]
     name: Annotated[str, Field(min_length=1, max_length=120)]
+    category: Annotated[str, Field(default="", max_length=80, pattern=r"^[^/\\]*$")] = ""
     summary: Annotated[str, Field(default="", max_length=300)] = ""
     description: Annotated[str, Field(default="", max_length=20_000)] = ""
     tags: list[Annotated[str, Field(min_length=1, max_length=40)]] = Field(default_factory=list, max_length=20)
     archived: bool = False
+    cover: Preview | None = None
     versions: list[WorkflowVersion] = Field(default_factory=list, max_length=500)
 
     @field_validator("id")
@@ -137,10 +148,12 @@ def merge_product(catalog: Catalog, product: WorkflowProduct) -> Catalog:
         items[index] = existing.model_copy(
             update={
                 "name": product.name,
+                "category": product.category if "category" in product.model_fields_set else existing.category,
                 "summary": product.summary,
                 "description": product.description,
                 "tags": product.tags,
                 "archived": product.archived,
+                "cover": product.cover or existing.cover,
                 "versions": existing.versions + product.versions,
             }
         )

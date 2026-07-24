@@ -27,7 +27,7 @@ const messages = {
     activities: "活动", noActivities: "暂无活动", settings: "设置", close: "关闭",
     confirmEnvironment: "我确认让 ComfyUI-Manager 串行执行所选节点变更", execute: "执行依赖计划",
     managerUnavailable: "Manager 不可用；工作流仍可下载，依赖请手动处理。",
-    workflowUnavailable: "请先上传工作流 JSON 文件。",
+    workflowUnavailable: "无法读取当前画布工作流，请从 ComfyUI 顶栏重新打开工作流中心。",
     publicOnly: "仅支持公共 GitHub 仓库。已发布版本资产不可覆盖或删除。",
   },
   en: {
@@ -48,7 +48,7 @@ const messages = {
     activities: "Activity", noActivities: "No activity", settings: "Settings", close: "Close",
     confirmEnvironment: "I confirm ComfyUI-Manager may apply selected node changes serially", execute: "Apply dependency plan",
     managerUnavailable: "Manager is unavailable. You can still download; handle dependencies manually.",
-    workflowUnavailable: "Upload a workflow JSON file first.",
+    workflowUnavailable: "Unable to read the current canvas workflow. Reopen Workflow Hub from the ComfyUI top bar.",
     publicOnly: "Public GitHub repositories only. Published version assets cannot be overwritten or deleted.",
   },
 } as const;

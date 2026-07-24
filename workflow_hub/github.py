@@ -63,13 +63,15 @@ class TokenStore:
     async def set(self, user_key: str, credential: str | dict[str, Any]) -> None:
         value = {"access_token": credential} if isinstance(credential, str) else dict(credential)
         raw = json.dumps(value)
+        # Keep the active session usable even if the platform keyring becomes
+        # temporarily unavailable after a successful write.
+        self._session_tokens[user_key] = raw
         if self._keyring:
             try:
                 await asyncio.to_thread(self._keyring.set_password, KEYRING_SERVICE, user_key, raw)
                 return
             except Exception:
                 self._keyring = None
-        self._session_tokens[user_key] = raw
 
     async def delete(self, user_key: str) -> None:
         self._session_tokens.pop(user_key, None)
@@ -129,7 +131,9 @@ class GitHubClient:
                         allow_redirects=allow_redirects,
                         **kwargs,
                     ) as response:
-                        if 300 <= response.status < 400:
+                        if response.status in expected and response.status in {204, 304}:
+                            return None, response.headers
+                        if 300 <= response.status < 400 and response.status not in expected:
                             location = response.headers.get("Location", "")
                             require_github_https(location)
                             raise GitHubError("GitHub 返回了未允许的重定向", response.status)
@@ -191,6 +195,9 @@ class GitHubClient:
                     repositories[item["id"]] = {
                         "id": item["id"],
                         "full_name": item["full_name"],
+                        "name": item["name"],
+                        "owner": item["owner"]["login"],
+                        "description": item.get("description") or "",
                         "default_branch": item["default_branch"],
                     }
         return sorted(repositories.values(), key=lambda item: item["full_name"].casefold())
@@ -251,14 +258,14 @@ class GitHubClient:
 
     async def _stream(self, response: aiohttp.ClientResponse, destination: Any, operation: Any | None) -> None:
         if response.status != 200:
-            raise GitHubError("下载工作流包失败", response.status)
+            raise GitHubError("下载 Release 资源失败", response.status)
         total = int(response.headers.get("Content-Length", "0"))
         received = 0
         with open(destination, "wb") as stream:
             async for chunk in response.content.iter_chunked(1024 * 256):
                 received += len(chunk)
                 if received > 256 * 1024 * 1024:
-                    raise GitHubError("工作流包超过 256 MiB")
+                    raise GitHubError("Release 资源超过 256 MiB")
                 stream.write(chunk)
                 if operation and total:
                     operation.progress = {"received": received, "total": total}

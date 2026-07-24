@@ -36,6 +36,15 @@
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "sha256"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
     "node": {
       "type": "object",
       "additionalProperties": false,
@@ -61,6 +70,22 @@
         "sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }
       }
     },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "archive", "size", "sha256"],
+      "properties": {
+        "source": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "archive": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "size": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "node_ids": {
+          "type": "array",
+          "maxItems": 500,
+          "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+        }
+      }
+    },
     "workflowVersion": {
       "type": "object",
       "additionalProperties": false,
@@ -79,21 +104,9 @@
           }
         },
         "package": { "$ref": "#/$defs/asset" },
-        "preview": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["url", "sha256"],
-              "properties": {
-                "url": { "type": "string", "format": "uri", "pattern": "^https://" },
-                "sha256": { "$ref": "#/$defs/sha256" }
-              }
-            },
-            { "type": "null" }
-          ]
-        },
+        "preview": { "oneOf": [{ "$ref": "#/$defs/image" }, { "type": "null" }] },
         "custom_nodes": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/node" } },
+        "inputs": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/input" } },
         "models": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/model" } }
       }
     },
@@ -104,10 +117,12 @@
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 80 },
         "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "category": { "type": "string", "maxLength": 80, "pattern": "^[^/\\\\]*$" },
         "summary": { "type": "string", "maxLength": 300 },
         "description": { "type": "string", "maxLength": 20000 },
         "tags": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 40 } },
         "archived": { "type": "boolean", "default": false },
+        "cover": { "oneOf": [{ "$ref": "#/$defs/image" }, { "type": "null" }] },
         "versions": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/workflowVersion" } }
       }
     }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib
 import json
 import os
 import subprocess
@@ -13,16 +14,23 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from .catalog import Catalog, Preview, Repository, WorkflowProduct, WorkflowVersion, merge_product, normalize_version
+from .assets import package_input_assets, scan_workflow_assets
+from .catalog import BundledInput, Catalog, ModelDependency, Preview, Repository, WorkflowProduct, WorkflowVersion, merge_product, normalize_version
 from .github import ContentFile, GitHubClient, GitHubError
 from .operations import Operation
 from .packages import build_package, install_workflow
-from .security import parse_public_repository, require_github_https
+from .security import ensure_within, parse_public_repository, require_github_https, safe_filename
 from .storage import UserStorage
+
+
+def _folder_paths() -> Any:
+    return importlib.import_module("folder_paths")
 
 
 def validate_catalog_assets(catalog: Catalog) -> Catalog:
     for product in catalog.workflows:
+        if product.cover:
+            require_github_https(str(product.cover.url))
         for version in product.versions:
             require_github_https(str(version.package.url))
             if version.preview:
@@ -129,6 +137,13 @@ def reveal_in_file_manager(target: Path) -> None:
 
 async def aggregate_catalog(storage: UserStorage) -> list[dict[str, Any]]:
     installed = await storage.read_json("installed.json", [])
+    stale_records = [item for item in installed if not _installed_record_exists(storage, item)]
+    if stale_records:
+        installed = await storage.update_json(
+            "installed.json",
+            [],
+            lambda items: [item for item in items if _installed_record_exists(storage, item)],
+        )
     result: list[dict[str, Any]] = []
     for source in await list_subscriptions(storage):
         cache = storage.cache_dir / f"{source['owner']}-{source['repo']}.json"
@@ -152,6 +167,14 @@ async def aggregate_catalog(storage: UserStorage) -> list[dict[str, Any]]:
                 }
             )
     return result
+
+
+def _installed_record_exists(storage: UserStorage, record: dict[str, Any]) -> bool:
+    try:
+        target = ensure_within(storage.workflows_root, Path(record["path"]))
+        return target.is_file()
+    except (KeyError, OSError, ValueError):
+        return False
 
 
 async def download_version(
@@ -179,6 +202,7 @@ async def download_version(
             product.name,
             version.version,
             version.package.sha256,
+            Path(_folder_paths().get_input_directory()),
         )
         record = {
             "owner": owner,
@@ -210,6 +234,44 @@ async def download_version(
         temp_path.unlink(missing_ok=True)
 
 
+async def download_optional_lora(model: ModelDependency, operation: Operation) -> dict[str, Any]:
+    if model.type != "loras":
+        raise ValueError("仅支持下载 LoRA 类型的可选资源")
+    require_github_https(str(model.source_url))
+    roots = _folder_paths().get_folder_paths("loras")
+    if not roots:
+        raise ValueError("ComfyUI 未配置 LoRA 目录")
+    root = Path(roots[0]).resolve()
+    target = ensure_within(root, root / model.filename.replace("\\", "/"))
+    if target.suffix.lower() not in {".safetensors", ".ckpt", ".pt", ".bin"}:
+        raise ValueError("LoRA 文件扩展名不受支持")
+    directory = target.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        if model.sha256 and hashlib.sha256(target.read_bytes()).hexdigest() != model.sha256:
+            raise ValueError("同名 LoRA 内容不一致，已拒绝覆盖")
+        operation.stage = "complete"
+        operation.status = "success"
+        operation.result = {"path": str(target), "already_exists": True}
+        return operation.result
+    descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-hub-lora-", suffix=".tmp", dir=directory)
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    try:
+        operation.stage = "downloading"
+        await GitHubClient().download(str(model.source_url), temp_path, operation)
+        operation.stage = "verifying"
+        if model.sha256 and hashlib.sha256(temp_path.read_bytes()).hexdigest() != model.sha256:
+            raise ValueError("LoRA SHA-256 不一致")
+        os.replace(temp_path, target)
+        operation.stage = "complete"
+        operation.status = "success"
+        operation.result = {"path": str(target), "already_exists": False}
+        return operation.result
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 async def publish(
     storage: UserStorage,
     token: str,
@@ -220,15 +282,50 @@ async def publish(
     workflow: dict[str, Any],
     operation: Operation,
     preview_data: dict[str, str] | None = None,
+    selected_loras: list[str] | None = None,
 ) -> dict[str, Any]:
     client = GitHubClient(token)
     product = WorkflowProduct.model_validate(product_data)
     if len(product.versions) != 1:
         raise ValueError("每次发布必须且只能包含一个版本")
     version = product.versions[0]
+    images, detected_loras = scan_workflow_assets(workflow)
+    unavailable_images = [item for item in images if item.status != "ready"]
+    if unavailable_images:
+        details = ", ".join(f"{item.name} ({item.status})" for item in unavailable_images)
+        raise ValueError(f"加载图像无法随工作流打包: {details}")
+    bundled_inputs = package_input_assets(images)
+    version.inputs = [
+        BundledInput.model_validate({key: value for key, value in item.items() if key != "path"})
+        for item in bundled_inputs
+    ]
+    selected_names = set(selected_loras or [])
+    lora_by_name = {item.name: item for item in detected_loras}
+    unknown_loras = selected_names - set(lora_by_name)
+    if unknown_loras:
+        raise ValueError(f"所选 LoRA 不在当前工作流中: {', '.join(sorted(unknown_loras))}")
+    selected_assets = [lora_by_name[name] for name in selected_names]
+    unavailable_loras = [item for item in selected_assets if item.status != "ready" or not item.path]
+    if unavailable_loras:
+        details = ", ".join(f"{item.name} ({item.status})" for item in unavailable_loras)
+        raise ValueError(f"所选 LoRA 无法发布: {details}")
     tag = f"{product.id}-v{version.version}"
     if version.release_tag != tag:
         raise ValueError(f"Release tag 必须是 {tag}")
+    for lora in selected_assets:
+        assert lora.sha256 is not None
+        key = ("loras", lora.filename)
+        version.models = [item for item in version.models if (item.type, item.filename) != key]
+        asset_name = safe_filename(f"{tag}-lora-{lora.sha256[:12]}-{Path(lora.filename).name}").replace(" ", "_")
+        version.models.append(
+            ModelDependency(
+                name=lora.name,
+                type="loras",
+                filename=lora.filename,
+                source_url=f"https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}",
+                sha256=lora.sha256,
+            )
+        )
     operation.stage = "validating"
     current = await client.get_catalog(owner, repo)
     if current:
@@ -260,19 +357,21 @@ async def publish(
     if preview_data:
         filename = str(preview_data.get("filename", "")).lower()
         suffix = Path(filename).suffix
-        if suffix not in {".png", ".webp"}:
-            raise ValueError("预览图必须是 PNG 或 WebP")
+        if suffix not in {".png", ".webp", ".jpg", ".jpeg"}:
+            raise ValueError("项目封面必须是 PNG、WebP 或 JPEG")
         try:
             preview_bytes = base64.b64decode(preview_data["data_base64"], validate=True)
         except Exception as exc:
-            raise ValueError("预览图数据无效") from exc
+            raise ValueError("项目封面数据无效") from exc
         if len(preview_bytes) > 1024 * 1024:
-            raise ValueError("预览图不能超过 1 MiB")
+            raise ValueError("项目封面不能超过 1 MiB")
         if suffix == ".png" and not preview_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-            raise ValueError("预览图内容不是有效 PNG")
+            raise ValueError("项目封面内容不是有效 PNG")
         if suffix == ".webp" and not (preview_bytes.startswith(b"RIFF") and preview_bytes[8:12] == b"WEBP"):
-            raise ValueError("预览图内容不是有效 WebP")
-        preview_path = storage.drafts_dir / f"{tag}-preview{suffix}"
+            raise ValueError("项目封面内容不是有效 WebP")
+        if suffix in {".jpg", ".jpeg"} and not preview_bytes.startswith(b"\xff\xd8\xff"):
+            raise ValueError("项目封面内容不是有效 JPEG")
+        preview_path = storage.drafts_dir / f"{tag}-cover{suffix}"
         preview_path.write_bytes(preview_bytes)
     manifest = {
         "schema_version": 1,
@@ -281,8 +380,18 @@ async def publish(
         "version": version.version,
         "custom_nodes": [item.model_dump(mode="json") for item in version.custom_nodes],
         "models": [item.model_dump(mode="json") for item in version.models],
+        "inputs": [
+            {key: value for key, value in item.items() if key != "path"}
+            for item in bundled_inputs
+        ],
     }
-    built = build_package(package_path, manifest, workflow, version.changelog, preview=preview_path)
+    built = build_package(
+        package_path,
+        manifest,
+        workflow,
+        version.changelog,
+        input_assets=bundled_inputs,
+    )
     operation.stage = "creating_release"
     release = await client.get_release_by_tag(owner, repo, tag)
     pending_match: dict[str, Any] | None = None
@@ -305,6 +414,17 @@ async def publish(
         version.package.size = int(asset.get("size") or built["size"])
         digest = str(asset.get("digest") or "")
         version.package.sha256 = digest.removeprefix("sha256:") if digest.startswith("sha256:") else built["sha256"]
+        for lora in selected_assets:
+            assert lora.path is not None and lora.sha256 is not None
+            asset_name = safe_filename(f"{tag}-lora-{lora.sha256[:12]}-{Path(lora.filename).name}").replace(" ", "_")
+            lora_asset = next((item for item in release.get("assets", []) if item["name"] == asset_name), None)
+            if not lora_asset:
+                lora_asset = await client.upload_asset(
+                    release["upload_url"],
+                    asset_name,
+                    lora.path.read_bytes(),
+                    "application/octet-stream",
+                )
         if preview_path and preview_bytes:
             preview_asset = next((item for item in release.get("assets", []) if item["name"] == preview_path.name), None)
             if not preview_asset:
@@ -312,9 +432,14 @@ async def publish(
                     release["upload_url"],
                     preview_path.name,
                     preview_bytes,
-                    "image/png" if preview_path.suffix == ".png" else "image/webp",
+                    {
+                        ".png": "image/png",
+                        ".webp": "image/webp",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                    }[preview_path.suffix],
                 )
-            version.preview = Preview.model_validate(
+            product.cover = Preview.model_validate(
                 {
                     "url": f"https://github.com/{owner}/{repo}/releases/download/{tag}/{preview_path.name}",
                     "sha256": hashlib.sha256(preview_bytes).hexdigest(),
@@ -372,9 +497,9 @@ async def update_product(
     workflow_id: str,
     changes: dict[str, Any],
 ) -> dict[str, Any]:
-    allowed = {"name", "summary", "description", "tags", "archived"}
+    allowed = {"name", "category", "summary", "description", "tags", "archived"}
     if set(changes) - allowed:
-        raise ValueError("只能修改名称、简介、说明、标签和归档状态")
+        raise ValueError("只能修改名称、类别、简介、说明、标签和归档状态")
     client = GitHubClient(token)
     for attempt in range(2):
         current = await client.get_catalog(owner, repo)
@@ -422,7 +547,7 @@ async def _record_pending(
         "repository": repository,
         "product": product.model_dump(mode="json"),
         "workflow": workflow,
-        "preview": preview_data,
+        "cover": preview_data,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await storage.update_json(

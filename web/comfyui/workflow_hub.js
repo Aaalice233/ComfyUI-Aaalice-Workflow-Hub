@@ -130,12 +130,36 @@ function installIconStyle() {
 function closeHub() {
   document.getElementById(MODAL_ID)?.remove();
   document.removeEventListener("keydown", handleHubKeydown, true);
-  window.removeEventListener("message", handleHubMessage);
 }
 
 function handleHubMessage(event) {
-  if (event.origin !== window.location.origin || event.data?.type !== "AAALICE_WORKFLOW_HUB_CLOSE") return;
-  closeHub();
+  if (event.origin !== window.location.origin) return;
+  if (event.data?.type === "AAALICE_WORKFLOW_HUB_CLOSE") {
+    closeHub();
+    return;
+  }
+  if (event.data?.type !== "AAALICE_WORKFLOW_HUB_REQUEST_CURRENT_WORKFLOW") return;
+
+  try {
+    const activeWorkflow = app.extensionManager?.workflow?.activeWorkflow;
+    const activeName = (activeWorkflow?.filename || activeWorkflow?.path || "").split(/[\\/]/).at(-1);
+    const filename = activeName
+      ? (activeName.toLowerCase().endsWith(".json") ? activeName : `${activeName}.json`)
+      : "Unsaved Workflow.json";
+    const workflow = JSON.parse(JSON.stringify(app.graph.serialize()));
+    event.source?.postMessage(
+      { type: "AAALICE_WORKFLOW_HUB_CURRENT_WORKFLOW", filename, workflow },
+      window.location.origin,
+    );
+  } catch (error) {
+    event.source?.postMessage(
+      {
+        type: "AAALICE_WORKFLOW_HUB_CURRENT_WORKFLOW",
+        error: error instanceof Error ? error.message : String(error),
+      },
+      window.location.origin,
+    );
+  }
 }
 
 function handleHubKeydown(event) {
@@ -177,7 +201,6 @@ function openEmbeddedHub() {
   });
   document.body.appendChild(modal);
   document.addEventListener("keydown", handleHubKeydown, true);
-  window.addEventListener("message", handleHubMessage);
 }
 
 function openHub(event) {
@@ -191,6 +214,7 @@ function openHub(event) {
 
 installIconStyle();
 app.ui.settings.addEventListener("Comfy.Locale.change", handleLocaleChange);
+window.addEventListener("message", handleHubMessage);
 
 app.registerExtension({
   name: "Aaalice.WorkflowHub",

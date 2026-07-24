@@ -1,0 +1,3 @@
+aiohttp>=3.9
+keyring>=25
+pydantic>=2.8

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import stat
 import unittest
@@ -41,3 +42,46 @@ class PackageTests(unittest.TestCase):
             build_package(path, {}, {}, "change")
             with self.assertRaisesRegex(ValueError, "SHA-256"):
                 inspect_package(path, "0" * 64)
+
+    def test_bundled_input_is_verified_installed_and_referenced(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = root / "source.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\npayload")
+            digest = hashlib.sha256(image.read_bytes()).hexdigest()
+            archive_name = f"inputs/{digest[:12]}-source.png"
+            manifest = {
+                "inputs": [
+                    {
+                        "source": "source.png",
+                        "archive": archive_name,
+                        "sha256": digest,
+                        "size": image.stat().st_size,
+                        "node_ids": ["1"],
+                    }
+                ]
+            }
+            workflow = {"nodes": [{"id": 1, "type": "LoadImage", "widgets_values": ["source.png"]}]}
+            package = root / "package.zip"
+            result = build_package(
+                package,
+                manifest,
+                workflow,
+                "change",
+                input_assets=[{"path": image, "archive": archive_name}],
+            )
+            target, _ = install_workflow(
+                package,
+                root / "workflows",
+                "owner",
+                "repo",
+                "demo",
+                "Demo",
+                "1.0",
+                result["sha256"],
+                root / "input",
+            )
+            installed = json.loads(target.read_text(encoding="utf-8"))
+            reference = installed["nodes"][0]["widgets_values"][0]
+            self.assertEqual(reference, f"Workflow Hub/owner-repo/demo/{digest[:12]}-source.png")
+            self.assertTrue((root / "input" / reference).is_file())

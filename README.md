@@ -12,18 +12,19 @@
 
 ## 1.0 能力
 
-- 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，浏览历史版本、更新日志、节点依赖和模型声明。
+- 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，浏览历史版本、更新日志，以及每个版本的节点依赖、随包图片和可选 LoRA 清单。
 - 按版本下载并校验 Release 包；每个版本保存为独立工作流文件，绝不覆盖旧版本，并可直接打开所在目录。
-- 上传本地 JSON 工作流文件，通过分步引导校验并发布 GitHub Release。
+- 直接读取当前 ComfyUI 画布，在单页中选择仓库和单层类别、填写名称、版本与更新日志并发布 GitHub Release；上次选择的仓库会自动记住。
+- `加载图像` 节点引用的本地图像会自动随包发布；发布器不再要求上传项目封面。
 - 使用 GitHub App Device Flow 登录；凭据优先保存在系统 keyring，keyring 不可用时仅保留在当前进程。
 - 生成自定义节点依赖计划，并在用户二次确认后将安装、升级或明确选择的降级任务串行交给 ComfyUI-Manager。
 - 中英文界面、启动时工作流更新 Toast、真实下载字节进度、轻量活动抽屉、按 ComfyUI 用户隔离的状态和缓存。
 
-模型只做声明和查看，不自动下载。插件只支持公共 GitHub 仓库，不支持私有仓库、其他 Git 服务或任意下载主机。项目不会静默修改节点环境，也未发布到 Comfy Registry。
+发布页会把自动识别的节点依赖、随包图片和 LoRA 逐项列出；发布后，订阅详情页也展示同一组资源清单。作者可选择将 Lora Manager 引用的 LoRA 作为独立 Release 资源发布，也可一键清空当前待发布副本中的引用。LoRA 不进入工作流主包，订阅用户必须自行点击选择是否下载，插件不会自动下载。插件只支持公共 GitHub 仓库，不支持私有仓库、其他 Git 服务或任意下载主机。项目不会静默修改节点环境，也未发布到 Comfy Registry。
 
 ## 安装和使用
 
-1. 将本仓库放入 `ComfyUI/custom_nodes/`，安装 `pyproject.toml` 中的 Python 依赖。
+1. 将本仓库放入 `ComfyUI/custom_nodes/`，执行 `pip install -r requirements.txt` 安装 Python 依赖；通过 ComfyUI-Manager 安装时会自动处理。
 2. 重启 ComfyUI，确认 Frontend 为 `1.33.9+`，推荐使用 Manager `4.2.1+`。
 3. 点击顶栏“工作流中心”；普通点击在 ComfyUI 内打开非全屏面板，`Shift+点击` 打开独立窗口。
 4. 订阅无需 GitHub 登录；发布时按页面提示使用 Device Flow 登录。
