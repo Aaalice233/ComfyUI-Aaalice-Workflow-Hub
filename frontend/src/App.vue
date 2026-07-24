@@ -524,7 +524,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div :class="['app-shell', `theme-${tab}`]">
     <aside class="nav-rail">
       <div class="brand">
         <span class="brand-mark"><LibraryBig :size="19" /></span>
@@ -541,11 +541,6 @@ onBeforeUnmount(() => {
       </nav>
 
       <div class="rail-spacer" />
-      <div class="system-card">
-        <div><span :class="['health-dot', { online: status?.manager.available && status?.manager.compatible }]" /><strong>ComfyUI Manager</strong></div>
-        <small>{{ status?.manager.available && status?.manager.compatible ? (locale === "zh" ? "连接正常" : "Connected") : (locale === "zh" ? "需要检查" : "Needs attention") }}</small>
-      </div>
-
       <div class="rail-actions">
         <button class="rail-action" @click="drawer = !drawer">
           <ActivityIcon :size="17" /><span>{{ t("activities") }}</span>
@@ -587,8 +582,8 @@ onBeforeUnmount(() => {
           <a :href="device.verification_uri" target="_blank" rel="noopener">{{ device.verification_uri }}<ExternalLink :size="14" /></a>
         </div>
 
-        <template v-if="tab === 'subscribe'">
-          <section class="library-panel">
+        <Transition name="theme-page" mode="out-in">
+          <section v-if="tab === 'subscribe'" key="subscribe" class="library-panel tab-page">
             <div class="catalog-toolbar">
               <label class="search-field">
                 <SearchIcon :size="18" />
@@ -657,10 +652,8 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </section>
-        </template>
 
-        <template v-else>
-          <div class="publish-flow">
+          <div v-else key="publish" class="publish-flow tab-page">
             <div v-if="drafts.length || pendingPublications.length" class="publish-utilities">
               <details v-if="drafts.length"><summary>{{ locale === "zh" ? "草稿" : "Drafts" }}</summary>
                 <button v-for="draft in drafts" :key="draft.id" class="ghost" @click="loadDraft(draft)">{{ draft.name }}</button>
@@ -753,7 +746,7 @@ onBeforeUnmount(() => {
               </div>
             </section>
           </div>
-        </template>
+        </Transition>
       </main>
     </section>
 
