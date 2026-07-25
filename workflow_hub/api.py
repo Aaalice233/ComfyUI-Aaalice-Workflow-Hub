@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 from urllib.parse import urlparse
 
 from aiohttp import web
@@ -34,7 +34,7 @@ from .storage import UserStorage
 BASE = "/workflow-hub/api/v1"
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "web" / "app"
-MAX_JSON = 2 * 1024 * 1024
+MAX_JSON = 20 * 1024 * 1024
 _registered = False
 _startup_refresh_tasks: dict[str, asyncio.Task[list[dict[str, str]]]] = {}
 _startup_notifications_delivered: set[str] = set()
@@ -51,10 +51,10 @@ async def _json(request: web.Request) -> dict[str, Any]:
         if parsed.netloc.casefold() != request.host.casefold() or parsed.scheme != request.scheme:
             raise ValueError("拒绝跨来源写请求")
     if request.content_length and request.content_length > MAX_JSON:
-        raise ValueError("请求体超过 2 MiB")
+        raise ValueError("请求体超过 20 MiB")
     raw = await request.read()
     if len(raw) > MAX_JSON:
-        raise ValueError("请求体超过 2 MiB")
+        raise ValueError("请求体超过 20 MiB")
     if raw and request.content_type != "application/json":
         raise ValueError("JSON 请求体必须使用 application/json")
     data = json.loads(raw or b"{}")
@@ -67,7 +67,8 @@ def _response_error(exc: Exception) -> web.Response:
     if isinstance(exc, ValidationError):
         return web.json_response({"error": "数据校验失败", "details": exc.errors(include_url=False)}, status=400)
     if isinstance(exc, GitHubError):
-        status = 502 if exc.status >= 500 or exc.status == 0 else 400
+        # 401 原样透传 HTTP 状态，前端据此把界面降级为未登录。
+        status = 401 if exc.status == 401 else (502 if exc.status >= 500 or exc.status == 0 else 400)
         return web.json_response({"error": str(exc), "github_status": exc.status}, status=status)
     if isinstance(exc, (ValueError, KeyError, json.JSONDecodeError)):
         return web.json_response({"error": str(exc).strip("'")}, status=400)
@@ -82,6 +83,21 @@ def endpoint(handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) ->
             return _response_error(exc)
 
     return wrapped
+
+
+T = TypeVar("T")
+
+
+async def _guarded_github_call(storage: UserStorage, action: Awaitable[T]) -> T:
+    try:
+        return await action
+    except GitHubError as exc:
+        if exc.status == 401:
+            # 已存储的 token 被吊销或过期后，每次请求都只会重复 401；
+            # 凭据已不可用，直接清除并提示重新登录，避免之后每次进页面都报错。
+            await tokens.delete(storage.key)
+            raise GitHubError("GitHub 登录已失效，请重新登录", 401) from exc
+        raise
 
 
 async def _run(operation: Operation, action: Awaitable[dict[str, Any]]) -> None:
@@ -340,7 +356,7 @@ def register_routes() -> None:
         token = await tokens.get(storage.key)
         if not token:
             raise ValueError("请先登录 GitHub")
-        return web.json_response({"items": await GitHubClient(token).list_repositories()})
+        return web.json_response({"items": await _guarded_github_call(storage, GitHubClient(token).list_repositories())})
 
     @routes.get(f"{BASE}/publisher/catalog/{{owner}}/{{repo}}")
     @endpoint
@@ -351,7 +367,7 @@ def register_routes() -> None:
             raise ValueError("请先登录 GitHub")
         owner = request.match_info["owner"]
         repo = request.match_info["repo"]
-        remote = await GitHubClient(token).get_catalog(owner, repo)
+        remote = await _guarded_github_call(storage, GitHubClient(token).get_catalog(owner, repo))
         if remote is None:
             return web.json_response({"categories": [], "workflows": []})
         catalog = Catalog.model_validate_json(remote.content)
@@ -419,7 +435,14 @@ def register_routes() -> None:
         credential = await tokens.get_record(storage.key)
         if not credential or not credential.get("refresh_token"):
             raise ValueError("当前 GitHub 凭据不可刷新，请重新登录")
-        refreshed = await refresh_access_token(str(credential["refresh_token"]))
+        try:
+            refreshed = await refresh_access_token(str(credential["refresh_token"]))
+        except GitHubError as exc:
+            if exc.status >= 500:
+                raise
+            # 刷新被拒（含 GitHub 以 200 返回 error 字段的情况）说明凭据已不可用。
+            await tokens.delete(storage.key)
+            raise GitHubError("GitHub 登录已失效，请重新登录", 401) from exc
         await tokens.set(storage.key, refreshed)
         return web.json_response({"authenticated": True})
 
@@ -439,7 +462,10 @@ def register_routes() -> None:
         if not token:
             raise ValueError("请先登录 GitHub")
         return web.json_response(
-            await GitHubClient(token).create_repository(str(data.get("name", "")), str(data.get("description", ""))),
+            await _guarded_github_call(
+                storage,
+                GitHubClient(token).create_repository(str(data.get("name", "")), str(data.get("description", ""))),
+            ),
             status=201,
         )
 
@@ -511,11 +537,14 @@ def register_routes() -> None:
         asyncio.create_task(
             _run(
                 operation,
-                resume_publication(
+                _guarded_github_call(
                     storage,
-                    token,
-                    record,
-                    operation,
+                    resume_publication(
+                        storage,
+                        token,
+                        record,
+                        operation,
+                    ),
                 ),
             )
         )
@@ -535,17 +564,20 @@ def register_routes() -> None:
         asyncio.create_task(
             _run(
                 operation,
-                publish(
+                _guarded_github_call(
                     storage,
-                    token,
-                    owner,
-                    repo,
-                    data["repository"],
-                    product,
-                    data["workflow"],
-                    operation,
-                    data.get("cover", data.get("preview")),
-                    data.get("selected_loras", []),
+                    publish(
+                        storage,
+                        token,
+                        owner,
+                        repo,
+                        data["repository"],
+                        product,
+                        data["workflow"],
+                        operation,
+                        data.get("cover", data.get("preview")),
+                        data.get("selected_loras", []),
+                    ),
                 ),
             )
         )
@@ -559,12 +591,15 @@ def register_routes() -> None:
         token = await tokens.get(storage.key)
         if not token:
             raise ValueError("请先登录 GitHub")
-        result = await update_product(
-            token,
-            request.match_info["owner"],
-            request.match_info["repo"],
-            request.match_info["workflow_id"],
-            data,
+        result = await _guarded_github_call(
+            storage,
+            update_product(
+                token,
+                request.match_info["owner"],
+                request.match_info["repo"],
+                request.match_info["workflow_id"],
+                data,
+            ),
         )
         return web.json_response(result)
 

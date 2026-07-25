@@ -7,8 +7,8 @@
 - 校验 SHA-256 和 JSON 后才原子写入工作流目录。
 - 输入图像逐项校验清单声明、大小和 SHA-256，并写入隔离的 ComfyUI input 子目录。LoRA 不进入主包，只有用户主动选择时才从清单中的 GitHub Release URL 下载；目标路径按原引用置于 ComfyUI LoRA 根目录内，并拒绝越界和覆盖不同内容的同名文件。
 - 不执行包、仓库或清单中的任何代码。
-- Token 只存系统 keyring；keyring 失败时只存当前 Python 进程内存。Token、设备码和 Authorization header 会从日志中脱敏。
-- 所有写 API 要求同源、请求体不超过 2 MiB，并通过 ComfyUI 当前请求解析用户目录；携带 JSON 请求体时必须使用 `application/json`，无参数写操作允许空请求体。
+- Token 只存系统 keyring；keyring 失败时只存当前 Python 进程内存。Token、设备码和 Authorization header 会从日志中脱敏。GitHub 对受信请求返回 401 时自动删除已存凭据并按未登录处理。
+- 所有写 API 要求同源、请求体不超过 20 MiB，并通过 ComfyUI 当前请求解析用户目录；携带 JSON 请求体时必须使用 `application/json`，无参数写操作允许空请求体。
 - 依赖计划默认只读。安装、升级或降级只有在请求明确携带确认后才提交给 Manager，且按顺序提交。
 - 插件不收集遥测。
 

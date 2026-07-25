@@ -1724,6 +1724,84 @@ select:focus {
   padding-bottom: 8px;
 }
 
+.cover-field {
+  margin-top: 4px;
+}
+
+.cover-picker {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 10px;
+  color: var(--text-soft);
+  background: rgb(255 255 255 / 3%);
+  font-size: 14px;
+  font-weight: 560;
+  cursor: pointer;
+  transition: color 0.18s ease, background-color 0.18s ease;
+}
+
+.cover-picker:hover {
+  color: var(--text);
+  background: rgb(255 255 255 / 6%);
+}
+
+.cover-picker input {
+  display: none;
+}
+
+.cover-selected {
+  display: grid;
+  min-height: 56px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  align-items: center;
+  background: rgb(255 255 255 / 3%);
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.cover-selected img {
+  width: 64px;
+  height: 42px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.cover-selected > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.cover-selected strong {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cover-selected small {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.cover-note {
+  margin-bottom: 0;
+}
+
+.review-cover-thumb {
+  width: 56px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
 .publish-review-stage {
   width: min(620px, 100%);
   margin: 0 auto;
@@ -2449,7 +2527,7 @@ select:focus {
   flex: 0 0 auto;
 }
 
-.publish-wizard label {
+.publish-wizard label:not(.cover-picker) {
   display: grid;
   margin-bottom: 13px;
   color: var(--text-soft);

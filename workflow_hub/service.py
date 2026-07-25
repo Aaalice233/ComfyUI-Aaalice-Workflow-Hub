@@ -400,8 +400,8 @@ def _decode_preview(
         content = base64.b64decode(preview_data["data_base64"], validate=True)
     except Exception as exc:
         raise ValueError("项目封面数据无效") from exc
-    if len(content) > 1024 * 1024:
-        raise ValueError("项目封面不能超过 1 MiB")
+    if len(content) > 10 * 1024 * 1024:
+        raise ValueError("项目封面不能超过 10 MiB")
     if suffix == ".png" and not content.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError("项目封面内容不是有效 PNG")
     if suffix == ".webp" and not (content.startswith(b"RIFF") and content[8:12] == b"WEBP"):

@@ -19,6 +19,7 @@ import {
   FolderGit2,
   FolderOpen,
   GitBranch,
+  ImagePlus,
   LibraryBig,
   ListFilter,
   LogOut,
@@ -32,7 +33,7 @@ import {
   UploadCloud,
   X,
 } from "@lucide/vue";
-import { api, post, remove } from "./api";
+import { ApiError, api, post, remove } from "./api";
 import { t, type MessageKey } from "./i18n";
 import {
   publishRepositoryUrl,
@@ -124,6 +125,7 @@ const selectedCatalogProductId = ref("");
 const imageReferences = ref<AssetReference[]>([]);
 const loraReferences = ref<AssetReference[]>([]);
 const selectedLoras = ref<string[]>([]);
+const coverImage = ref<{ name: string; filename: string; data_base64: string; previewUrl: string; size: number } | null>(null);
 const publishStep = ref<1 | 2 | 3>(1);
 const device = ref<{ user_code: string; verification_uri: string; interval: number } | null>(null);
 const deviceCodeCopied = ref(false);
@@ -392,24 +394,33 @@ async function load() {
   products.value = flows.items;
   operations.value = ops.items;
   if (s.github.authenticated) {
-    const [repos, pending] = await Promise.all([
-      api<{ items: PublishRepository[] }>("/github/repositories"),
-      api<{ items: { tag: string }[] }>("/publisher/pending"),
-    ]);
-    repositories.value = repos.items;
-    let remembered = "";
     try {
-      remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
-    } catch {
-      // Browser storage may be unavailable in hardened embedded views.
+      const [repos, pending] = await Promise.all([
+        api<{ items: PublishRepository[] }>("/github/repositories"),
+        api<{ items: { tag: string }[] }>("/publisher/pending"),
+      ]);
+      repositories.value = repos.items;
+      let remembered = "";
+      try {
+        remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
+      } catch {
+        // Browser storage may be unavailable in hardened embedded views.
+      }
+      form.repository_url = resolvePublishRepositoryUrl(
+        repositories.value,
+        form.repository_url,
+        remembered
+      );
+      await applySelectedRepository();
+      pendingPublications.value = pending.items;
+    } catch (reason) {
+      if (!(reason instanceof ApiError && reason.status === 401)) throw reason;
+      // The backend has already discarded the dead credential; drop the local
+      // authenticated state so the publish UI offers sign-in instead of failing again.
+      status.value.github.authenticated = false;
+      repositories.value = [];
+      error.value = reason.message;
     }
-    form.repository_url = resolvePublishRepositoryUrl(
-      repositories.value,
-      form.repository_url,
-      remembered
-    );
-    await applySelectedRepository();
-    pendingPublications.value = pending.items;
   } else {
     repositories.value = [];
   }
@@ -741,7 +752,43 @@ function payload() {
     },
     workflow: workflow.value,
     selected_loras: selectedLoras.value,
+    ...(coverImage.value ? { cover: { filename: coverImage.value.filename, data_base64: coverImage.value.data_base64 } } : {}),
   };
+}
+const coverImageTypes: Record<string, string> = { "image/png": ".png", "image/webp": ".webp", "image/jpeg": ".jpg" };
+function chooseCoverImage(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  const suffix = coverImageTypes[file.type];
+  if (!suffix) {
+    error.value = t.value("coverImageInvalidType");
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    error.value = t.value("coverImageTooLarge");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = String(reader.result || "");
+    const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+    if (!base64) {
+      error.value = t.value("coverImageReadFailed");
+      return;
+    }
+    error.value = "";
+    // The server derives the format from this suffix and stores the file as {tag}-cover{suffix}.
+    coverImage.value = { name: file.name, filename: `cover${suffix}`, data_base64: base64, previewUrl: dataUrl, size: file.size };
+  };
+  reader.onerror = () => {
+    error.value = t.value("coverImageReadFailed");
+  };
+  reader.readAsDataURL(file);
+}
+function clearCoverImage() {
+  coverImage.value = null;
 }
 async function validatePublish() {
   await withBusy("validate", async () => {
@@ -1148,6 +1195,19 @@ onBeforeUnmount(() => {
                         <strong>{{ form.id || generatedWorkflowId(form.name || t("unnamedWorkflow")) }}</strong>
                       </label>
                       <label class="compact-field release-notes-field"><span>{{ t("releaseNotes") }}</span><textarea v-model="form.changelog" rows="5" /></label>
+                      <div class="compact-field cover-field">
+                        <span>{{ t("coverImage") }}<em>{{ t("optional") }}</em></span>
+                        <div v-if="coverImage" class="cover-selected">
+                          <img :src="coverImage.previewUrl" :alt="t('coverImage')" />
+                          <span><strong>{{ coverImage.name }}</strong><small>{{ humanBytes(coverImage.size) }}</small></span>
+                          <button class="ghost compact-action" type="button" :disabled="!!busy" @click="clearCoverImage"><Trash2 :size="14" />{{ t("remove") }}</button>
+                        </div>
+                        <label v-else class="cover-picker">
+                          <ImagePlus :size="16" />{{ t("chooseCoverImage") }}
+                          <input type="file" accept="image/png,image/webp,image/jpeg" @change="chooseCoverImage" />
+                        </label>
+                        <small class="field-note cover-note">{{ t("coverImageHint") }}</small>
+                      </div>
                     </div>
                   </section>
 
@@ -1156,6 +1216,10 @@ onBeforeUnmount(() => {
                       <div><small>{{ t("repositoryLabel") }}</small><span><strong>{{ form.author && form.repository_name ? `${form.author}/${form.repository_name}` : "—" }}</strong></span></div>
                       <div><small>{{ t("workflowLabel") }}</small><span><strong>{{ form.name || "—" }}</strong><em>{{ form.category || "—" }}</em></span></div>
                       <div><small>{{ t("releaseVersion") }}</small><span><strong>v{{ form.version || "—" }}</strong><em>{{ form.id || generatedWorkflowId(form.name || "workflow") }}</em></span></div>
+                      <div><small>{{ t("coverImage") }}</small>
+                        <span v-if="coverImage"><img class="review-cover-thumb" :src="coverImage.previewUrl" :alt="t('coverImage')" /><em>{{ coverImage.name }}</em></span>
+                        <span v-else><strong>—</strong></span>
+                      </div>
                       <div><small>{{ t("comfyCore") }}</small><span><strong>{{ status?.comfyui_version || "—" }}</strong></span></div>
                     </div>
                     <div class="publish-review-resources">
