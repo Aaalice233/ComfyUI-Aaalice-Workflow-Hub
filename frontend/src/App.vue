@@ -34,6 +34,11 @@ import {
 } from "@lucide/vue";
 import { api, post, remove } from "./api";
 import { t, type MessageKey } from "./i18n";
+import {
+  publishRepositoryUrl,
+  resolvePublishRepositoryUrl,
+  type PublishRepository,
+} from "./repository-selection";
 
 type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
 type ModelAsset = { name: string; type: string; filename: string; source_url: string; sha256?: string | null };
@@ -100,7 +105,7 @@ const error = ref("");
 const notice = ref("");
 const drawer = ref(false);
 const operations = ref<Operation[]>([]);
-const repositories = ref<{ full_name: string; name?: string; owner?: string; description?: string }[]>([]);
+const repositories = ref<PublishRepository[]>([]);
 const createRepositoryName = ref("");
 const createRepositoryOpen = ref(false);
 const pendingPublications = ref<{ tag: string }[]>([]);
@@ -388,26 +393,21 @@ async function load() {
   operations.value = ops.items;
   if (s.github.authenticated) {
     const [repos, pending] = await Promise.all([
-      api<{ items: { full_name: string; name?: string; owner?: string; description?: string }[] }>("/github/repositories"),
+      api<{ items: PublishRepository[] }>("/github/repositories"),
       api<{ items: { tag: string }[] }>("/publisher/pending"),
     ]);
     repositories.value = repos.items;
-    if (!form.repository_url) {
-      let remembered = "";
-      try {
-        remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
-      } catch {
-        // Browser storage may be unavailable in hardened embedded views.
-      }
-      const rememberedExists = repositories.value.some(
-        (item) => `https://github.com/${item.full_name}`.toLocaleLowerCase() === remembered.toLocaleLowerCase()
-      );
-      if (rememberedExists) {
-        form.repository_url = remembered;
-      } else if (repositories.value.length) {
-        form.repository_url = `https://github.com/${repositories.value[0].full_name}`;
-      }
+    let remembered = "";
+    try {
+      remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
+    } catch {
+      // Browser storage may be unavailable in hardened embedded views.
     }
+    form.repository_url = resolvePublishRepositoryUrl(
+      repositories.value,
+      form.repository_url,
+      remembered
+    );
     await applySelectedRepository();
     pendingPublications.value = pending.items;
   } else {
@@ -1116,8 +1116,8 @@ onBeforeUnmount(() => {
                       <label class="compact-field">
                         <span class="select-control">
                           <select v-model="form.repository_url" :disabled="!repositories.length" @change="applySelectedRepository">
-                            <option value="">{{ repositories.length ? t("chooseRepository") : t("noAuthorizedRepositories") }}</option>
-                            <option v-for="repo in repositories" :key="repo.full_name" :value="`https://github.com/${repo.full_name}`">{{ repo.full_name }}</option>
+                            <option v-if="!repositories.length" value="">{{ t("noAuthorizedRepositories") }}</option>
+                            <option v-for="repo in repositories" :key="repo.full_name" :value="publishRepositoryUrl(repo)">{{ repo.full_name }}</option>
                           </select>
                           <span class="select-chevron" aria-hidden="true"><ChevronDown :size="15" :stroke-width="2.4" /></span>
                         </span>
