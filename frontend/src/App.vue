@@ -17,6 +17,7 @@ import {
   FileJson,
   FileUp,
   FolderGit2,
+  FolderCog,
   FolderOpen,
   GitBranch,
   ImagePlus,
@@ -42,6 +43,11 @@ import {
 } from "./repository-selection";
 
 type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
+type ManagedVersion = { version: string; published_at: string; changelog: string; package: { size: number } };
+type ManagedProduct = {
+  id: string; name: string; category: string; summary: string; description: string;
+  tags: string[]; archived: boolean; cover?: { url: string } | null; versions: ManagedVersion[];
+};
 type ModelAsset = { name: string; type: string; filename: string; source_url: string; sha256?: string | null };
 type AssetReference = {
   name: string; filename: string; node_ids: string[]; status: string; size?: number | null; sha256?: string | null;
@@ -89,7 +95,7 @@ type PublishCatalogProduct = {
 };
 
 const LAST_PUBLISH_REPOSITORY_KEY = "aaalice-workflow-hub:last-publish-repository";
-const tab = ref<"subscribe" | "publish">("subscribe");
+const tab = ref<"subscribe" | "publish" | "manage">("subscribe");
 const status = ref<Status | null>(null);
 const sources = ref<Source[]>([]);
 const products = ref<Product[]>([]);
@@ -110,6 +116,13 @@ const repositories = ref<PublishRepository[]>([]);
 const createRepositoryName = ref("");
 const createRepositoryOpen = ref(false);
 const pendingPublications = ref<{ tag: string }[]>([]);
+const managedProducts = ref<ManagedProduct[]>([]);
+const manageRepositoryUrl = ref("");
+const manageLoading = ref(false);
+const manageExpanded = ref<string[]>([]);
+const editingProduct = ref<ManagedProduct | null>(null);
+const editForm = reactive({ name: "", category: "", summary: "", description: "", tags: "" });
+const editingChangelog = ref<{ product: ManagedProduct; version: ManagedVersion; text: string } | null>(null);
 const workflow = ref<Record<string, unknown> | null>(null);
 const workflowSourceName = ref("");
 const canvasWorkflowError = ref("");
@@ -186,6 +199,7 @@ const detailVersions = computed(() =>
 const activeDetailVersion = computed(() =>
   detailVersions.value.find((version) => version.version === selectedDetailVersion.value) || detailVersions.value[0] || null
 );
+const publishStepLabels = computed(() => [t.value("stepResources"), t.value("stepDetails"), t.value("stepReview")]);
 const canAdvancePublish = computed(() => {
   return !!form.repository_url.trim() && !!form.repository_name.trim() && !!form.author.trim();
 });
@@ -815,32 +829,125 @@ async function resumePending(tag: string) {
     await pollOperations();
   });
 }
-async function archiveProduct(item: Product) {
-  const next = !item.archived;
-  if (!confirm(t.value(next ? "confirmArchive" : "confirmUnarchive", { name: item.name }))) return;
-  await withBusy("archive", async () => {
-    await api(`/publisher/workflows/${item.source.owner}/${item.source.repo}/${item.id}`, {
-      method: "PATCH", body: JSON.stringify({ archived: next }),
-    });
-    selected.value = null;
-    await load();
+function manageRepositoryFullName() {
+  const match = manageRepositoryUrl.value.match(/github\.com\/([^/]+\/[^/]+)/i);
+  return match ? match[1].replace(/\/+$/, "") : "";
+}
+function managedVersions(product: ManagedProduct) {
+  return [...product.versions].sort((a, b) => {
+    const left = normalizeVersion(a.version), right = normalizeVersion(b.version);
+    return right[0] - left[0] || right[1] - left[1] || right[2] - left[2];
   });
 }
-async function editProduct(item: Product) {
-  const name = prompt(t.value("name"), item.name);
-  if (name === null) return;
-  const category = prompt(t.value("category"), item.category);
-  if (category === null) return;
-  const summary = prompt(t.value("summary"), item.summary);
-  if (summary === null) return;
-  const tags = prompt(t.value("tags"), item.tags.join(", "));
-  if (tags === null) return;
-  await withBusy("metadata", async () => {
-    await api(`/publisher/workflows/${item.source.owner}/${item.source.repo}/${item.id}`, {
+function toggleManageExpanded(id: string) {
+  manageExpanded.value = manageExpanded.value.includes(id)
+    ? manageExpanded.value.filter((item) => item !== id)
+    : [...manageExpanded.value, id];
+}
+async function loadManaged() {
+  const fullName = manageRepositoryFullName();
+  if (!fullName) {
+    managedProducts.value = [];
+    return;
+  }
+  manageLoading.value = true;
+  try {
+    const [owner, repo] = fullName.split("/");
+    const result = await api<{ items: ManagedProduct[] }>(`/publisher/manage/${owner}/${repo}`);
+    managedProducts.value = result.items;
+    manageExpanded.value = manageExpanded.value.filter((id) => result.items.some((item) => item.id === id));
+  } finally {
+    manageLoading.value = false;
+  }
+}
+async function enterManage() {
+  if (!status.value?.github.authenticated) return;
+  if (!manageRepositoryUrl.value) {
+    manageRepositoryUrl.value = form.repository_url || (repositories.value[0] ? publishRepositoryUrl(repositories.value[0]) : "");
+  }
+  await withBusy("manage", loadManaged);
+}
+async function reloadAfterManage() {
+  await loadManaged();
+  const fullName = manageRepositoryFullName().toLowerCase();
+  const source = sources.value.find((item) => `${item.owner}/${item.repo}`.toLowerCase() === fullName);
+  if (source) {
+    await post(`/subscriptions/${source.owner}/${source.repo}/refresh`, {});
+  }
+  await load();
+}
+function openProductEditor(product: ManagedProduct) {
+  editForm.name = product.name;
+  editForm.category = product.category;
+  editForm.summary = product.summary;
+  editForm.description = product.description;
+  editForm.tags = product.tags.join(", ");
+  editingProduct.value = product;
+}
+async function saveProductEditor() {
+  const product = editingProduct.value;
+  if (!product) return;
+  await withBusy("manage-edit", async () => {
+    const [owner, repo] = manageRepositoryFullName().split("/");
+    await api(`/publisher/workflows/${owner}/${repo}/${product.id}`, {
       method: "PATCH",
-      body: JSON.stringify({ name, category: category.trim(), summary, tags: tags.split(",").map(value => value.trim()).filter(Boolean) }),
+      body: JSON.stringify({
+        name: editForm.name.trim(),
+        category: editForm.category.trim(),
+        summary: editForm.summary,
+        description: editForm.description,
+        tags: editForm.tags.split(",").map((item) => item.trim()).filter(Boolean),
+      }),
     });
-    await load();
+    editingProduct.value = null;
+    await reloadAfterManage();
+    notice.value = t.value("metadataSaved");
+  });
+}
+async function toggleManagedArchive(product: ManagedProduct) {
+  const next = !product.archived;
+  if (!confirm(t.value(next ? "confirmArchive" : "confirmUnarchive", { name: product.name }))) return;
+  await withBusy("manage-archive", async () => {
+    const [owner, repo] = manageRepositoryFullName().split("/");
+    await api(`/publisher/workflows/${owner}/${repo}/${product.id}`, {
+      method: "PATCH", body: JSON.stringify({ archived: next }),
+    });
+    await reloadAfterManage();
+  });
+}
+async function deleteManagedWorkflow(product: ManagedProduct) {
+  if (!confirm(t.value("confirmDeleteWorkflow", { name: product.name, count: product.versions.length }))) return;
+  await withBusy("manage-delete", async () => {
+    const [owner, repo] = manageRepositoryFullName().split("/");
+    await remove(`/publisher/workflows/${owner}/${repo}/${product.id}`, { confirmed: true });
+    await reloadAfterManage();
+    notice.value = t.value("workflowDeleted", { name: product.name });
+  });
+}
+async function deleteManagedVersion(product: ManagedProduct, version: ManagedVersion) {
+  if (!confirm(t.value("confirmDeleteVersion", { name: product.name, version: version.version }))) return;
+  await withBusy("manage-delete", async () => {
+    const [owner, repo] = manageRepositoryFullName().split("/");
+    await remove(`/publisher/workflows/${owner}/${repo}/${product.id}/versions/${encodeURIComponent(version.version)}`, { confirmed: true });
+    await reloadAfterManage();
+    notice.value = t.value("versionDeleted", { version: version.version });
+  });
+}
+function openChangelogEditor(product: ManagedProduct, version: ManagedVersion) {
+  editingChangelog.value = { product, version, text: version.changelog };
+}
+async function saveChangelogEditor() {
+  const editing = editingChangelog.value;
+  if (!editing) return;
+  await withBusy("manage-changelog", async () => {
+    const [owner, repo] = manageRepositoryFullName().split("/");
+    await api(
+      `/publisher/workflows/${owner}/${repo}/${editing.product.id}/versions/${encodeURIComponent(editing.version.version)}`,
+      { method: "PATCH", body: JSON.stringify({ changelog: editing.text }) },
+    );
+    editingChangelog.value = null;
+    await reloadAfterManage();
+    notice.value = t.value("changelogSaved");
   });
 }
 async function startLogin() {
@@ -917,6 +1024,9 @@ onBeforeUnmount(() => {
         </button>
         <button :class="{ active: tab === 'publish' }" @click="tab = 'publish'">
           <UploadCloud :size="18" /><span>{{ t("publish") }}</span>
+        </button>
+        <button :class="{ active: tab === 'manage' }" @click="tab = 'manage'; enterManage()">
+          <FolderCog :size="18" /><span>{{ t("manage") }}</span>
         </button>
       </nav>
 
@@ -1062,9 +1172,9 @@ onBeforeUnmount(() => {
               </div>
               <div v-else>
                 <span class="eyebrow">{{ t("githubAuthorization") }}</span>
-                <h1>{{ t("signInToPublish") }}</h1>
+                <h1>{{ tab === 'manage' ? t("signInToManage") : t("signInToPublish") }}</h1>
                 <p>{{ status?.github.configured
-                  ? t("signInPublishHint")
+                  ? (tab === 'manage' ? t("signInManageHint") : t("signInPublishHint"))
                   : t("githubNotConfigured") }}</p>
               </div>
               <button v-if="!device" class="primary auth-gate-action" :disabled="!status?.github.configured || !!busy" @click="startLogin">
@@ -1073,6 +1183,7 @@ onBeforeUnmount(() => {
             </div>
 
             <template v-else>
+              <template v-if="tab === 'publish'">
               <div v-if="pendingPublications.length" class="publish-utilities">
                 <details v-if="pendingPublications.length"><summary>{{ t("pendingPublications") }}</summary>
                   <button v-for="item in pendingPublications" :key="item.tag" class="ghost" @click="resumePending(item.tag)">{{ item.tag }}</button>
@@ -1087,6 +1198,17 @@ onBeforeUnmount(() => {
                     <strong>{{ workflowSourceName || t("readingCanvas") }}</strong>
                     <em v-if="canvasWorkflowError">{{ canvasWorkflowError }}</em>
                   </span>
+                  <nav class="publish-steps" :aria-label="t('publishSteps')">
+                    <button
+                      v-for="(label, index) in publishStepLabels"
+                      :key="index"
+                      :class="{ active: publishStep === index + 1, done: publishStep > index + 1 }"
+                      :disabled="publishStep <= index + 1"
+                      @click="moveToPublishStep((index + 1) as 1 | 2 | 3)"
+                    >
+                      <i>{{ index + 1 }}</i><span>{{ label }}</span>
+                    </button>
+                  </nav>
                   <div class="publish-context-stats">
                     <span><PackageOpen :size="14" />{{ customNodeCount }}</span>
                     <span><FileUp :size="14" />{{ imageReferences.length }}</span>
@@ -1158,17 +1280,19 @@ onBeforeUnmount(() => {
                       <div class="publish-section-title">
                         <span><GitBranch :size="16" /></span>
                         <div><strong>{{ t("destination") }}</strong><small>{{ t("repositoryRemembered") }}</small></div>
-                        <button class="ghost compact-action" @click="createRepositoryOpen = !createRepositoryOpen"><Plus :size="14" />{{ t("newRepository") }}</button>
                       </div>
-                      <label class="compact-field">
-                        <span class="select-control">
-                          <select v-model="form.repository_url" :disabled="!repositories.length" @change="applySelectedRepository">
-                            <option v-if="!repositories.length" value="">{{ t("noAuthorizedRepositories") }}</option>
-                            <option v-for="repo in repositories" :key="repo.full_name" :value="publishRepositoryUrl(repo)">{{ repo.full_name }}</option>
-                          </select>
-                          <span class="select-chevron" aria-hidden="true"><ChevronDown :size="15" :stroke-width="2.4" /></span>
-                        </span>
-                      </label>
+                      <div class="repository-row">
+                        <label class="compact-field repository-select">
+                          <span class="select-control">
+                            <select v-model="form.repository_url" :disabled="!repositories.length" @change="applySelectedRepository">
+                              <option v-if="!repositories.length" value="">{{ t("noAuthorizedRepositories") }}</option>
+                              <option v-for="repo in repositories" :key="repo.full_name" :value="publishRepositoryUrl(repo)">{{ repo.full_name }}</option>
+                            </select>
+                            <span class="select-chevron" aria-hidden="true"><ChevronDown :size="15" :stroke-width="2.4" /></span>
+                          </span>
+                        </label>
+                        <button class="secondary repository-new" @click="createRepositoryOpen = !createRepositoryOpen"><Plus :size="15" />{{ t("newRepository") }}</button>
+                      </div>
                       <div v-if="createRepositoryOpen" class="inline create-repo">
                         <input v-model="createRepositoryName" :placeholder="t('repositoryNamePlaceholder')" @keyup.enter="createRepository" />
                         <button class="secondary" :disabled="!createRepositoryName" @click="createRepository"><Plus :size="16" />{{ t("create") }}</button>
@@ -1180,22 +1304,23 @@ onBeforeUnmount(() => {
                         <span><FileJson :size="16" /></span>
                         <div><strong>{{ t("releaseInformation") }}</strong><small>{{ t("completeFieldsInOrder") }}</small></div>
                       </div>
-                      <label class="compact-field"><span>{{ t("category") }}</span>
-                        <input v-model="form.category" list="workflow-category-options" maxlength="80" required :placeholder="t('categoryPlaceholder')" @input="syncCatalogProductByName" />
-                        <datalist id="workflow-category-options"><option v-for="category in repositoryCategories" :key="category" :value="category" /></datalist>
-                      </label>
-                      <label class="compact-field"><span>{{ t("name") }}</span>
-                        <input v-model="form.name" list="workflow-name-options" maxlength="80" @input="syncCatalogProductByName" />
-                        <datalist id="workflow-name-options"><option v-for="item in publishCatalogProducts" :key="item.id" :value="item.name" /></datalist>
-                      </label>
-                      <label class="compact-field"><span>{{ t("version") }}</span><input v-model="form.version" placeholder="1.0" /></label>
-                      <p v-if="selectedCatalogProduct" class="field-note">{{ t("publishedVersions", { versions: selectedCatalogProduct.versions.join(t("listSeparator")) || t("none") }) }}</p>
-                      <p v-if="existingVersionConflict" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlreadyPublished") }}</span></p>
-                      <label class="publish-id-preview compact-field"><span>{{ t("publishId") }}<em>{{ t("automatic") }}</em></span>
-                        <strong>{{ form.id || generatedWorkflowId(form.name || t("unnamedWorkflow")) }}</strong>
-                      </label>
-                      <label class="compact-field release-notes-field"><span>{{ t("releaseNotes") }}</span><textarea v-model="form.changelog" rows="5" /></label>
-                      <div class="compact-field cover-field">
+                      <div class="field-grid">
+                        <label class="compact-field"><span>{{ t("category") }}</span>
+                          <input v-model="form.category" list="workflow-category-options" maxlength="80" required :placeholder="t('categoryPlaceholder')" @input="syncCatalogProductByName" />
+                          <datalist id="workflow-category-options"><option v-for="category in repositoryCategories" :key="category" :value="category" /></datalist>
+                        </label>
+                        <label class="compact-field"><span>{{ t("name") }}</span>
+                          <input v-model="form.name" list="workflow-name-options" maxlength="80" @input="syncCatalogProductByName" />
+                          <datalist id="workflow-name-options"><option v-for="item in publishCatalogProducts" :key="item.id" :value="item.name" /></datalist>
+                        </label>
+                        <label class="compact-field"><span>{{ t("version") }}</span><input v-model="form.version" placeholder="1.0" /></label>
+                        <div class="compact-field publish-id-preview"><span>{{ t("publishId") }}<em>{{ t("automatic") }}</em></span>
+                          <strong>{{ form.id || generatedWorkflowId(form.name || t("unnamedWorkflow")) }}</strong>
+                        </div>
+                        <p v-if="selectedCatalogProduct" class="field-note span-2">{{ t("publishedVersions", { versions: selectedCatalogProduct.versions.join(t("listSeparator")) || t("none") }) }}</p>
+                        <p v-if="existingVersionConflict" class="message warning span-2"><TriangleAlert :size="16" /><span>{{ t("versionAlreadyPublished") }}</span></p>
+                        <label class="compact-field release-notes-field span-2"><span>{{ t("releaseNotes") }}</span><textarea v-model="form.changelog" rows="4" /></label>
+                        <div class="compact-field cover-field span-2">
                         <span>{{ t("coverImage") }}<em>{{ t("optional") }}</em></span>
                         <div v-if="coverImage" class="cover-selected">
                           <img :src="coverImage.previewUrl" :alt="t('coverImage')" />
@@ -1207,6 +1332,7 @@ onBeforeUnmount(() => {
                           <input type="file" accept="image/png,image/webp,image/jpeg" @change="chooseCoverImage" />
                         </label>
                         <small class="field-note cover-note">{{ t("coverImageHint") }}</small>
+                        </div>
                       </div>
                     </div>
                   </section>
@@ -1248,6 +1374,55 @@ onBeforeUnmount(() => {
                   </template>
                 </footer>
               </section>
+              </template>
+
+              <section v-else class="manage-shell">
+                <header class="manage-toolbar">
+                  <label class="compact-field manage-repository">
+                    <span class="select-control">
+                      <select v-model="manageRepositoryUrl" :disabled="!repositories.length || manageLoading" @change="withBusy('manage', loadManaged)">
+                        <option v-if="!repositories.length" value="">{{ t("noAuthorizedRepositories") }}</option>
+                        <option v-for="repo in repositories" :key="repo.full_name" :value="publishRepositoryUrl(repo)">{{ repo.full_name }}</option>
+                      </select>
+                      <span class="select-chevron" aria-hidden="true"><ChevronDown :size="15" :stroke-width="2.4" /></span>
+                    </span>
+                  </label>
+                  <button class="ghost compact-action" :disabled="!!busy || manageLoading" @click="withBusy('manage', loadManaged)"><RefreshCw :size="15" />{{ t("refreshManaged") }}</button>
+                </header>
+                <p class="manage-hint">{{ t("manageHint") }}</p>
+
+                <div v-if="manageLoading" class="empty small"><RefreshCw :size="20" class="spinning" /><span>{{ t("manageLoading") }}</span></div>
+                <div v-else-if="!managedProducts.length" class="empty small"><FolderCog :size="22" /><span>{{ t("noManagedProducts") }}</span></div>
+                <ul v-else class="manage-list">
+                  <li v-for="product in managedProducts" :key="product.id" class="manage-item" :class="{ archived: product.archived }">
+                    <div class="manage-item-main">
+                      <button class="manage-item-head" @click="toggleManageExpanded(product.id)">
+                        <span class="manage-cover"><img v-if="product.cover" :src="product.cover.url" :alt="product.name" /><LibraryBig v-else :size="18" /></span>
+                        <span class="manage-identity">
+                          <strong>{{ product.name }}<em v-if="product.archived" class="archived-tag">{{ t("archived") }}</em></strong>
+                          <small>{{ product.category }} · {{ product.versions.length }} {{ t("versions") }}</small>
+                        </span>
+                        <ChevronDown :size="16" class="manage-chevron" :class="{ expanded: manageExpanded.includes(product.id) }" />
+                      </button>
+                      <div class="manage-item-actions">
+                        <button class="secondary compact-action" :disabled="!!busy" @click="openProductEditor(product)">{{ t("edit") }}</button>
+                        <button class="ghost compact-action" :disabled="!!busy" @click="toggleManagedArchive(product)"><ArchiveIcon :size="14" />{{ product.archived ? t("unarchive") : t("archive") }}</button>
+                        <button class="ghost compact-action danger-action" :disabled="!!busy" @click="deleteManagedWorkflow(product)"><Trash2 :size="14" />{{ t("deleteWorkflow") }}</button>
+                      </div>
+                    </div>
+                    <div v-if="manageExpanded.includes(product.id)" class="manage-versions">
+                      <div v-for="version in managedVersions(product)" :key="version.version" class="manage-version-row">
+                        <span class="manage-version-meta"><strong>v{{ version.version }}</strong><small>{{ new Date(version.published_at).toLocaleDateString() }} · {{ humanBytes(version.package.size) }}</small></span>
+                        <p>{{ version.changelog }}</p>
+                        <span class="manage-version-actions">
+                          <button class="ghost compact-action" :disabled="!!busy" @click="openChangelogEditor(product, version)">{{ t("editChangelog") }}</button>
+                          <button class="ghost compact-action danger-action" :disabled="!!busy" @click="deleteManagedVersion(product, version)"><Trash2 :size="13" />{{ t("deleteVersion") }}</button>
+                        </span>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </section>
             </template>
           </div>
         </Transition>
@@ -1270,10 +1445,6 @@ onBeforeUnmount(() => {
             <h1>{{ selected.name }}</h1>
             <p>{{ selected.summary || selected.description || t("noWorkflowDescription") }}</p>
             <div class="tags"><span v-if="selected.category" class="category-tag"><FolderOpen :size="11" />{{ selected.category }}</span><span v-for="tag in selected.tags" :key="tag">{{ tag }}</span></div>
-          </div>
-          <div v-if="status?.github.authenticated" class="manage-actions">
-            <button class="secondary" @click="editProduct(selected)">{{ t("edit") }}</button>
-            <button class="ghost danger-action" @click="archiveProduct(selected)"><ArchiveIcon :size="15" />{{ selected.archived ? t("unarchive") : t("archive") }}</button>
           </div>
         </header>
 
@@ -1335,7 +1506,7 @@ onBeforeUnmount(() => {
             <div v-if="activeDetailVersion.custom_nodes.length || activeDetailVersion.inputs?.length || loraAssets(activeDetailVersion).length" class="resource-groups">
               <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group">
                 <div class="resource-group-heading"><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong></div>
-                <div v-for="node in activeDetailVersion.custom_nodes" :key="node.registry_id || node.name" class="asset-row dependency-asset-row">
+                <div v-for="node in activeDetailVersion.custom_nodes" :key="node.registry_id || node.name" class="asset-row">
                   <span><PackageOpen :size="15" /><strong>{{ node.name }}</strong><small>{{ node.registry_id || t("registryNotMatchedComfy") }}</small></span>
                   <em>{{ node.version || (node.manual ? t("manualInstall") : t("anyVersion")) }}</em>
                 </div>
@@ -1380,6 +1551,32 @@ onBeforeUnmount(() => {
         </article>
         </div>
       </aside>
+    </div>
+
+    <div v-if="editingProduct" class="backdrop" @click.self="editingProduct = null">
+      <section class="manage-dialog">
+        <h2>{{ t("editMetadataTitle") }}</h2>
+        <label class="compact-field"><span>{{ t("name") }}</span><input v-model="editForm.name" maxlength="80" /></label>
+        <label class="compact-field"><span>{{ t("category") }}</span><input v-model="editForm.category" maxlength="80" /></label>
+        <label class="compact-field"><span>{{ t("summary") }}</span><input v-model="editForm.summary" maxlength="300" /></label>
+        <label class="compact-field"><span>{{ t("description") }}</span><textarea v-model="editForm.description" rows="4"></textarea></label>
+        <label class="compact-field"><span>{{ t("tags") }}</span><input v-model="editForm.tags" /></label>
+        <div class="manage-dialog-actions">
+          <button class="ghost" @click="editingProduct = null">{{ t("cancel") }}</button>
+          <button class="primary" :disabled="!!busy || !editForm.name.trim() || !editForm.category.trim()" @click="saveProductEditor">{{ t("save") }}</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="editingChangelog" class="backdrop" @click.self="editingChangelog = null">
+      <section class="manage-dialog">
+        <h2>{{ t("changelogFor", { version: editingChangelog.version.version }) }}</h2>
+        <textarea v-model="editingChangelog.text" rows="8" class="manage-changelog-input"></textarea>
+        <div class="manage-dialog-actions">
+          <button class="ghost" @click="editingChangelog = null">{{ t("cancel") }}</button>
+          <button class="primary" :disabled="!!busy || !editingChangelog.text.trim()" @click="saveChangelogEditor">{{ t("save") }}</button>
+        </div>
+      </section>
     </div>
 
     <aside v-if="drawer" class="activity-drawer">

@@ -343,6 +343,22 @@ class GitHubClient:
         )
         return data
 
+    async def update_release_notes(self, owner: str, repo: str, release_id: int, body: str) -> None:
+        await self.request("PATCH", f"{API}/repos/{owner}/{repo}/releases/{release_id}", json={"body": body})
+
+    async def delete_release(self, owner: str, repo: str, release_id: int) -> None:
+        await self.request("DELETE", f"{API}/repos/{owner}/{repo}/releases/{release_id}", expected=(204,))
+
+    async def delete_tag(self, owner: str, repo: str, tag: str) -> None:
+        try:
+            await self.request(
+                "DELETE", f"{API}/repos/{owner}/{repo}/git/refs/tags/{quote(tag, safe='')}", expected=(204,)
+            )
+        except GitHubError as exc:
+            # 删除是幂等目标：tag 已不存在时直接视为完成。
+            if exc.status != 422:
+                raise
+
     async def download(self, url: str, destination: Any, operation: Any | None = None) -> None:
         require_github_https(url)
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:

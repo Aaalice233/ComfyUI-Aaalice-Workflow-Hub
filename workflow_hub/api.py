@@ -19,15 +19,19 @@ from .security import ensure_within, parse_public_repository
 from .service import (
     add_subscription,
     aggregate_catalog,
+    delete_version,
+    delete_workflow,
     download_optional_lora,
     download_version,
     find_catalog_updates,
+    list_managed_products,
     list_subscriptions,
     publish,
     refresh_subscription,
     resume_publication,
     reveal_in_file_manager,
     update_product,
+    update_version_changelog,
 )
 from .storage import UserStorage
 
@@ -599,6 +603,78 @@ def register_routes() -> None:
                 request.match_info["repo"],
                 request.match_info["workflow_id"],
                 data,
+            ),
+        )
+        return web.json_response(result)
+
+    @routes.get(f"{BASE}/publisher/manage/{{owner}}/{{repo}}")
+    @endpoint
+    async def publisher_manage_list(request: web.Request) -> web.StreamResponse:
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        items = await _guarded_github_call(
+            storage,
+            list_managed_products(token, request.match_info["owner"], request.match_info["repo"]),
+        )
+        return web.json_response({"items": items})
+
+    @routes.delete(f"{BASE}/publisher/workflows/{{owner}}/{{repo}}/{{workflow_id}}")
+    @endpoint
+    async def publisher_workflow_delete(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        if data.get("confirmed") is not True:
+            raise ValueError("必须明确确认后才能删除工作流")
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        result = await _guarded_github_call(
+            storage,
+            delete_workflow(token, request.match_info["owner"], request.match_info["repo"], request.match_info["workflow_id"]),
+        )
+        return web.json_response(result)
+
+    @routes.delete(f"{BASE}/publisher/workflows/{{owner}}/{{repo}}/{{workflow_id}}/versions/{{version}}")
+    @endpoint
+    async def publisher_version_delete(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        if data.get("confirmed") is not True:
+            raise ValueError("必须明确确认后才能删除版本")
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        result = await _guarded_github_call(
+            storage,
+            delete_version(
+                token,
+                request.match_info["owner"],
+                request.match_info["repo"],
+                request.match_info["workflow_id"],
+                request.match_info["version"],
+            ),
+        )
+        return web.json_response(result)
+
+    @routes.patch(f"{BASE}/publisher/workflows/{{owner}}/{{repo}}/{{workflow_id}}/versions/{{version}}")
+    @endpoint
+    async def publisher_version_update(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        token = await tokens.get(storage.key)
+        if not token:
+            raise ValueError("请先登录 GitHub")
+        result = await _guarded_github_call(
+            storage,
+            update_version_changelog(
+                token,
+                request.match_info["owner"],
+                request.match_info["repo"],
+                request.match_info["workflow_id"],
+                request.match_info["version"],
+                str(data.get("changelog", "")),
             ),
         )
         return web.json_response(result)

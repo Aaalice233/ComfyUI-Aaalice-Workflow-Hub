@@ -32,7 +32,7 @@ from .catalog import (
 from .github import BranchState, GitHubClient, GitHubError, GitTreeFile
 from .operations import Operation
 from .packages import build_package_files, install_workflow, read_package_files, write_package
-from .repository import build_projection_files, build_repository_files
+from .repository import build_projection_files, build_repository_files, json_bytes, render_workflows_readme
 from .security import ensure_within, parse_public_repository, require_github_https, safe_filename
 from .storage import UserStorage
 
@@ -661,6 +661,152 @@ async def update_product(
                 copy_blobs=copies,
             )
             return product.model_dump(mode="json")
+        except GitHubError as exc:
+            if attempt == 0 and exc.status in (409, 422):
+                continue
+            raise
+    raise RuntimeError("仓库并发更新失败")
+
+
+async def list_managed_products(token: str, owner: str, repo: str) -> list[dict[str, Any]]:
+    remote = await GitHubClient(token).get_catalog(owner, repo)
+    if remote is None:
+        return []
+    catalog = validate_catalog_assets(Catalog.model_validate_json(remote.content))
+    return [product.model_dump(mode="json") for product in catalog.workflows]
+
+
+async def _remove_release(client: GitHubClient, owner: str, repo: str, tag: str) -> None:
+    release = await client.get_release_by_tag(owner, repo, tag)
+    if release is not None:
+        await client.delete_release(owner, repo, int(release["id"]))
+    await client.delete_tag(owner, repo, tag)
+
+
+def _catalog_projection(catalog: Catalog) -> dict[str, bytes]:
+    return {
+        "workflow-catalog.json": json_bytes(catalog.model_dump(mode="json")),
+        "workflows/README.md": render_workflows_readme(catalog),
+    }
+
+
+async def delete_version(token: str, owner: str, repo: str, workflow_id: str, version_number: str) -> dict[str, Any]:
+    client = GitHubClient(token)
+    for attempt in range(2):
+        state = await client.get_branch_state(owner, repo)
+        catalog = await _catalog_at_state(client, owner, repo, state, {})
+        index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
+        if index is None:
+            raise ValueError("工作流产品不存在")
+        existing = catalog.workflows[index]
+        target = next((item for item in existing.versions if item.version == version_number), None)
+        if target is None:
+            raise ValueError("版本不存在")
+        await _remove_release(client, owner, repo, target.release_tag)
+        remaining = [item for item in existing.versions if item.version != version_number]
+        delete_paths = {path for path in state.files if path.startswith(f"{target.repository_path}/")}
+        items = list(catalog.workflows)
+        if remaining:
+            product: WorkflowProduct | None = existing.model_copy(update={"versions": remaining})
+            items[index] = product
+        else:
+            # 最后一个版本被删除时整个工作流一并移除，避免留下没有版本的产品
+            product = None
+            del items[index]
+            delete_paths |= {path for path in state.files if path.startswith(f"{existing.repository_path}/")}
+        updated = Catalog.model_validate(catalog.model_copy(update={"workflows": items}).model_dump(mode="json"))
+        writes = build_projection_files(updated, product) if product else _catalog_projection(updated)
+        try:
+            await client.commit_files(
+                owner,
+                repo,
+                state,
+                writes,
+                f"删除 {existing.name} v{target.version}",
+                delete_paths=delete_paths,
+            )
+            return {"deleted_version": target.version, "workflow_deleted": not remaining}
+        except GitHubError as exc:
+            if attempt == 0 and exc.status in (409, 422):
+                continue
+            raise
+    raise RuntimeError("仓库并发更新失败")
+
+
+async def delete_workflow(token: str, owner: str, repo: str, workflow_id: str) -> dict[str, Any]:
+    client = GitHubClient(token)
+    for attempt in range(2):
+        state = await client.get_branch_state(owner, repo)
+        catalog = await _catalog_at_state(client, owner, repo, state, {})
+        index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
+        if index is None:
+            raise ValueError("工作流产品不存在")
+        existing = catalog.workflows[index]
+        for version in existing.versions:
+            await _remove_release(client, owner, repo, version.release_tag)
+        items = [item for item in catalog.workflows if item.id != workflow_id]
+        updated = Catalog.model_validate(catalog.model_copy(update={"workflows": items}).model_dump(mode="json"))
+        delete_paths = {path for path in state.files if path.startswith(f"{existing.repository_path}/")}
+        try:
+            await client.commit_files(
+                owner,
+                repo,
+                state,
+                _catalog_projection(updated),
+                f"删除工作流 {existing.name}",
+                delete_paths=delete_paths,
+            )
+            return {"deleted_workflow": workflow_id, "deleted_versions": len(existing.versions)}
+        except GitHubError as exc:
+            if attempt == 0 and exc.status in (409, 422):
+                continue
+            raise
+    raise RuntimeError("仓库并发更新失败")
+
+
+async def update_version_changelog(
+    token: str,
+    owner: str,
+    repo: str,
+    workflow_id: str,
+    version_number: str,
+    changelog: str,
+) -> dict[str, Any]:
+    if not changelog.strip():
+        raise ValueError("更新日志不能为空")
+    if len(changelog) > 20_000:
+        raise ValueError("更新日志不能超过 20000 个字符")
+    client = GitHubClient(token)
+    for attempt in range(2):
+        state = await client.get_branch_state(owner, repo)
+        catalog = await _catalog_at_state(client, owner, repo, state, {})
+        index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
+        if index is None:
+            raise ValueError("工作流产品不存在")
+        existing = catalog.workflows[index]
+        position = next((i for i, item in enumerate(existing.versions) if item.version == version_number), None)
+        if position is None:
+            raise ValueError("版本不存在")
+        target = existing.versions[position]
+        release = await client.get_release_by_tag(owner, repo, target.release_tag)
+        if release is None:
+            raise ValueError("版本对应的 Release 不存在")
+        await client.update_release_notes(owner, repo, int(release["id"]), changelog)
+        versions = list(existing.versions)
+        versions[position] = target.model_copy(update={"changelog": changelog})
+        product = existing.model_copy(update={"versions": versions})
+        items = list(catalog.workflows)
+        items[index] = product
+        updated = Catalog.model_validate(catalog.model_copy(update={"workflows": items}).model_dump(mode="json"))
+        try:
+            await client.commit_files(
+                owner,
+                repo,
+                state,
+                build_projection_files(updated, product),
+                f"更新 {existing.name} v{target.version} 更新日志",
+            )
+            return versions[position].model_dump(mode="json")
         except GitHubError as exc:
             if attempt == 0 and exc.status in (409, 422):
                 continue

@@ -10,7 +10,11 @@ The publisher uses three focused stages:
 
 Create a repository from the second stage only when needed; newly created repositories must still be added to the public [Aaalice Workflow Hub Publisher](https://github.com/apps/aaalice-workflow-hub-publisher) installation. The cover is optional; workflows without one show a placeholder in the hub. The transaction creates a draft release, uploads the ZIP and selected LoRA assets, publishes the release, then atomically commits the category/name/version archive, product metadata, README files, and root catalog.
 
-Published versions cannot be overwritten or deleted. A concurrent repository change is merged and retried once. If the release succeeds but the repository commit fails, the pending publication resumes from the generated ZIP and does not depend on the original local images.
+Published versions cannot be overwritten. Deleting a version or an entire workflow requires explicit confirmation and also removes the matching Releases, tags, and repository directories. A concurrent repository change is merged and retried once. If the release succeeds but the repository commit fails, the pending publication resumes from the generated ZIP and does not depend on the original local images.
+
+## Managing published content
+
+The **Manage** tab is for authors with write access to a repository: after selecting a repository you can edit workflow metadata (renaming or re-categorizing migrates the repository directory in one atomic commit), archive or unarchive, edit any version's changelog (which also rewrites the Release notes), and delete a single version or an entire workflow. Deleting the last version removes the workflow entirely; subscribers' downloaded local copies are not affected. The subscription detail only offers downloading and viewing, with no repository operations.
 
 Plugin dependencies are first mapped from the current canvas to installed Manager plugin packages. If any node cannot be mapped reliably, the publisher lists all currently enabled Manager plugins and the author must deselect unrelated entries. Raw node types are never published as plugin names.
 

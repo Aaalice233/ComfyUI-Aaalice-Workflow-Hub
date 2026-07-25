@@ -17,7 +17,8 @@ A public workflow subscription, publishing, and version-management extension for
 - Download and verify Release ZIPs by version. Releases are distribution artifacts for installable packages and optional LoRAs, while every local version remains a separate workflow file.
 - Capture the current ComfyUI canvas and publish through three focused stages. The version directory, product metadata, README files, and root catalog are updated in one Git commit.
 - Record the publisher's current ComfyUI core version automatically and warn subscribers on the download page when their core version does not match, without blocking the download.
-- Local images referenced by `Load Image` nodes are included automatically. The publisher no longer asks for a project cover.
+- Local images referenced by `Load Image` nodes are included automatically. An optional cover image up to 10 MiB serves as both the workflow cover and that version's preview.
+- The Manage tab is for authors with write access: edit metadata, archive, edit version changelogs, and delete versions or entire workflows (including the matching Releases and repository directories); the subscription side only offers downloading and viewing.
 - Sign in through GitHub App Device Flow. Credentials are stored in the system keyring when available and otherwise remain only in the current process.
 - Build ComfyUI plugin dependency plans and, after explicit confirmation, send install, upgrade, or specifically selected downgrade tasks to ComfyUI-Manager in sequence.
 - Use a Chinese or English interface with startup workflow-update toasts, real byte-level download progress, a lightweight activity drawer, and per-ComfyUI-user state and cache isolation.
