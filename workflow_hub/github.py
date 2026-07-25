@@ -7,6 +7,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 
@@ -90,6 +91,21 @@ class ContentFile:
     content: bytes
     sha: str
     etag: str | None
+
+
+@dataclass(frozen=True)
+class GitTreeFile:
+    path: str
+    mode: str
+    sha: str
+
+
+@dataclass(frozen=True)
+class BranchState:
+    branch: str
+    commit_sha: str
+    tree_sha: str
+    files: dict[str, GitTreeFile]
 
 
 class GitHubClient:
@@ -181,6 +197,89 @@ class GitHubClient:
             "PUT", f"{API}/repos/{owner}/{repo}/contents/workflow-catalog.json", expected=(200, 201), json=payload
         )
         return data["content"]["sha"]
+
+    async def get_branch_state(self, owner: str, repo: str) -> BranchState:
+        repository, _ = await self.request("GET", f"{API}/repos/{owner}/{repo}")
+        branch = str(repository.get("default_branch") or "")
+        if not branch:
+            raise GitHubError("发布仓库尚未初始化，请先创建首个提交", 409)
+        encoded_branch = quote(branch, safe="")
+        reference, _ = await self.request("GET", f"{API}/repos/{owner}/{repo}/git/ref/heads/{encoded_branch}")
+        commit_sha = str(reference["object"]["sha"])
+        commit, _ = await self.request("GET", f"{API}/repos/{owner}/{repo}/git/commits/{commit_sha}")
+        tree_sha = str(commit["tree"]["sha"])
+        tree, _ = await self.request("GET", f"{API}/repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1")
+        if tree.get("truncated"):
+            raise GitHubError("发布仓库文件树过大，无法安全更新", 409)
+        files = {
+            str(item["path"]): GitTreeFile(
+                path=str(item["path"]),
+                mode=str(item.get("mode") or "100644"),
+                sha=str(item["sha"]),
+            )
+            for item in tree.get("tree", [])
+            if item.get("type") == "blob"
+        }
+        return BranchState(branch=branch, commit_sha=commit_sha, tree_sha=tree_sha, files=files)
+
+    async def read_file_from_state(
+        self,
+        owner: str,
+        repo: str,
+        state: BranchState,
+        path: str,
+    ) -> bytes | None:
+        entry = state.files.get(path)
+        if entry is None:
+            return None
+        blob, _ = await self.request("GET", f"{API}/repos/{owner}/{repo}/git/blobs/{entry.sha}")
+        if blob.get("encoding") != "base64":
+            raise GitHubError(f"无法读取仓库文件: {path}")
+        return base64.b64decode(str(blob["content"]))
+
+    async def commit_files(
+        self,
+        owner: str,
+        repo: str,
+        state: BranchState,
+        files: dict[str, bytes],
+        message: str,
+        *,
+        delete_paths: set[str] | None = None,
+        copy_blobs: dict[str, GitTreeFile] | None = None,
+    ) -> str:
+        entries: list[dict[str, Any]] = []
+        for path, source in sorted((copy_blobs or {}).items()):
+            entries.append({"path": path, "mode": source.mode, "type": "blob", "sha": source.sha})
+        for path, content in sorted(files.items()):
+            blob, _ = await self.request(
+                "POST",
+                f"{API}/repos/{owner}/{repo}/git/blobs",
+                expected=(201,),
+                json={"content": base64.b64encode(content).decode("ascii"), "encoding": "base64"},
+            )
+            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+        for path in sorted(delete_paths or set()):
+            entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+        tree, _ = await self.request(
+            "POST",
+            f"{API}/repos/{owner}/{repo}/git/trees",
+            expected=(201,),
+            json={"base_tree": state.tree_sha, "tree": entries},
+        )
+        commit, _ = await self.request(
+            "POST",
+            f"{API}/repos/{owner}/{repo}/git/commits",
+            expected=(201,),
+            json={"message": message, "tree": tree["sha"], "parents": [state.commit_sha]},
+        )
+        encoded_branch = quote(state.branch, safe="")
+        await self.request(
+            "PATCH",
+            f"{API}/repos/{owner}/{repo}/git/refs/heads/{encoded_branch}",
+            json={"sha": commit["sha"], "force": False},
+        )
+        return str(commit["sha"])
 
     async def list_repositories(self) -> list[dict[str, Any]]:
         installations, _ = await self.request("GET", f"{API}/user/installations?per_page=100")

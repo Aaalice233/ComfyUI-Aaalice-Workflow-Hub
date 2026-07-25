@@ -97,9 +97,9 @@ p {
 }
 
 .app-shell.theme-publish {
-  --theme-rgb: 242 139 184;
-  --accent: #f28bb8;
-  --accent-hover: #f5a4c7;
+  --theme-rgb: 104 166 148;
+  --accent: #72b39f;
+  --accent-hover: #86c0ae;
 }
 
 .nav-rail {
@@ -150,7 +150,7 @@ p {
 
 .brand-copy strong {
   overflow: hidden;
-  font-size: 14px;
+  font-size: 16px;
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -158,7 +158,7 @@ p {
 
 .brand-copy small {
   color: var(--faint);
-  font-size: 10px;
+  font-size: 13px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -258,13 +258,13 @@ p {
 
 .system-card strong {
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .system-card small {
   padding-left: 14px;
   color: var(--faint);
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .health-dot {
@@ -350,12 +350,12 @@ p {
 }
 
 .account-card strong {
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .account-card small {
   color: var(--faint);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .workspace {
@@ -370,7 +370,7 @@ p {
   align-items: center;
   gap: 7px;
   color: #a8aaa8;
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 650;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -426,7 +426,7 @@ p {
   color: var(--text-soft);
   background: var(--surface-raised);
   box-shadow: inset 3px 0 var(--warning), var(--shadow-sm);
-  font-size: 12px;
+  font-size: 14px;
   grid-template-columns: auto 1fr auto;
   gap: 10px;
 }
@@ -497,7 +497,7 @@ p {
 }
 
 .source-label strong {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 620;
 }
 
@@ -509,7 +509,7 @@ p {
   place-items: center;
   color: var(--muted);
   background: var(--surface-soft);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .section-icon {
@@ -523,7 +523,7 @@ p {
 
 .panel-heading h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 620;
 }
 
@@ -577,7 +577,7 @@ p {
   align-items: center;
   color: var(--text-soft);
   background: var(--surface-soft);
-  font-size: 11px;
+  font-size: 14px;
   gap: 7px;
 }
 
@@ -621,6 +621,80 @@ select {
   padding: 0 12px;
 }
 
+.select-control {
+  position: relative;
+  display: block;
+}
+
+.select-control select {
+  appearance: none;
+  padding-right: 48px;
+  cursor: pointer;
+}
+
+.select-control select:disabled {
+  cursor: not-allowed;
+}
+
+.select-chevron {
+  position: absolute;
+  top: 50%;
+  right: 9px;
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 8px;
+  pointer-events: none;
+  color: var(--text-soft);
+  background: rgb(255 255 255 / 5%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 5%);
+  transform: translateY(-50%);
+  transition: color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.select-control:hover .select-chevron,
+.select-control:focus-within .select-chevron {
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 12%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 8%), 0 0 14px rgb(var(--theme-rgb) / 8%);
+}
+
+.select-control:has(select:disabled) .select-chevron {
+  opacity: 0.42;
+}
+
+.core-version-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.core-version-warning > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.core-version-warning strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.core-version-warning {
+  margin: 0 20px 14px;
+  padding: 13px 14px;
+  border-radius: 12px;
+  color: #f2b86f;
+  background: rgb(242 184 111 / 9%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
+}
+
+.core-version-warning small {
+  color: #c9a77c;
+  line-height: 1.55;
+}
+
 textarea {
   padding: 11px 12px;
   resize: vertical;
@@ -649,7 +723,7 @@ select:focus {
   justify-content: center;
   white-space: nowrap;
   gap: 8px;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   transition: color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
@@ -708,7 +782,8 @@ select:focus {
   gap: 8px;
 }
 
-.source-toggle {
+.source-toggle,
+.toolbar-refresh {
   display: inline-flex;
   flex: none;
   min-height: 40px;
@@ -719,8 +794,17 @@ select:focus {
   background: var(--field);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%);
   gap: 7px;
-  font-size: 11px;
+  font-size: 14px;
   white-space: nowrap;
+}
+
+.toolbar-refresh:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--surface-soft);
+}
+
+.toolbar-refresh svg.spinning {
+  animation: spin 1s linear infinite;
 }
 
 .source-toggle:hover,
@@ -742,7 +826,7 @@ select:focus {
   place-items: center;
   color: var(--muted);
   background: rgb(255 255 255 / 5%);
-  font-size: 9px;
+  font-size: 12px;
   font-style: normal;
 }
 
@@ -806,7 +890,7 @@ select:focus {
   background: rgb(255 255 255 / 5%);
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 5%);
   font-family: inherit;
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .search-field:focus-within kbd {
@@ -853,7 +937,7 @@ select:focus {
   border-radius: 8px;
   color: var(--muted);
   background: transparent;
-  font-size: 11px;
+  font-size: 14px;
   white-space: nowrap;
 }
 
@@ -953,7 +1037,7 @@ select:focus {
   background: rgb(15 16 18 / 78%);
   box-shadow: inset 0 1px rgb(255 255 255 / 8%);
   backdrop-filter: blur(12px);
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .card-body {
@@ -980,7 +1064,7 @@ select:focus {
 
 .workflow-card h2 {
   margin-bottom: 7px;
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 620;
 }
 
@@ -988,7 +1072,7 @@ select:focus {
   min-height: 38px;
   margin-bottom: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.55;
 }
 
@@ -1004,7 +1088,7 @@ select:focus {
   border-radius: 7px;
   color: color-mix(in srgb, var(--accent) 62%, #a7a9ad);
   background: rgb(var(--theme-rgb) / 7%);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .tags .category-tag {
@@ -1022,7 +1106,7 @@ select:focus {
   align-items: flex-end;
   justify-content: space-between;
   color: var(--faint);
-  font-size: 9px;
+  font-size: 12px;
   gap: 10px;
 }
 
@@ -1078,7 +1162,7 @@ select:focus {
 
 .empty-state h2 {
   margin-bottom: 8px;
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 600;
 }
 
@@ -1086,7 +1170,7 @@ select:focus {
   max-width: 430px;
   margin-bottom: 18px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
 }
 
@@ -1183,7 +1267,7 @@ select:focus {
   place-items: center;
   color: var(--accent);
   background: rgb(var(--theme-rgb) / 14%);
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 750;
 }
 
@@ -1194,7 +1278,7 @@ select:focus {
 
 .device-steps small {
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 650;
 }
 
@@ -1235,7 +1319,7 @@ select:focus {
   justify-content: center;
   color: var(--accent);
   background: rgb(var(--theme-rgb) / 13%);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 700;
   gap: 6px;
 }
@@ -1253,7 +1337,7 @@ select:focus {
   margin: 3px auto 0;
   align-items: center;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 13px;
   gap: 8px;
 }
 
@@ -1291,7 +1375,7 @@ select:focus {
   color: var(--muted);
   background: var(--surface);
   cursor: pointer;
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .publish-utilities summary:hover {
@@ -1373,13 +1457,13 @@ select:focus {
   background: var(--surface-soft);
   box-shadow: inset 0 1px rgb(255 255 255 / 4%);
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .wizard-steps button strong {
   overflow: hidden;
   max-width: 100%;
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 560;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1426,7 +1510,7 @@ select:focus {
 
 .publish-form-section .repository-choice-heading > small {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .publish-id-preview > strong {
@@ -1493,9 +1577,278 @@ select:focus {
   color: var(--accent);
   background: rgb(255 255 255 / 3%);
   box-shadow: inset 0 1px rgb(255 255 255 / 4%);
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 650;
   gap: 5px;
+}
+
+.publish-stage-body {
+  width: min(780px, 100%);
+  min-height: 470px;
+  margin: 0 auto;
+  padding: 16px clamp(16px, 4vw, 34px) 22px;
+}
+
+.publish-stage {
+  display: grid;
+  gap: 14px;
+  animation: wizard-enter 0.2s ease-out;
+}
+
+.core-version-row {
+  display: flex;
+  min-height: 58px;
+  padding: 10px 13px;
+  border-radius: 12px;
+  align-items: center;
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 7%);
+  box-shadow: inset 0 1px rgb(255 255 255 / 4%);
+  gap: 10px;
+}
+
+.core-version-row > span {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  place-items: center;
+  background: rgb(var(--theme-rgb) / 10%);
+}
+
+.core-version-row > div {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.core-version-row small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.core-version-row strong {
+  color: var(--text);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 14px;
+}
+
+.resource-review-group {
+  padding: 12px;
+  border-radius: 13px;
+  background: rgb(255 255 255 / 2.5%);
+  box-shadow: inset 0 1px rgb(255 255 255 / 4%);
+}
+
+.resource-scan-pending {
+  display: flex;
+  min-height: 46px;
+  border-radius: 11px;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: rgb(255 255 255 / 2%);
+  font-size: 12px;
+  gap: 8px;
+}
+
+.resource-scan-pending svg {
+  color: var(--accent);
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.resource-review-heading {
+  display: flex;
+  min-height: 33px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.resource-review-heading > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  color: var(--accent);
+  gap: 7px;
+}
+
+.resource-review-heading strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.resource-review-heading em {
+  display: grid;
+  min-width: 21px;
+  height: 21px;
+  padding: 0 6px;
+  border-radius: 7px;
+  place-items: center;
+  color: var(--accent);
+  background: rgb(var(--theme-rgb) / 9%);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.resource-review-heading > small {
+  overflow: hidden;
+  max-width: 52%;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-review-group .publish-resource-empty {
+  min-height: 76px;
+}
+
+.release-details-stage {
+  width: min(620px, 100%);
+  margin: 0 auto;
+}
+
+.release-details-stage .publish-form-section {
+  display: grid;
+  gap: 2px;
+}
+
+.release-field-list {
+  padding-bottom: 8px;
+}
+
+.publish-review-stage {
+  width: min(620px, 100%);
+  margin: 0 auto;
+}
+
+.publish-review-summary {
+  display: grid;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgb(255 255 255 / 2.5%);
+  box-shadow: inset 0 1px rgb(255 255 255 / 4%);
+}
+
+.publish-review-summary > div {
+  display: grid;
+  min-height: 62px;
+  padding: 11px 14px;
+  align-items: center;
+  grid-template-columns: 122px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.publish-review-summary > div + div {
+  box-shadow: inset 0 1px rgb(255 255 255 / 4%);
+}
+
+.publish-review-summary > div > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.publish-review-summary small,
+.publish-review-notes small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.publish-review-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publish-review-summary em {
+  flex: 0 1 190px;
+  overflow: hidden;
+  max-width: 190px;
+  color: var(--faint);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  font-style: normal;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publish-review-resources {
+  display: grid;
+  padding: 5px;
+  border-radius: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  background: rgb(255 255 255 / 2.5%);
+  box-shadow: inset 0 1px rgb(255 255 255 / 4%);
+}
+
+.publish-review-resources > span {
+  display: grid;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 11px;
+  align-items: center;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  color: var(--accent);
+  gap: 8px;
+}
+
+.publish-review-resources > span + span {
+  box-shadow: inset 1px 0 rgb(255 255 255 / 5%);
+}
+
+.publish-review-resources strong {
+  grid-column: 3;
+  grid-row: 1;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.publish-review-resources small {
+  overflow: hidden;
+  grid-column: 2;
+  grid-row: 1;
+  color: var(--muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.publish-review-notes {
+  padding: 13px 14px;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 2.5%);
+}
+
+.publish-review-notes p {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.publish-final-warning {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  color: #c9a77c;
+  font-size: 12px;
+  gap: 7px;
 }
 
 .publish-console {
@@ -1524,7 +1877,7 @@ select:focus {
   display: grid;
   margin-bottom: 10px;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 560;
   letter-spacing: 0.02em;
   gap: 6px;
@@ -1557,14 +1910,14 @@ select:focus {
 
 .publish-section-title strong {
   color: var(--text);
-  font-size: 11px;
+  font-size: 16px;
   font-weight: 670;
 }
 
 .publish-section-title small {
   overflow: hidden;
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1573,7 +1926,7 @@ select:focus {
   min-height: 30px;
   margin-left: auto;
   padding: 0 8px;
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .compact-field > span {
@@ -1584,7 +1937,7 @@ select:focus {
 
 .compact-field > span em {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
   font-style: normal;
   font-weight: 500;
 }
@@ -1599,17 +1952,12 @@ select:focus {
   width: 100%;
   color: var(--text-muted);
   background: var(--input);
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 500;
 }
 
 .release-notes-field textarea {
   min-height: 104px;
-}
-
-.publish-advanced {
-  margin-top: 5px;
-  padding-top: 6px;
 }
 
 .publish-resource-tabs {
@@ -1653,13 +2001,13 @@ select:focus {
 
 .publish-resource-tabs strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1;
 }
 
 .publish-resource-tabs small {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
   line-height: 1.2;
 }
 
@@ -1683,7 +2031,7 @@ select:focus {
 
 .resource-content-heading strong {
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 650;
 }
 
@@ -1691,7 +2039,7 @@ select:focus {
   overflow: hidden;
   max-width: 64%;
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1716,6 +2064,39 @@ select:focus {
   transition: color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
+.publish-resource-row.with-checkbox {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+
+.plugin-fallback-warning {
+  display: flex;
+  margin: 4px 0 8px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  align-items: flex-start;
+  color: #f2b86f;
+  background: rgb(242 184 111 / 8%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 4%);
+  gap: 9px;
+}
+
+.plugin-fallback-warning > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.plugin-fallback-warning strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.plugin-fallback-warning small {
+  color: #c9a77c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .publish-resource-row > span:not(.resource-row-icon) {
   display: grid;
   min-width: 0;
@@ -1731,18 +2112,18 @@ select:focus {
 
 .publish-resource-row strong {
   color: var(--text);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 630;
 }
 
 .publish-resource-row small {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .publish-resource-row em {
   color: var(--muted);
-  font-size: 8px;
+  font-size: 12px;
   font-style: normal;
   white-space: nowrap;
 }
@@ -1802,12 +2183,12 @@ select:focus {
 
 .publish-resource-empty strong {
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .publish-resource-empty small {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .publish-action-bar {
@@ -1832,7 +2213,7 @@ select:focus {
   align-items: center;
   overflow: hidden;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
   gap: 7px;
@@ -1900,20 +2281,20 @@ select:focus {
 
 .current-workflow-copy strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 650;
 }
 
 .current-workflow-copy small {
   color: var(--success);
-  font-size: 10px;
+  font-size: 13px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .current-workflow-copy em {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 13px;
   font-style: normal;
 }
 
@@ -1931,10 +2312,6 @@ select:focus {
 .version-assets-step {
   display: grid;
   gap: 14px;
-}
-
-.advanced-models {
-  margin-top: 2px;
 }
 
 .asset-scan-panel {
@@ -2009,7 +2386,7 @@ select:focus {
 
 .asset-row em {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 13px;
   font-style: normal;
   white-space: nowrap;
 }
@@ -2034,7 +2411,7 @@ select:focus {
   align-items: center;
   color: var(--success);
   background: rgb(143 186 161 / 7%);
-  font-size: 10px;
+  font-size: 13px;
   gap: 7px;
 }
 
@@ -2050,7 +2427,7 @@ select:focus {
 .lora-panel > p:not(.dependency-empty) {
   margin: 0 0 3px;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
@@ -2076,7 +2453,7 @@ select:focus {
   display: grid;
   margin-bottom: 13px;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 560;
   letter-spacing: 0.02em;
   gap: 7px;
@@ -2085,7 +2462,7 @@ select:focus {
 .field-note {
   margin: -5px 0 14px;
   color: var(--faint);
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2105,7 +2482,7 @@ select:focus {
 }
 
 .repository-choice-heading > strong {
-  font-size: 12px;
+  font-size: 16px;
 }
 
 .repository-choice-heading .ghost {
@@ -2162,14 +2539,14 @@ details {
 summary {
   color: var(--text-soft);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .code,
 pre,
 code {
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .wizard-actions {
@@ -2264,7 +2641,7 @@ code {
   margin: 0;
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.55;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -2319,7 +2696,7 @@ code {
   align-items: center;
   justify-content: space-between;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .version-rail-heading em {
@@ -2329,7 +2706,7 @@ code {
   border-radius: 7px;
   place-items: center;
   background: var(--surface-soft);
-  font-size: 9px;
+  font-size: 12px;
   font-style: normal;
 }
 
@@ -2353,12 +2730,12 @@ code {
 
 .version-rail > button strong {
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .version-rail > button small {
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .version-rail > button:hover,
@@ -2401,19 +2778,19 @@ code {
 }
 
 .release-head strong {
-  font-size: 22px;
+  font-size: 24px;
   letter-spacing: -0.02em;
 }
 
 .release-head span {
   color: var(--faint);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .compatibility {
   margin: 7px 0 0;
   color: var(--faint);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .release-links {
@@ -2432,7 +2809,7 @@ code {
   align-items: center;
   color: var(--muted);
   background: transparent;
-  font-size: 10px;
+  font-size: 13px;
   text-decoration: none;
   gap: 6px;
   transition: color 0.16s ease;
@@ -2462,7 +2839,7 @@ code {
 
 .release-note > span {
   color: var(--faint);
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2471,7 +2848,7 @@ code {
 .changelog {
   margin: 7px 0 0;
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -2538,13 +2915,13 @@ code {
 
 .resource-metrics strong {
   color: var(--text);
-  font-size: 15px;
+  font-size: 17px;
 }
 
 .resource-metrics small {
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 9px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2580,13 +2957,13 @@ code {
 
 .resource-group-heading strong {
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .resource-group-heading small {
   margin-left: auto;
   color: var(--faint);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .resource-group .asset-row {
@@ -2626,7 +3003,7 @@ code {
   margin: 9px 0;
   align-items: flex-start;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 13px;
   gap: 9px;
 }
 
@@ -2682,7 +3059,7 @@ pre {
 
 .drawer-head h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .empty.small {
@@ -2691,7 +3068,7 @@ pre {
   align-items: center;
   justify-content: center;
   color: var(--faint);
-  font-size: 11px;
+  font-size: 14px;
   gap: 9px;
 }
 
@@ -2707,12 +3084,12 @@ pre {
 }
 
 .operation strong {
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .status {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
 }
 
 .status.success {
@@ -2747,7 +3124,7 @@ pre {
   display: block;
   margin-top: 6px;
   color: var(--faint);
-  font-size: 9px;
+  font-size: 12px;
   text-align: right;
 }
 
@@ -2783,7 +3160,7 @@ pre {
   }
 
   .detail-identity h1 {
-    font-size: 22px;
+    font-size: 24px;
   }
 
   .detail-hero .manage-actions {
@@ -2977,6 +3354,14 @@ pre {
 
   .publish-context-stats {
     display: none;
+  }
+
+  .toolbar-actions {
+    flex-wrap: wrap;
+  }
+
+  .toolbar-actions .segmented {
+    flex-basis: 100%;
   }
 
   .publish-action-bar button {

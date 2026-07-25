@@ -10,17 +10,19 @@
 
 A public workflow subscription, publishing, and version-management extension for ComfyUI. Authors and subscribers use the same extension. It opens from the **Workflow Hub** button in ComfyUI's top bar and does not add a sidebar.
 
-## Version 1.0 capabilities
+## Current capabilities
 
-- Subscribe to public GitHub repositories that contain `workflow-catalog.json`, then browse version history, release notes, node dependencies, and model declarations.
-- Download and verify Release packages by version. Every version is stored as a separate workflow file, never overwrites an older version, and can be revealed in the system file manager.
-- Capture the current ComfyUI canvas and publish it from one page by choosing a repository and flat category, then entering a name, version, and release notes. The last repository choice is remembered.
+- Subscribe to public GitHub repositories that contain `workflow-catalog.json`, then browse version history, release notes, plugin dependencies, and model declarations.
+- Store every workflow version on the default branch under a readable category/name/version path, so repository visitors can browse, back up, or download source files without searching through Releases.
+- Download and verify Release ZIPs by version. Releases are distribution artifacts for installable packages and optional LoRAs, while every local version remains a separate workflow file.
+- Capture the current ComfyUI canvas and publish through three focused stages. The version directory, product metadata, README files, and root catalog are updated in one Git commit.
+- Record the publisher's current ComfyUI core version automatically and warn subscribers on the download page when their core version does not match, without blocking the download.
 - Local images referenced by `Load Image` nodes are included automatically. The publisher no longer asks for a project cover.
 - Sign in through GitHub App Device Flow. Credentials are stored in the system keyring when available and otherwise remain only in the current process.
-- Build custom-node dependency plans and, after explicit confirmation, send install, upgrade, or specifically selected downgrade tasks to ComfyUI-Manager in sequence.
+- Build ComfyUI plugin dependency plans and, after explicit confirmation, send install, upgrade, or specifically selected downgrade tasks to ComfyUI-Manager in sequence.
 - Use a Chinese or English interface with startup workflow-update toasts, real byte-level download progress, a lightweight activity drawer, and per-ComfyUI-user state and cache isolation.
 
-The publisher detects Lora Manager references. Authors may publish selected LoRAs as separate Release assets or clear those references from the pending workflow copy. LoRAs stay outside the main workflow package, and subscribers choose each download explicitly; they are never downloaded automatically. The extension supports public GitHub repositories only; it does not support private repositories, other Git services, or arbitrary download hosts. It never changes the node environment silently and has not been published to Comfy Registry.
+The publisher lists actual ComfyUI-Manager plugin packages rather than raw node types. When dependency mapping is incomplete, it lists enabled Manager plugins for the author to select. A Git development clone with a Registry ID remains installable by ordinary users through Manager; its local commit is not pinned as a version. The publisher also detects Lora Manager references. Authors may publish selected LoRAs as separate Release assets or clear those references from the pending workflow copy. LoRAs stay outside the main workflow package, and subscribers choose each download explicitly; they are never downloaded automatically. The extension supports public GitHub repositories only; it does not support private repositories, other Git services, or arbitrary download hosts. It never changes the plugin environment silently and has not been published to Comfy Registry.
 
 ## Installation and usage
 
@@ -46,6 +48,7 @@ workflows/Workflow Hub/{owner}-{repo}/{workflow-id}/{name}-v{version}.json
 - [Security boundaries](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [GitHub Device Flow and direct publishing ADR](docs/adr/0001-github-app-device-flow.md)
+- [Repository archive and Release distribution ADR](docs/adr/0002-repository-archive-and-release-distribution.md)
 
 Development checks:
 

@@ -4,9 +4,11 @@ import {
   Activity as ActivityIcon,
   AlertCircle,
   Archive as ArchiveIcon,
+  ArrowLeft,
   ArrowRight,
   Check,
   CheckCircle2,
+  ChevronDown,
   CircleUserRound,
   Compass,
   Copy,
@@ -31,7 +33,12 @@ import {
   X,
 } from "@lucide/vue";
 import { api, post, remove } from "./api";
-import { locale, t } from "./i18n";
+import { t, type MessageKey } from "./i18n";
+import {
+  publishRepositoryUrl,
+  resolvePublishRepositoryUrl,
+  type PublishRepository,
+} from "./repository-selection";
 
 type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
 type ModelAsset = { name: string; type: string; filename: string; source_url: string; sha256?: string | null };
@@ -47,14 +54,17 @@ type Version = {
   package: { url: string; size: number; sha256: string };
   preview?: { url: string; sha256: string } | null;
   custom_nodes: NodeDependencyInfo[]; inputs?: BundledInput[]; models: ModelAsset[];
+  repository_path: string;
 };
 type Product = {
-  id: string; name: string; category?: string; summary: string; description: string; tags: string[]; archived: boolean;
+  id: string; name: string; category: string; summary: string; description: string; tags: string[]; archived: boolean;
   cover?: { url: string; sha256: string } | null;
   versions: Version[]; downloaded_versions: string[]; source: { owner: string; repo: string };
+  repository_path: string;
 };
 type Status = {
   plugin_version: string;
+  comfyui_version: string;
   manager: { available: boolean; compatible: boolean; version?: string };
   github: { configured: boolean; authenticated: boolean; user?: { login: string; avatar_url: string }; persistent_credentials: boolean };
 };
@@ -68,7 +78,10 @@ type DependencyPlan = {
   warning?: string | null;
 };
 type NodeDependencyInfo = {
-  registry_id?: string | null; name: string; version?: string | null; manual?: boolean;
+  registry_id?: string | null; name: string; version?: string | null; required?: boolean; manual?: boolean; source_url?: string | null;
+};
+type ScannedNodeDependency = NodeDependencyInfo & {
+  installed_version?: string | null; development?: boolean; install_source?: "registry" | "github" | "manual";
 };
 type PublishCatalogProduct = {
   id: string; name: string; category: string; summary: string; description: string; tags: string[]; versions: string[];
@@ -92,22 +105,26 @@ const error = ref("");
 const notice = ref("");
 const drawer = ref(false);
 const operations = ref<Operation[]>([]);
-const repositories = ref<{ full_name: string; name?: string; owner?: string; description?: string }[]>([]);
+const repositories = ref<PublishRepository[]>([]);
 const createRepositoryName = ref("");
 const createRepositoryOpen = ref(false);
-const drafts = ref<{ id: string; name: string; payload: ReturnType<typeof payload> }[]>([]);
 const pendingPublications = ref<{ tag: string }[]>([]);
 const workflow = ref<Record<string, unknown> | null>(null);
 const workflowSourceName = ref("");
 const canvasWorkflowError = ref("");
 const dependencyScanError = ref("");
+const dependencyScanMode = ref<"workflow" | "installed_fallback">("workflow");
+const scannedPluginDependencies = ref<ScannedNodeDependency[]>([]);
+const selectedPluginKeys = ref<string[]>([]);
+const unresolvedPluginNodes = ref<string[]>([]);
+const resourceScanPending = ref(true);
 const publishCatalogProducts = ref<PublishCatalogProduct[]>([]);
 const repositoryCategories = ref<string[]>([]);
 const selectedCatalogProductId = ref("");
 const imageReferences = ref<AssetReference[]>([]);
 const loraReferences = ref<AssetReference[]>([]);
 const selectedLoras = ref<string[]>([]);
-const publisherAssetTab = ref<"nodes" | "images" | "loras">("nodes");
+const publishStep = ref<1 | 2 | 3>(1);
 const device = ref<{ user_code: string; verification_uri: string; interval: number } | null>(null);
 const deviceCodeCopied = ref(false);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
@@ -116,6 +133,19 @@ const dependencyConfirmed = reactive<Record<string, boolean>>({});
 let operationTimer = 0;
 let loginTimer = 0;
 let copiedTimer = 0;
+
+const operationStageMessages: Record<string, MessageKey> = {
+  queued: "stageQueued",
+  downloading: "stageDownloading",
+  verifying: "stageVerifying",
+  validating: "stageValidating",
+  creating_release: "stageCreatingRelease",
+  uploading: "stageUploading",
+  publishing_release: "stagePublishingRelease",
+  updating_repository: "stageUpdatingRepository",
+  complete: "stageComplete",
+  failed: "stageFailed",
+};
 
 const form = reactive({
   repository_url: "",
@@ -129,11 +159,9 @@ const form = reactive({
   description: "",
   tags: "",
   version: "1.0",
-  minimum: "",
-  maximum: "",
   changelog: "",
   custom_nodes: "[]",
-  models: "[]",
+  models: [] as ModelAsset[],
 });
 
 const visibleProducts = computed(() => {
@@ -159,11 +187,6 @@ const activeDetailVersion = computed(() =>
 const canAdvancePublish = computed(() => {
   return !!form.repository_url.trim() && !!form.repository_name.trim() && !!form.author.trim();
 });
-const generatedProductConflict = computed(() => {
-  if (selectedCatalogProductId.value || !form.name.trim()) return null;
-  const candidate = generatedWorkflowId(form.name.trim());
-  return publishCatalogProducts.value.find((item) => item.id === candidate) || null;
-});
 const selectedCatalogProduct = computed(() =>
   publishCatalogProducts.value.find((item) => item.id === selectedCatalogProductId.value) || null
 );
@@ -174,17 +197,25 @@ const existingVersionConflict = computed(() => {
   return product.versions.some((version) => normalizeVersion(version).join(".") === candidate);
 });
 const canFinalizePublish = computed(() => {
-  if (!workflow.value || !canAdvancePublish.value || !form.name.trim() || generatedProductConflict.value || existingVersionConflict.value
+  if (!workflow.value || !canAdvancePublish.value || !form.category.trim() || !form.name.trim() || existingVersionConflict.value
     || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$/.test(form.version.trim())
     || !form.changelog.trim()) {
     return false;
   }
   try {
-    return Array.isArray(JSON.parse(form.custom_nodes)) && Array.isArray(JSON.parse(form.models));
+    return Array.isArray(JSON.parse(form.custom_nodes));
   } catch {
     return false;
   }
 });
+const canConfirmPublishResources = computed(() =>
+  !!workflow.value
+  && !!status.value?.comfyui_version
+  && !resourceScanPending.value
+  && !canvasWorkflowError.value
+  && !dependencyScanError.value
+  && imageReferences.value.every((item) => item.status === "ready")
+);
 const customNodeDependencies = computed<NodeDependencyInfo[]>(() => {
   try {
     const items = JSON.parse(form.custom_nodes);
@@ -194,6 +225,52 @@ const customNodeDependencies = computed<NodeDependencyInfo[]>(() => {
   }
 });
 const customNodeCount = computed(() => customNodeDependencies.value.length);
+const pluginDetectionHintKey = computed(() => {
+  if (dependencyScanMode.value === "installed_fallback") return "managerPluginFallbackHint";
+  return "pluginDetectionHint";
+});
+function pluginKey(item: NodeDependencyInfo) {
+  return item.registry_id || item.source_url || item.name;
+}
+function catalogDependency(item: ScannedNodeDependency): NodeDependencyInfo {
+  return {
+    registry_id: item.registry_id || null,
+    name: item.name,
+    version: item.version || null,
+    required: item.required !== false,
+    manual: !!item.manual,
+    source_url: item.source_url || null,
+  };
+}
+function syncSelectedPlugins() {
+  const selectedKeys = new Set(selectedPluginKeys.value);
+  const selectedItems = scannedPluginDependencies.value
+    .filter((item) => selectedKeys.has(pluginKey(item)))
+    .map(catalogDependency);
+  form.custom_nodes = JSON.stringify(selectedItems, null, 2);
+}
+function togglePlugin(item: ScannedNodeDependency, checked: boolean) {
+  const key = pluginKey(item);
+  selectedPluginKeys.value = checked
+    ? [...new Set([...selectedPluginKeys.value, key])]
+    : selectedPluginKeys.value.filter((itemKey) => itemKey !== key);
+  syncSelectedPlugins();
+}
+function pluginVersionLabel(item: ScannedNodeDependency) {
+  if (item.development) {
+    return t.value("gitDevelopmentVersion", { version: item.installed_version?.slice(0, 8) || t.value("unknownRevision") });
+  }
+  return item.version || (item.manual ? t.value("manualInstall") : t.value("anyVersion"));
+}
+function pluginSourceLabel(item: ScannedNodeDependency) {
+  if (item.development && item.registry_id) {
+    return t.value("registryDevelopmentSource", { id: item.registry_id });
+  }
+  if (item.development && item.source_url) {
+    return t.value("githubDevelopmentSource", { url: item.source_url });
+  }
+  return item.registry_id || item.source_url || t.value("registryNotMatched");
+}
 function normalizeVersion(value: string): number[] {
   const parts = value.split(".").map(Number);
   return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
@@ -201,6 +278,31 @@ function normalizeVersion(value: string): number[] {
 function compareVersions(a: Version, b: Version) {
   const left = normalizeVersion(a.version), right = normalizeVersion(b.version);
   return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
+}
+function compareCoreVersions(leftValue: string, rightValue: string): number | null {
+  const left = leftValue.match(/^(\d+)\.(\d+)\.(\d+)/);
+  const right = rightValue.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!left || !right) return null;
+  return Number(left[1]) - Number(right[1])
+    || Number(left[2]) - Number(right[2])
+    || Number(left[3]) - Number(right[3]);
+}
+const activeCoreMismatch = computed(() => {
+  const current = status.value?.comfyui_version;
+  const compatibility = activeDetailVersion.value?.comfyui;
+  if (!current || !compatibility) return false;
+  const minimum = compatibility.minimum;
+  const maximum = compatibility.maximum;
+  if (minimum && maximum && minimum === maximum) return current !== minimum;
+  const belowMinimum = minimum ? compareCoreVersions(current, minimum) : null;
+  const aboveMaximum = maximum ? compareCoreVersions(current, maximum) : null;
+  return (belowMinimum !== null && belowMinimum < 0) || (aboveMaximum !== null && aboveMaximum > 0);
+});
+function comfyuiCompatibilityLabel(version: Version) {
+  const minimum = version.comfyui.minimum;
+  const maximum = version.comfyui.maximum;
+  if (minimum && maximum && minimum === maximum) return `ComfyUI ${minimum}`;
+  return `ComfyUI ${minimum || "—"} – ${maximum || "∞"}`;
 }
 function latest(item: Product) {
   return [...item.versions].sort(compareVersions).at(-1);
@@ -210,6 +312,10 @@ function productCover(item: Product) {
 }
 function repositoryUrl(item: Product) {
   return `https://github.com/${encodeURIComponent(item.source.owner)}/${encodeURIComponent(item.source.repo)}`;
+}
+function productRepositoryUrl(item: Product) {
+  const path = item.repository_path.split("/").map(encodeURIComponent).join("/");
+  return `${repositoryUrl(item)}/tree/HEAD/${path}`;
 }
 function releaseUrl(item: Product, version: Version) {
   return `${repositoryUrl(item)}/releases/tag/${encodeURIComponent(version.release_tag)}`;
@@ -228,6 +334,14 @@ function humanBytes(value: number) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
   return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+function operationStageLabel(stage: string) {
+  return t.value(operationStageMessages[stage] || "stageUnknown", { stage });
+}
+function moveToPublishStep(step: 1 | 2 | 3) {
+  if (step === 1 || (step === 2 && canConfirmPublishResources.value) || (step === 3 && canFinalizePublish.value)) {
+    publishStep.value = step;
+  }
 }
 function loraAssets(version: Version) {
   return version.models.filter((model) => model.type === "loras");
@@ -278,30 +392,23 @@ async function load() {
   products.value = flows.items;
   operations.value = ops.items;
   if (s.github.authenticated) {
-    const [repos, savedDrafts, pending] = await Promise.all([
-      api<{ items: { full_name: string; name?: string; owner?: string; description?: string }[] }>("/github/repositories"),
-      api<{ items: typeof drafts.value }>("/publisher/drafts"),
+    const [repos, pending] = await Promise.all([
+      api<{ items: PublishRepository[] }>("/github/repositories"),
       api<{ items: { tag: string }[] }>("/publisher/pending"),
     ]);
     repositories.value = repos.items;
-    if (!form.repository_url) {
-      let remembered = "";
-      try {
-        remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
-      } catch {
-        // Browser storage may be unavailable in hardened embedded views.
-      }
-      const rememberedExists = repositories.value.some(
-        (item) => `https://github.com/${item.full_name}`.toLocaleLowerCase() === remembered.toLocaleLowerCase()
-      );
-      if (rememberedExists) {
-        form.repository_url = remembered;
-      } else if (repositories.value.length) {
-        form.repository_url = `https://github.com/${repositories.value[0].full_name}`;
-      }
+    let remembered = "";
+    try {
+      remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
+    } catch {
+      // Browser storage may be unavailable in hardened embedded views.
     }
+    form.repository_url = resolvePublishRepositoryUrl(
+      repositories.value,
+      form.repository_url,
+      remembered
+    );
     await applySelectedRepository();
-    drafts.value = savedDrafts.items;
     pendingPublications.value = pending.items;
   } else {
     repositories.value = [];
@@ -333,8 +440,17 @@ async function refreshSource(item: Source) {
     await load();
   });
 }
+async function refreshAllSources() {
+  await withBusy("refresh-all", async () => {
+    for (const item of sources.value) {
+      await post(`/subscriptions/${item.owner}/${item.repo}/refresh`, {});
+    }
+    await load();
+    notice.value = t.value("allSourcesRefreshed");
+  });
+}
 async function removeSource(item: Source) {
-  if (!confirm(locale.value === "zh" ? "移除订阅源？已下载的工作流会保留。" : "Remove subscription? Downloads are kept.")) return;
+  if (!confirm(t.value("confirmRemoveSource"))) return;
   await withBusy(`remove-${item.owner}-${item.repo}`, async () => {
     await remove(`/subscriptions/${item.owner}/${item.repo}`);
     await load();
@@ -366,7 +482,7 @@ async function downloadLora(item: Product, version: Version, model: ModelAsset) 
   });
 }
 async function deleteLocalVersion(item: Product, version: Version) {
-  if (!confirm(locale.value === "zh" ? `删除本地版本 v${version.version}？远程 Release 不受影响。` : `Delete local version v${version.version}? The remote release is unchanged.`)) return;
+  if (!confirm(t.value("confirmDeleteLocalVersion", { version: version.version }))) return;
   await withBusy("delete-local", async () => {
     await remove("/workflows/local", {
       owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
@@ -400,7 +516,7 @@ function toggleDependencyAction(key: string, id: string, checked: boolean) {
 async function executeDependencyPlan(item: Product, version: Version) {
   const key = dependencyKey(item, version);
   if (!dependencyConfirmed[key]) return;
-  if (!confirm(locale.value === "zh" ? "确认让 ComfyUI-Manager 串行修改节点环境？" : "Confirm serial environment changes through ComfyUI-Manager?")) return;
+  if (!confirm(t.value("confirmPluginChanges"))) return;
   const selectedIds = new Set(selectedDependencyActions[key] || []);
   const actions = (dependencyPlans[key] || []).flatMap((entry, index) => {
     if (!selectedIds.has(dependencyActionKey(entry, index))) return [];
@@ -410,7 +526,7 @@ async function executeDependencyPlan(item: Product, version: Version) {
     const result = await post<{ queued: DependencyPlan[] }>("/workflows/dependencies/execute", {
       confirmed: true, actions, client_id: "workflow-hub",
     });
-    notice.value = locale.value === "zh" ? `已向 Manager 提交 ${result.queued.length} 个串行任务。` : `Queued ${result.queued.length} serial Manager tasks.`;
+    notice.value = t.value("managerTasksQueued", { count: result.queued.length });
     dependencyConfirmed[key] = false;
   });
 }
@@ -433,21 +549,28 @@ function requestCurrentCanvasWorkflow() {
   if (window.opener && !window.opener.closed) targets.add(window.opener);
   for (const target of targets) target.postMessage(message, window.location.origin);
   if (!targets.size) {
-    canvasWorkflowError.value = locale.value === "zh"
-      ? "请从 ComfyUI 顶栏打开工作流中心，以读取当前画布。"
-      : "Open Workflow Hub from the ComfyUI top bar to read the current canvas.";
+    canvasWorkflowError.value = t.value("openFromToolbar");
   }
 }
 async function handleHubMessage(event: MessageEvent) {
   if (event.origin !== window.location.origin || event.data?.type !== "AAALICE_WORKFLOW_HUB_CURRENT_WORKFLOW") return;
   const current = event.data?.workflow;
   if (!current || typeof current !== "object" || Array.isArray(current)) {
-    canvasWorkflowError.value = event.data?.error || (locale.value === "zh" ? "无法读取当前画布工作流。" : "Unable to read the current canvas workflow.");
+    canvasWorkflowError.value = event.data?.error || t.value("currentCanvasUnavailable");
+    resourceScanPending.value = false;
     return;
   }
   canvasWorkflowError.value = "";
+  dependencyScanError.value = "";
+  resourceScanPending.value = true;
+  imageReferences.value = [];
+  loraReferences.value = [];
+  scannedPluginDependencies.value = [];
+  selectedPluginKeys.value = [];
+  unresolvedPluginNodes.value = [];
+  dependencyScanMode.value = "workflow";
   workflow.value = current as Record<string, unknown>;
-  workflowSourceName.value = String(event.data?.filename || (locale.value === "zh" ? "未命名工作流.json" : "Unsaved Workflow.json"));
+  workflowSourceName.value = String(event.data?.filename || t.value("untitledWorkflowFile"));
   if (!form.name) form.name = workflowSourceName.value.replace(/\.json$/i, "");
   try {
     await scanWorkflowAssets();
@@ -459,12 +582,22 @@ async function handleHubMessage(event: MessageEvent) {
     dependencyScanError.value = "";
   } catch (reason) {
     dependencyScanError.value = reason instanceof Error ? reason.message : String(reason);
+  } finally {
+    resourceScanPending.value = false;
   }
 }
 async function scanDependencies() {
   if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
-  const result = await post<{ items: Record<string, unknown>[] }>("/publisher/scan-dependencies", { workflow: workflow.value });
-  form.custom_nodes = JSON.stringify(result.items, null, 2);
+  const result = await post<{
+    items: ScannedNodeDependency[];
+    mode: "workflow" | "installed_fallback";
+    unresolved_nodes: string[];
+  }>("/publisher/scan-dependencies", { workflow: workflow.value });
+  scannedPluginDependencies.value = result.items;
+  dependencyScanMode.value = result.mode;
+  unresolvedPluginNodes.value = result.unresolved_nodes;
+  selectedPluginKeys.value = result.items.map(pluginKey);
+  syncSelectedPlugins();
 }
 async function scanWorkflowAssets() {
   if (!workflow.value) return;
@@ -484,9 +617,7 @@ function toggleLora(name: string, checked: boolean) {
 }
 async function clearWorkflowLoras() {
   if (!workflow.value) return;
-  if (!confirm(locale.value === "zh"
-    ? "清空此工作流中 Lora Manager 的 LoRA 引用？仅修改当前待发布副本。"
-    : "Clear Lora Manager references from this workflow? Only the pending publish copy is changed.")) return;
+  if (!confirm(t.value("confirmClearLoras"))) return;
   await withBusy("clear-loras", async () => {
     const result = await post<{ workflow: Record<string, unknown>; loras: AssetReference[] }>("/publisher/clear-loras", {
       workflow: workflow.value,
@@ -494,32 +625,40 @@ async function clearWorkflowLoras() {
     workflow.value = result.workflow;
     loraReferences.value = result.loras;
     selectedLoras.value = [];
-    notice.value = locale.value === "zh" ? "已清空当前待发布工作流中的 LoRA 引用。" : "LoRA references cleared from the pending workflow.";
+    notice.value = t.value("loraReferencesCleared");
   });
 }
-function generatedWorkflowId(name: string) {
-  const normalized = name.normalize("NFKD").toLocaleLowerCase()
+function generatedWorkflowId(name: string, category = form.category.trim()) {
+  const source = `${category}-${name}`;
+  const normalized = source.normalize("NFKD").toLocaleLowerCase()
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-  if (normalized) return normalized;
+    .slice(0, 55);
   let hash = 2166136261;
-  for (const character of name) {
+  for (const character of source) {
     hash ^= character.codePointAt(0) || 0;
     hash = Math.imul(hash, 16777619);
   }
-  return `workflow-${(hash >>> 0).toString(36)}`;
+  const suffix = (hash >>> 0).toString(36);
+  return normalized ? `${normalized}-${suffix}` : `workflow-${suffix}`;
 }
-function applySelectedCatalogProduct() {
-  const product = publishCatalogProducts.value.find((item) => item.id === selectedCatalogProductId.value);
+function syncCatalogProductByName() {
+  const matches = publishCatalogProducts.value.filter(
+    (item) => item.name.trim().toLocaleLowerCase() === form.name.trim().toLocaleLowerCase()
+  );
+  const category = form.category.trim().toLocaleLowerCase();
+  const product = category
+    ? matches.find((item) => item.category.trim().toLocaleLowerCase() === category)
+    : (matches.length === 1 ? matches[0] : undefined);
   if (!product) {
-    Object.assign(form, { id: "", name: "", summary: "", description: "", tags: "" });
+    selectedCatalogProductId.value = "";
+    form.id = "";
     return;
   }
+  selectedCatalogProductId.value = product.id;
   Object.assign(form, {
     id: product.id,
-    name: product.name,
     category: product.category,
     summary: product.summary,
     description: product.description,
@@ -559,6 +698,7 @@ async function applySelectedRepository() {
     selectedCatalogProductId.value = "";
     form.id = "";
   }
+  syncCatalogProductByName();
 }
 async function createRepository() {
   await withBusy("create-repository", async () => {
@@ -573,24 +713,24 @@ async function createRepository() {
     createRepositoryName.value = "";
     createRepositoryOpen.value = false;
     await load();
-    notice.value = locale.value === "zh"
-      ? "仓库已创建。请在 GitHub App 设置中授权该仓库，然后重新加载本页。"
-      : "Repository created. Authorize it in the GitHub App installation, then reload this page.";
+    notice.value = t.value("repositoryCreated");
   });
 }
 function payload() {
   const customNodes = JSON.parse(form.custom_nodes);
-  const models = JSON.parse(form.models);
   if (!form.id) form.id = generatedWorkflowId(form.name.trim());
   const version = {
     version: form.version,
     published_at: new Date().toISOString(),
     release_tag: `${form.id}-v${form.version}`,
     changelog: form.changelog,
-    comfyui: { minimum: form.minimum || null, maximum: form.maximum || null },
+    comfyui: {
+      minimum: status.value?.comfyui_version || null,
+      maximum: status.value?.comfyui_version || null,
+    },
     package: { url: "https://github.com/pending/package.zip", size: 1, sha256: "0".repeat(64) },
     custom_nodes: customNodes,
-    models,
+    models: form.models,
   };
   return {
     repository_url: form.repository_url,
@@ -607,7 +747,7 @@ async function validatePublish() {
   await withBusy("validate", async () => {
     if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
     await post("/publisher/validate", payload());
-    notice.value = locale.value === "zh" ? "校验通过，可以发布。" : "Validation passed. Ready to publish.";
+    notice.value = t.value("validationPassed");
   });
 }
 async function publishNow() {
@@ -620,40 +760,6 @@ async function publishNow() {
     await pollOperations();
   });
 }
-async function saveDraft() {
-  await withBusy("draft", async () => {
-    await post("/publisher/drafts", { name: form.name || workflowSourceName.value || "Untitled", payload: payload() });
-    notice.value = locale.value === "zh" ? "草稿已保存。" : "Draft saved.";
-    await load();
-  });
-}
-async function loadDraft(draft: { payload: ReturnType<typeof payload> }) {
-  const value = draft.payload;
-  Object.assign(form, {
-    repository_url: value.repository_url,
-    repository_name: value.repository.name,
-    author: value.repository.author,
-    repository_description: value.repository.description,
-    id: value.product.id,
-    name: value.product.name,
-    category: value.product.category || "",
-    summary: value.product.summary,
-    description: value.product.description,
-    tags: value.product.tags.join(", "),
-    version: value.product.versions[0].version,
-    minimum: value.product.versions[0].comfyui.minimum || "",
-    maximum: value.product.versions[0].comfyui.maximum || "",
-    changelog: value.product.versions[0].changelog,
-    custom_nodes: JSON.stringify(value.product.versions[0].custom_nodes, null, 2),
-    models: JSON.stringify(value.product.versions[0].models, null, 2),
-  });
-  await applySelectedRepository();
-  selectedCatalogProductId.value = publishCatalogProducts.value.some((item) => item.id === value.product.id)
-    ? value.product.id
-    : "";
-  selectedLoras.value = value.selected_loras || [];
-  void scanWorkflowAssets();
-}
 async function resumePending(tag: string) {
   await withBusy("resume", async () => {
     const result = await post<{ operation_id: string }>(`/publisher/pending/${encodeURIComponent(tag)}/resume`, {});
@@ -664,8 +770,7 @@ async function resumePending(tag: string) {
 }
 async function archiveProduct(item: Product) {
   const next = !item.archived;
-  const message = next ? "归档" : "取消归档";
-  if (!confirm(locale.value === "zh" ? `确认${message}“${item.name}”？历史版本不会删除。` : `Confirm ${next ? "archive" : "unarchive"} “${item.name}”?`)) return;
+  if (!confirm(t.value(next ? "confirmArchive" : "confirmUnarchive", { name: item.name }))) return;
   await withBusy("archive", async () => {
     await api(`/publisher/workflows/${item.source.owner}/${item.source.repo}/${item.id}`, {
       method: "PATCH", body: JSON.stringify({ archived: next }),
@@ -675,13 +780,13 @@ async function archiveProduct(item: Product) {
   });
 }
 async function editProduct(item: Product) {
-  const name = prompt(locale.value === "zh" ? "名称" : "Name", item.name);
+  const name = prompt(t.value("name"), item.name);
   if (name === null) return;
-  const category = prompt(locale.value === "zh" ? "类别（可留空）" : "Category (optional)", item.category || "");
+  const category = prompt(t.value("category"), item.category);
   if (category === null) return;
-  const summary = prompt(locale.value === "zh" ? "简介" : "Summary", item.summary);
+  const summary = prompt(t.value("summary"), item.summary);
   if (summary === null) return;
-  const tags = prompt(locale.value === "zh" ? "标签（逗号分隔）" : "Tags (comma-separated)", item.tags.join(", "));
+  const tags = prompt(t.value("tags"), item.tags.join(", "));
   if (tags === null) return;
   await withBusy("metadata", async () => {
     await api(`/publisher/workflows/${item.source.owner}/${item.source.repo}/${item.id}`, {
@@ -759,7 +864,7 @@ onBeforeUnmount(() => {
         <span class="brand-copy"><strong>{{ t("title") }}</strong><small>v1.0.0</small></span>
       </div>
 
-      <nav class="primary-nav" :aria-label="locale === 'zh' ? '主要导航' : 'Primary navigation'">
+      <nav class="primary-nav" :aria-label="t('primaryNavigation')">
         <button :class="{ active: tab === 'subscribe' }" @click="tab = 'subscribe'">
           <Compass :size="18" /><span>{{ t("subscribe") }}</span>
         </button>
@@ -782,7 +887,7 @@ onBeforeUnmount(() => {
         </button>
         <button v-else class="account-card" :title="t('login')" :aria-label="t('login')"
           :disabled="!status?.github.configured || !!busy" @click="startLogin">
-          <GitBranch :size="18" /><span><strong>{{ t("login") }}</strong><small>{{ locale === "zh" ? "用于发布和管理" : "Publish and manage" }}</small></span>
+          <GitBranch :size="18" /><span><strong>{{ t("login") }}</strong><small>{{ t("loginPurpose") }}</small></span>
           <ArrowRight :size="15" />
         </button>
         <button class="rail-action" :title="t('close')" :aria-label="t('close')" @click="closeHubPage">
@@ -814,11 +919,14 @@ onBeforeUnmount(() => {
                 <kbd>/</kbd>
               </label>
               <div class="toolbar-actions">
-                <div class="segmented" role="group" :aria-label="locale === 'zh' ? '工作流筛选' : 'Workflow filters'"
+                <div class="segmented" role="group" :aria-label="t('workflowFilters')"
                   :style="{ '--filter-index': String(filterIndex) }">
                   <button v-for="item in (['all','downloaded','updates','archived'] as const)" :key="item"
                     :class="{ active: filter === item }" @click="filter = item">{{ t(item) }}</button>
                 </div>
+                <button class="toolbar-refresh" :disabled="!!busy || !sources.length" @click="refreshAllSources">
+                  <RefreshCw :size="16" :class="{ spinning: busy === 'refresh-all' }" /><span>{{ t("refreshAll") }}</span>
+                </button>
                 <button class="source-toggle" :class="{ active: sourceComposerOpen }" @click="sourceComposerOpen ? sourceComposerOpen = false : openSourceComposer()">
                   <FolderGit2 :size="16" /><span>{{ t("sourcesLabel") }}</span><i>{{ sources.length }}</i>
                 </button>
@@ -856,7 +964,7 @@ onBeforeUnmount(() => {
                   <p>{{ item.summary }}</p>
                   <div class="tags"><span v-if="item.category" class="category-tag"><FolderOpen :size="11" />{{ item.category }}</span><span v-for="tag in item.tags" :key="tag">{{ tag }}</span></div>
                   <footer>
-                    <a class="source-origin" :href="repositoryUrl(item)" target="_blank" rel="noopener"
+                    <a class="source-origin" :href="productRepositoryUrl(item)" target="_blank" rel="noopener"
                       :title="t('repositoryPage')" :aria-label="`${t('repositoryPage')}: ${item.source.owner}/${item.source.repo}`"
                       @click.stop @keyup.enter.stop>
                       <GitBranch :size="13" />{{ item.source.owner }}/{{ item.source.repo }}<ExternalLink :size="11" />
@@ -881,39 +989,35 @@ onBeforeUnmount(() => {
             <div v-if="!status?.github.authenticated" class="publish-auth-gate">
               <span class="auth-gate-icon"><GitBranch :size="28" /></span>
               <div v-if="device" class="device-auth-flow">
-                <span class="eyebrow">{{ locale === "zh" ? "等待 GitHub 授权" : "Waiting for GitHub authorization" }}</span>
-                <h1>{{ locale === "zh" ? "两步完成登录" : "Complete sign-in in two steps" }}</h1>
-                <p>{{ locale === "zh"
-                  ? "先复制验证码，再打开 GitHub 授权页面。授权完成后这里会自动进入发布界面。"
-                  : "Copy the code first, then open GitHub. This page continues automatically after authorization." }}</p>
+                <span class="eyebrow">{{ t("waitingGithubAuthorization") }}</span>
+                <h1>{{ t("completeSignInTwoSteps") }}</h1>
+                <p>{{ t("deviceFlowHint") }}</p>
                 <ol class="device-steps">
                   <li>
                     <span>1</span>
-                    <div><small>{{ locale === "zh" ? "复制验证码" : "Copy verification code" }}</small>
-                      <button class="device-code" :aria-label="locale === 'zh' ? '复制验证码' : 'Copy verification code'" @click="copyDeviceCode">
+                    <div><small>{{ t("copyVerificationCode") }}</small>
+                      <button class="device-code" :aria-label="t('copyVerificationCode')" @click="copyDeviceCode">
                         <code>{{ device.user_code }}</code>
-                        <span><Check v-if="deviceCodeCopied" :size="17" /><Copy v-else :size="17" />{{ deviceCodeCopied ? (locale === "zh" ? "已复制" : "Copied") : (locale === "zh" ? "复制" : "Copy") }}</span>
+                        <span><Check v-if="deviceCodeCopied" :size="17" /><Copy v-else :size="17" />{{ deviceCodeCopied ? t("copied") : t("copy") }}</span>
                       </button>
                     </div>
                   </li>
                   <li>
                     <span>2</span>
-                    <div><small>{{ locale === "zh" ? "前往 GitHub 并粘贴验证码" : "Open GitHub and paste the code" }}</small>
+                    <div><small>{{ t("openGithubAndPasteCode") }}</small>
                       <a class="primary device-open-link" :href="device.verification_uri" target="_blank" rel="noopener">
-                        {{ locale === "zh" ? "打开 GitHub 授权页面" : "Open GitHub authorization" }}<ExternalLink :size="16" />
+                        {{ t("openGithubAuthorization") }}<ExternalLink :size="16" />
                       </a>
                     </div>
                   </li>
                 </ol>
-                <span class="device-waiting"><i />{{ locale === "zh" ? "正在等待授权结果，无需刷新页面" : "Waiting for authorization — no refresh needed" }}</span>
+                <span class="device-waiting"><i />{{ t("waitingAuthorization") }}</span>
               </div>
               <div v-else>
-                <span class="eyebrow">{{ locale === "zh" ? "GitHub 授权" : "GitHub authorization" }}</span>
-                <h1>{{ locale === "zh" ? "登录后发布工作流" : "Sign in to publish workflows" }}</h1>
+                <span class="eyebrow">{{ t("githubAuthorization") }}</span>
+                <h1>{{ t("signInToPublish") }}</h1>
                 <p>{{ status?.github.configured
-                  ? (locale === "zh"
-                    ? "发布会创建 GitHub Release 并更新工作流目录。登录前不会读取仓库，也不会展示发布表单。"
-                    : "Publishing creates a GitHub Release and updates the workflow catalog. Repositories and the publish form stay unavailable until you sign in.")
+                  ? t("signInPublishHint")
                   : t("githubNotConfigured") }}</p>
               </div>
               <button v-if="!device" class="primary auth-gate-action" :disabled="!status?.github.configured || !!busy" @click="startLogin">
@@ -922,11 +1026,8 @@ onBeforeUnmount(() => {
             </div>
 
             <template v-else>
-              <div v-if="drafts.length || pendingPublications.length" class="publish-utilities">
-                <details v-if="drafts.length"><summary>{{ locale === "zh" ? "草稿" : "Drafts" }}</summary>
-                  <button v-for="draft in drafts" :key="draft.id" class="ghost" @click="loadDraft(draft)">{{ draft.name }}</button>
-                </details>
-                <details v-if="pendingPublications.length"><summary>{{ locale === "zh" ? "待同步发布" : "Pending publications" }}</summary>
+              <div v-if="pendingPublications.length" class="publish-utilities">
+                <details v-if="pendingPublications.length"><summary>{{ t("pendingPublications") }}</summary>
                   <button v-for="item in pendingPublications" :key="item.tag" class="ghost" @click="resumePending(item.tag)">{{ item.tag }}</button>
                 </details>
               </div>
@@ -935,8 +1036,8 @@ onBeforeUnmount(() => {
                 <header class="publish-context-bar" :class="{ unavailable: !workflow }">
                   <span class="upload-icon"><FileJson :size="20" /></span>
                   <span class="current-workflow-copy">
-                    <small>{{ locale === "zh" ? "即将发布" : "Publishing" }}</small>
-                    <strong>{{ workflowSourceName || (locale === "zh" ? "正在读取当前画布…" : "Reading current canvas…") }}</strong>
+                    <small>{{ t("publishing") }}</small>
+                    <strong>{{ workflowSourceName || t("readingCanvas") }}</strong>
                     <em v-if="canvasWorkflowError">{{ canvasWorkflowError }}</em>
                   </span>
                   <div class="publish-context-stats">
@@ -946,126 +1047,141 @@ onBeforeUnmount(() => {
                   </div>
                 </header>
 
-                <div class="publish-console">
-                  <section class="publish-editor">
-                    <div class="publish-section-title">
-                      <span><GitBranch :size="16" /></span>
-                      <div><strong>{{ locale === "zh" ? "发布位置" : "Destination" }}</strong><small>{{ locale === "zh" ? "仓库选择会自动记住" : "Repository choice is remembered" }}</small></div>
-                      <button class="ghost compact-action" @click="createRepositoryOpen = !createRepositoryOpen">
-                        <Plus :size="14" />{{ locale === "zh" ? "新建仓库" : "New repository" }}
-                      </button>
+                <div class="publish-stage-body">
+                  <section v-if="publishStep === 1" class="publish-stage resource-review-stage">
+                    <div class="core-version-row">
+                      <span><ActivityIcon :size="16" /></span>
+                      <div><small>{{ t("comfyCoreVersion") }}</small><strong>{{ status?.comfyui_version || t("detecting") }}</strong></div>
+                      <CheckCircle2 v-if="status?.comfyui_version" :size="17" />
                     </div>
-                    <label class="compact-field">
-                      <select v-model="form.repository_url" :disabled="!repositories.length" @change="applySelectedRepository">
-                        <option value="">{{ repositories.length ? (locale === "zh" ? "请选择 GitHub 仓库" : "Choose a GitHub repository") : (locale === "zh" ? "没有已授权的仓库" : "No authorized repositories") }}</option>
-                        <option v-for="repo in repositories" :key="repo.full_name" :value="`https://github.com/${repo.full_name}`">{{ repo.full_name }}</option>
-                      </select>
-                    </label>
-                    <div v-if="createRepositoryOpen" class="inline create-repo">
-                      <input v-model="createRepositoryName" :placeholder="locale === 'zh' ? '仓库名称' : 'Repository name'" @keyup.enter="createRepository" />
-                      <button class="secondary" :disabled="!createRepositoryName" @click="createRepository"><Plus :size="16" />{{ locale === "zh" ? "创建" : "Create" }}</button>
-                    </div>
+                    <div v-if="resourceScanPending" class="resource-scan-pending"><RefreshCw :size="17" />{{ t("scanningCanvasResources") }}</div>
 
-                    <div class="publish-divider" />
-
-                    <div class="publish-section-title">
-                      <span><FileJson :size="16" /></span>
-                      <div><strong>{{ locale === "zh" ? "版本信息" : "Release information" }}</strong><small>{{ locale === "zh" ? "只填写发布真正需要的内容" : "Only the essentials" }}</small></div>
-                    </div>
-                    <label v-if="publishCatalogProducts.length" class="compact-field">
-                      <span>{{ locale === "zh" ? "发布方式" : "Publish as" }}</span>
-                      <select v-model="selectedCatalogProductId" @change="applySelectedCatalogProduct">
-                        <option value="">{{ locale === "zh" ? "新建工作流" : "New workflow" }}</option>
-                        <option v-for="item in publishCatalogProducts" :key="item.id" :value="item.id">{{ item.category ? `${item.category} / ` : "" }}{{ item.name }}</option>
-                      </select>
-                    </label>
-                    <div class="two">
-                      <label class="compact-field"><span>{{ locale === "zh" ? "类别" : "Category" }}<em>{{ locale === "zh" ? "可选" : "Optional" }}</em></span>
-                        <input v-model="form.category" list="workflow-category-options" maxlength="80" :placeholder="locale === 'zh' ? '选择或输入新类别' : 'Choose or create'" />
-                        <datalist id="workflow-category-options"><option v-for="category in repositoryCategories" :key="category" :value="category" /></datalist>
-                      </label>
-                      <label class="compact-field"><span>{{ t("name") }}</span><input v-model="form.name" maxlength="120" /></label>
-                    </div>
-                    <p v-if="generatedProductConflict" class="message warning"><TriangleAlert :size="16" /><span>{{ locale === "zh" ? `“${generatedProductConflict.name}”已存在，请选择已有工作流。` : `“${generatedProductConflict.name}” already exists. Select the existing workflow.` }}</span></p>
-                    <div class="two">
-                      <label class="compact-field"><span>{{ t("version") }}</span><input v-model="form.version" placeholder="1.0" /></label>
-                      <label class="publish-id-preview compact-field"><span>{{ locale === "zh" ? "发布标识" : "Publish ID" }}<em>{{ locale === "zh" ? "自动生成" : "Automatic" }}</em></span>
-                        <strong>{{ form.id || generatedWorkflowId(form.name || (locale === "zh" ? "未命名工作流" : "Untitled workflow")) }}</strong>
-                      </label>
-                    </div>
-                    <p v-if="selectedCatalogProduct" class="field-note">{{ locale === "zh" ? `已有版本 ${selectedCatalogProduct.versions.join("、") || "无"}` : `Published ${selectedCatalogProduct.versions.join(", ") || "none"}` }}</p>
-                    <p v-if="existingVersionConflict" class="message warning"><TriangleAlert :size="16" /><span>{{ locale === "zh" ? "这个版本已经发布，请填写新的版本号。" : "This version is already published." }}</span></p>
-                    <label class="compact-field release-notes-field"><span>{{ t("releaseNotes") }}</span><textarea v-model="form.changelog" rows="5" /></label>
-
-                    <details class="advanced-models publish-advanced">
-                      <summary>{{ locale === "zh" ? "兼容性与其他模型" : "Compatibility and other models" }}</summary>
-                      <div class="two">
-                        <label>{{ t("minComfy") }}<input v-model="form.minimum" /></label>
-                        <label>{{ t("maxComfy") }}<input v-model="form.maximum" /></label>
+                    <div class="resource-review-group">
+                      <div class="resource-review-heading"><span><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong><em>{{ customNodeCount }}</em></span><small>{{ dependencyScanError || t(pluginDetectionHintKey) }}</small></div>
+                      <div v-if="dependencyScanMode === 'installed_fallback' && !resourceScanPending && !dependencyScanError" class="plugin-fallback-warning">
+                        <TriangleAlert :size="17" />
+                        <span><strong>{{ t("managerPluginFallbackTitle") }}</strong><small>{{ t("managerPluginFallbackDescription", { count: unresolvedPluginNodes.length }) }}</small></span>
                       </div>
-                      <label>{{ locale === "zh" ? "其他模型资源声明" : "Other model declarations" }}<textarea v-model="form.models" class="code" rows="7" /></label>
-                    </details>
+                      <label
+                        v-for="item in scannedPluginDependencies"
+                        :key="pluginKey(item)"
+                        class="publish-resource-row"
+                        :class="{ selectable: dependencyScanMode === 'installed_fallback', selected: selectedPluginKeys.includes(pluginKey(item)), 'with-checkbox': dependencyScanMode === 'installed_fallback' }"
+                      >
+                        <input
+                          v-if="dependencyScanMode === 'installed_fallback'"
+                          type="checkbox"
+                          :checked="selectedPluginKeys.includes(pluginKey(item))"
+                          @change="togglePlugin(item, ($event.target as HTMLInputElement).checked)"
+                        />
+                        <span class="resource-row-icon"><PackageOpen :size="15" /></span>
+                        <span><strong>{{ item.name }}</strong><small :title="pluginSourceLabel(item)">{{ pluginSourceLabel(item) }}</small></span>
+                        <em>{{ pluginVersionLabel(item) }}</em>
+                      </label>
+                      <div v-if="!resourceScanPending && !dependencyScanError && !scannedPluginDependencies.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ t("noExtraPlugins") }}</strong><small>{{ t("environmentReady") }}</small></span></div>
+                    </div>
+
+                    <div class="resource-review-group">
+                      <div class="resource-review-heading"><span><FileUp :size="16" /><strong>{{ t("imageReferences") }}</strong><em>{{ imageReferences.length }}</em></span><small>{{ t("imageReferenceHint") }}</small></div>
+                      <div v-for="item in imageReferences" :key="item.name" class="publish-resource-row" :class="{ invalid: item.status !== 'ready' }">
+                        <span class="resource-row-icon"><FileUp :size="15" /></span>
+                        <span><strong>{{ item.name }}</strong><small>{{ t("referenceCount", { count: item.node_ids.length }) }}</small></span>
+                        <em>{{ item.status === "ready" && item.size != null ? humanBytes(item.size) : item.status }}</em>
+                      </div>
+                      <div v-if="!resourceScanPending && !imageReferences.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ t("noImageReferences") }}</strong><small>{{ t("noBundledImagesHint") }}</small></span></div>
+                    </div>
+
+                    <div class="resource-review-group">
+                      <div class="resource-review-heading">
+                        <span><TriangleAlert :size="16" /><strong>{{ t("loraReferences") }}</strong><em>{{ loraReferences.length }}</em></span>
+                        <button v-if="loraReferences.length" class="ghost danger-action compact-action" :disabled="!!busy" @click="clearWorkflowLoras"><Trash2 :size="14" />{{ t("clearReferences") }}</button>
+                      </div>
+                      <label v-for="item in loraReferences" :key="item.name" class="publish-resource-row selectable" :class="{ invalid: item.status !== 'ready', selected: selectedLoras.includes(item.name) }">
+                        <input type="checkbox" :checked="selectedLoras.includes(item.name)" :disabled="item.status !== 'ready'" @change="toggleLora(item.name, ($event.target as HTMLInputElement).checked)" />
+                        <span><strong>{{ item.name }}</strong><small>{{ item.filename }}</small></span>
+                        <em>{{ item.status === "ready" && item.size != null ? humanBytes(item.size) : item.status }}</em>
+                      </label>
+                      <div v-if="!resourceScanPending && !loraReferences.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ t("noLoraReferences") }}</strong><small>{{ t("nothingElseToReview") }}</small></span></div>
+                    </div>
+
                   </section>
 
-                  <aside class="publish-resource-inspector">
-                    <div class="publish-section-title resource-title">
-                      <span><ListFilter :size="16" /></span>
-                      <div><strong>{{ locale === "zh" ? "资源检查" : "Resource check" }}</strong><small>{{ locale === "zh" ? "来自当前画布的自动扫描结果" : "Automatically scanned from the canvas" }}</small></div>
-                    </div>
-                    <div class="publish-resource-tabs">
-                      <button :class="{ active: publisherAssetTab === 'nodes' }" @click="publisherAssetTab = 'nodes'">
-                        <PackageOpen :size="16" /><span><strong>{{ customNodeCount }}</strong><small>{{ locale === "zh" ? "节点" : "Nodes" }}</small></span>
-                      </button>
-                      <button :class="{ active: publisherAssetTab === 'images' }" @click="publisherAssetTab = 'images'">
-                        <FileUp :size="16" /><span><strong>{{ imageReferences.length }}</strong><small>{{ locale === "zh" ? "图片" : "Images" }}</small></span>
-                      </button>
-                      <button :class="{ active: publisherAssetTab === 'loras' }" @click="publisherAssetTab = 'loras'">
-                        <TriangleAlert :size="16" /><span><strong>{{ loraReferences.length }}</strong><small>LoRA</small></span>
-                      </button>
+                  <section v-else-if="publishStep === 2" class="publish-stage release-details-stage">
+                    <div class="publish-form-section">
+                      <div class="publish-section-title">
+                        <span><GitBranch :size="16" /></span>
+                        <div><strong>{{ t("destination") }}</strong><small>{{ t("repositoryRemembered") }}</small></div>
+                        <button class="ghost compact-action" @click="createRepositoryOpen = !createRepositoryOpen"><Plus :size="14" />{{ t("newRepository") }}</button>
+                      </div>
+                      <label class="compact-field">
+                        <span class="select-control">
+                          <select v-model="form.repository_url" :disabled="!repositories.length" @change="applySelectedRepository">
+                            <option v-if="!repositories.length" value="">{{ t("noAuthorizedRepositories") }}</option>
+                            <option v-for="repo in repositories" :key="repo.full_name" :value="publishRepositoryUrl(repo)">{{ repo.full_name }}</option>
+                          </select>
+                          <span class="select-chevron" aria-hidden="true"><ChevronDown :size="15" :stroke-width="2.4" /></span>
+                        </span>
+                      </label>
+                      <div v-if="createRepositoryOpen" class="inline create-repo">
+                        <input v-model="createRepositoryName" :placeholder="t('repositoryNamePlaceholder')" @keyup.enter="createRepository" />
+                        <button class="secondary" :disabled="!createRepositoryName" @click="createRepository"><Plus :size="16" />{{ t("create") }}</button>
+                      </div>
                     </div>
 
-                    <div class="publish-resource-content">
-                      <template v-if="publisherAssetTab === 'nodes'">
-                        <div class="resource-content-heading"><strong>{{ locale === "zh" ? "所需自定义节点" : "Required custom nodes" }}</strong><small>{{ dependencyScanError || (locale === "zh" ? "发布时不会安装" : "Nothing is installed while publishing") }}</small></div>
-                        <div v-for="item in customNodeDependencies" :key="item.registry_id || item.name" class="publish-resource-row">
-                          <span class="resource-row-icon"><PackageOpen :size="15" /></span>
-                          <span><strong>{{ item.name }}</strong><small>{{ item.registry_id || (locale === "zh" ? "未匹配 Registry" : "Not matched in Registry") }}</small></span>
-                          <em>{{ item.version || (item.manual ? (locale === "zh" ? "手动" : "Manual") : (locale === "zh" ? "任意版本" : "Any")) }}</em>
-                        </div>
-                        <div v-if="!dependencyScanError && !customNodeDependencies.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ locale === "zh" ? "没有额外节点" : "No extra nodes" }}</strong><small>{{ locale === "zh" ? "当前环境可直接使用" : "Ready for the current environment" }}</small></span></div>
-                      </template>
-
-                      <template v-else-if="publisherAssetTab === 'images'">
-                        <div class="resource-content-heading"><strong>{{ locale === "zh" ? "随包图片" : "Included images" }}</strong><small>{{ locale === "zh" ? "下载工作流时自动安装" : "Installed with the workflow" }}</small></div>
-                        <div v-for="item in imageReferences" :key="item.name" class="publish-resource-row" :class="{ invalid: item.status !== 'ready' }">
-                          <span class="resource-row-icon"><FileUp :size="15" /></span>
-                          <span><strong>{{ item.name }}</strong><small>{{ item.node_ids.length }} {{ locale === "zh" ? "个节点引用" : "references" }}</small></span>
-                          <em>{{ item.status === "ready" && item.size != null ? humanBytes(item.size) : item.status }}</em>
-                        </div>
-                        <div v-if="!imageReferences.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ locale === "zh" ? "没有随包图片" : "No included images" }}</strong><small>{{ locale === "zh" ? "工作流不会额外携带图片" : "No images will be bundled" }}</small></span></div>
-                      </template>
-
-                      <template v-else>
-                        <div class="resource-content-heading">
-                          <span><strong>{{ locale === "zh" ? "可选 LoRA" : "Optional LoRAs" }}</strong><small>{{ locale === "zh" ? "默认不发布，按需勾选" : "Excluded by default; select as needed" }}</small></span>
-                          <button v-if="loraReferences.length" class="ghost danger-action compact-action" :disabled="!!busy" @click="clearWorkflowLoras"><Trash2 :size="14" />{{ locale === "zh" ? "清空引用" : "Clear" }}</button>
-                        </div>
-                        <label v-for="item in loraReferences" :key="item.name" class="publish-resource-row selectable" :class="{ invalid: item.status !== 'ready', selected: selectedLoras.includes(item.name) }">
-                          <input type="checkbox" :checked="selectedLoras.includes(item.name)" :disabled="item.status !== 'ready'" @change="toggleLora(item.name, ($event.target as HTMLInputElement).checked)" />
-                          <span><strong>{{ item.name }}</strong><small>{{ item.filename }}</small></span>
-                          <em>{{ item.status === "ready" && item.size != null ? humanBytes(item.size) : item.status }}</em>
-                        </label>
-                        <div v-if="!loraReferences.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ locale === "zh" ? "没有 LoRA 引用" : "No LoRA references" }}</strong><small>{{ locale === "zh" ? "无需额外处理" : "Nothing else to review" }}</small></span></div>
-                      </template>
+                    <div class="publish-form-section release-field-list">
+                      <div class="publish-section-title">
+                        <span><FileJson :size="16" /></span>
+                        <div><strong>{{ t("releaseInformation") }}</strong><small>{{ t("completeFieldsInOrder") }}</small></div>
+                      </div>
+                      <label class="compact-field"><span>{{ t("category") }}</span>
+                        <input v-model="form.category" list="workflow-category-options" maxlength="80" required :placeholder="t('categoryPlaceholder')" @input="syncCatalogProductByName" />
+                        <datalist id="workflow-category-options"><option v-for="category in repositoryCategories" :key="category" :value="category" /></datalist>
+                      </label>
+                      <label class="compact-field"><span>{{ t("name") }}</span>
+                        <input v-model="form.name" list="workflow-name-options" maxlength="80" @input="syncCatalogProductByName" />
+                        <datalist id="workflow-name-options"><option v-for="item in publishCatalogProducts" :key="item.id" :value="item.name" /></datalist>
+                      </label>
+                      <label class="compact-field"><span>{{ t("version") }}</span><input v-model="form.version" placeholder="1.0" /></label>
+                      <p v-if="selectedCatalogProduct" class="field-note">{{ t("publishedVersions", { versions: selectedCatalogProduct.versions.join(t("listSeparator")) || t("none") }) }}</p>
+                      <p v-if="existingVersionConflict" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlreadyPublished") }}</span></p>
+                      <label class="publish-id-preview compact-field"><span>{{ t("publishId") }}<em>{{ t("automatic") }}</em></span>
+                        <strong>{{ form.id || generatedWorkflowId(form.name || t("unnamedWorkflow")) }}</strong>
+                      </label>
+                      <label class="compact-field release-notes-field"><span>{{ t("releaseNotes") }}</span><textarea v-model="form.changelog" rows="5" /></label>
                     </div>
-                  </aside>
+                  </section>
+
+                  <section v-else class="publish-stage publish-review-stage">
+                    <div class="publish-review-summary">
+                      <div><small>{{ t("repositoryLabel") }}</small><span><strong>{{ form.author && form.repository_name ? `${form.author}/${form.repository_name}` : "—" }}</strong></span></div>
+                      <div><small>{{ t("workflowLabel") }}</small><span><strong>{{ form.name || "—" }}</strong><em>{{ form.category || "—" }}</em></span></div>
+                      <div><small>{{ t("releaseVersion") }}</small><span><strong>v{{ form.version || "—" }}</strong><em>{{ form.id || generatedWorkflowId(form.name || "workflow") }}</em></span></div>
+                      <div><small>{{ t("comfyCore") }}</small><span><strong>{{ status?.comfyui_version || "—" }}</strong></span></div>
+                    </div>
+                    <div class="publish-review-resources">
+                      <span><PackageOpen :size="16" /><strong>{{ customNodeCount }}</strong><small>{{ t("plugins") }}</small></span>
+                      <span><FileUp :size="16" /><strong>{{ imageReferences.length }}</strong><small>{{ t("images") }}</small></span>
+                      <span><TriangleAlert :size="16" /><strong>{{ selectedLoras.length }}</strong><small>{{ t("lorasIncluded") }}</small></span>
+                    </div>
+                    <div class="publish-review-notes"><small>{{ t("releaseNotes") }}</small><p>{{ form.changelog }}</p></div>
+                    <p class="publish-final-warning"><AlertCircle :size="16" />{{ t("immutableReleaseWarning") }}</p>
+                  </section>
                 </div>
 
-                <footer class="publish-action-bar">
-                  <span><CheckCircle2 v-if="canFinalizePublish" :size="16" /><AlertCircle v-else :size="16" />{{ canFinalizePublish ? (locale === "zh" ? "发布信息已完整" : "Ready to publish") : (locale === "zh" ? "请补全名称、版本和更新日志" : "Complete the required release information") }}</span>
-                  <button class="ghost" :disabled="!!busy || !canFinalizePublish" @click="saveDraft">{{ locale === "zh" ? "保存草稿" : "Save draft" }}</button>
-                  <button class="secondary" :disabled="!!busy || !canFinalizePublish" @click="validatePublish"><ShieldCheck :size="16" />{{ t("validate") }}</button>
-                  <button class="primary" :disabled="!!busy || !canFinalizePublish || !status?.github.authenticated" @click="publishNow"><UploadCloud :size="16" />{{ t("publishNow") }}</button>
+                <footer class="publish-action-bar staged-actions">
+                  <span v-if="publishStep === 1"><CheckCircle2 v-if="canConfirmPublishResources" :size="16" /><AlertCircle v-else :size="16" />{{ canConfirmPublishResources
+                    ? t("resourcesReady")
+                    : (canvasWorkflowError || dependencyScanError || (resourceScanPending ? t("scanningResources") : t("resourceReviewFailed"))) }}</span>
+                  <span v-else-if="publishStep === 2"><CheckCircle2 v-if="canFinalizePublish" :size="16" /><AlertCircle v-else :size="16" />{{ canFinalizePublish ? t("releaseDetailsComplete") : t("completeReleaseFields") }}</span>
+                  <span v-else><ShieldCheck :size="16" />{{ t("publishReviewReady") }}</span>
+
+                  <button v-if="publishStep > 1" class="ghost" :disabled="!!busy" @click="moveToPublishStep((publishStep - 1) as 1 | 2)"><ArrowLeft :size="15" />{{ t("back") }}</button>
+                  <button v-if="publishStep === 1" class="primary" :disabled="!!busy || !canConfirmPublishResources" @click="moveToPublishStep(2)">{{ t("confirmResourcesNext") }}<ArrowRight :size="16" /></button>
+                  <button v-else-if="publishStep === 2" class="primary" :disabled="!!busy || !canFinalizePublish" @click="moveToPublishStep(3)">{{ t("confirmDetailsNext") }}<ArrowRight :size="16" /></button>
+                  <template v-else>
+                    <button class="secondary" :disabled="!!busy || !canFinalizePublish" @click="validatePublish"><ShieldCheck :size="16" />{{ t("validate") }}</button>
+                    <button class="primary" :disabled="!!busy || !canFinalizePublish || !status?.github.authenticated" @click="publishNow"><UploadCloud :size="16" />{{ t("publishNow") }}</button>
+                  </template>
                 </footer>
               </section>
             </template>
@@ -1083,17 +1199,17 @@ onBeforeUnmount(() => {
           </div>
           <div v-else class="detail-cover detail-cover-placeholder"><LibraryBig :size="30" /></div>
           <div class="detail-identity">
-            <a class="eyebrow repository-link" :href="repositoryUrl(selected)" target="_blank" rel="noopener"
+            <a class="eyebrow repository-link" :href="productRepositoryUrl(selected)" target="_blank" rel="noopener"
               :title="t('repositoryPage')">
               <GitBranch :size="13" />{{ selected.source.owner }}/{{ selected.source.repo }}<ExternalLink :size="11" />
             </a>
             <h1>{{ selected.name }}</h1>
-            <p>{{ selected.summary || selected.description || (locale === "zh" ? "暂无工作流说明" : "No workflow description") }}</p>
+            <p>{{ selected.summary || selected.description || t("noWorkflowDescription") }}</p>
             <div class="tags"><span v-if="selected.category" class="category-tag"><FolderOpen :size="11" />{{ selected.category }}</span><span v-for="tag in selected.tags" :key="tag">{{ tag }}</span></div>
           </div>
           <div v-if="status?.github.authenticated" class="manage-actions">
-            <button class="secondary" @click="editProduct(selected)">{{ locale === "zh" ? "编辑资料" : "Edit" }}</button>
-            <button class="ghost danger-action" @click="archiveProduct(selected)"><ArchiveIcon :size="15" />{{ selected.archived ? (locale === "zh" ? "取消归档" : "Unarchive") : (locale === "zh" ? "归档" : "Archive") }}</button>
+            <button class="secondary" @click="editProduct(selected)">{{ t("edit") }}</button>
+            <button class="ghost danger-action" @click="archiveProduct(selected)"><ArchiveIcon :size="15" />{{ selected.archived ? t("unarchive") : t("archive") }}</button>
           </div>
         </header>
 
@@ -1112,13 +1228,24 @@ onBeforeUnmount(() => {
           <article v-if="activeDetailVersion" class="release release-focused">
             <div class="release-overview">
               <div>
-                <span class="eyebrow">{{ locale === "zh" ? "当前版本" : "Selected version" }}</span>
+                <span class="eyebrow">{{ t("selectedVersion") }}</span>
                 <div class="release-head"><strong>v{{ activeDetailVersion.version }}</strong><span>{{ humanBytes(activeDetailVersion.package.size) }}</span></div>
-                <p class="compatibility">ComfyUI {{ activeDetailVersion.comfyui.minimum || "—" }} – {{ activeDetailVersion.comfyui.maximum || "∞" }}</p>
+                <p class="compatibility">{{ comfyuiCompatibilityLabel(activeDetailVersion) }}</p>
               </div>
               <a class="release-link" :href="releaseUrl(selected, activeDetailVersion)" target="_blank" rel="noopener">
                 {{ t("releasePage") }}<ExternalLink :size="14" />
               </a>
+            </div>
+
+            <div v-if="activeCoreMismatch" class="core-version-warning">
+              <TriangleAlert :size="19" />
+              <span>
+                <strong>{{ t("coreVersionMismatch") }}</strong>
+                <small>{{ t("coreVersionMismatchDetail", {
+                  required: comfyuiCompatibilityLabel(activeDetailVersion),
+                  current: status?.comfyui_version || "—",
+                }) }}</small>
+              </span>
             </div>
 
             <div class="version-actions" :class="{ 'downloaded-actions': selected.downloaded_versions.includes(activeDetailVersion.version) }">
@@ -1127,7 +1254,7 @@ onBeforeUnmount(() => {
                 <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, activeDetailVersion)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
                 <button class="ghost wide danger-action" :disabled="!!busy" @click="deleteLocalVersion(selected, activeDetailVersion)"><Trash2 :size="16" />{{ t("deleteLocal") }}</button>
               </template>
-              <button v-if="activeDetailVersion.custom_nodes.length" class="secondary wide dependency-action" :disabled="!!busy" @click="planDependencies(selected, activeDetailVersion)"><ListFilter :size="17" />{{ locale === "zh" ? "检查节点依赖" : "Check node dependencies" }}</button>
+              <button v-if="activeDetailVersion.custom_nodes.length" class="secondary wide dependency-action" :disabled="!!busy" @click="planDependencies(selected, activeDetailVersion)"><ListFilter :size="17" />{{ t("checkPluginDependencies") }}</button>
             </div>
 
             <section class="release-note">
@@ -1136,28 +1263,28 @@ onBeforeUnmount(() => {
             </section>
 
             <div class="resource-metrics">
-              <div><PackageOpen :size="17" /><span><strong>{{ activeDetailVersion.custom_nodes.length }}</strong><small>{{ locale === "zh" ? "自定义节点" : "Custom nodes" }}</small></span></div>
-              <div><FileUp :size="17" /><span><strong>{{ activeDetailVersion.inputs?.length || 0 }}</strong><small>{{ locale === "zh" ? "随包图片" : "Included images" }}</small></span></div>
+              <div><PackageOpen :size="17" /><span><strong>{{ activeDetailVersion.custom_nodes.length }}</strong><small>{{ t("plugins") }}</small></span></div>
+              <div><FileUp :size="17" /><span><strong>{{ activeDetailVersion.inputs?.length || 0 }}</strong><small>{{ t("includedImages") }}</small></span></div>
               <div><TriangleAlert :size="17" /><span><strong>{{ loraAssets(activeDetailVersion).length }}</strong><small>LoRA</small></span></div>
             </div>
 
             <div v-if="activeDetailVersion.custom_nodes.length || activeDetailVersion.inputs?.length || loraAssets(activeDetailVersion).length" class="resource-groups">
               <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group">
-                <div class="resource-group-heading"><PackageOpen :size="16" /><strong>{{ locale === "zh" ? "所需自定义节点" : "Required custom nodes" }}</strong></div>
+                <div class="resource-group-heading"><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong></div>
                 <div v-for="node in activeDetailVersion.custom_nodes" :key="node.registry_id || node.name" class="asset-row dependency-asset-row">
-                  <span><PackageOpen :size="15" /><strong>{{ node.name }}</strong><small>{{ node.registry_id || (locale === "zh" ? "未匹配到 Comfy Registry" : "Not matched in Comfy Registry") }}</small></span>
-                  <em>{{ node.version || (node.manual ? (locale === "zh" ? "需手动安装" : "Manual") : (locale === "zh" ? "任意版本" : "Any version")) }}</em>
+                  <span><PackageOpen :size="15" /><strong>{{ node.name }}</strong><small>{{ node.registry_id || t("registryNotMatchedComfy") }}</small></span>
+                  <em>{{ node.version || (node.manual ? t("manualInstall") : t("anyVersion")) }}</em>
                 </div>
               </section>
               <section v-if="activeDetailVersion.inputs?.length" class="resource-group">
-                <div class="resource-group-heading"><FileUp :size="16" /><strong>{{ locale === "zh" ? "随包图片" : "Included images" }}</strong></div>
+                <div class="resource-group-heading"><FileUp :size="16" /><strong>{{ t("includedImages") }}</strong></div>
                 <div v-for="input in activeDetailVersion.inputs" :key="input.archive" class="asset-row">
-                  <span><FileUp :size="15" /><strong>{{ input.source }}</strong><small>{{ input.node_ids.length }} {{ locale === "zh" ? "个节点引用" : "references" }}</small></span>
+                  <span><FileUp :size="15" /><strong>{{ input.source }}</strong><small>{{ t("referenceCount", { count: input.node_ids.length }) }}</small></span>
                   <em>{{ humanBytes(input.size) }}</em>
                 </div>
               </section>
               <section v-if="loraAssets(activeDetailVersion).length" class="resource-group">
-                <div class="resource-group-heading"><TriangleAlert :size="16" /><strong>{{ locale === "zh" ? "可选 LoRA" : "Optional LoRAs" }}</strong><small>{{ locale === "zh" ? "按需下载" : "Download individually" }}</small></div>
+                <div class="resource-group-heading"><TriangleAlert :size="16" /><strong>{{ t("optionalLoras") }}</strong><small>{{ t("downloadIndividually") }}</small></div>
                 <div v-for="model in loraAssets(activeDetailVersion)" :key="`${model.type}:${model.filename}`" class="model-asset">
                   <span><strong>{{ model.name }}</strong><small>{{ model.filename }}</small></span>
                   <button class="secondary" :disabled="!!busy" @click="downloadLora(selected, activeDetailVersion, model)"><DownloadIcon :size="15" />{{ t("download") }}</button>
@@ -1195,7 +1322,7 @@ onBeforeUnmount(() => {
       <div class="drawer-head"><div><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button></div>
       <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
       <article v-for="item in operations" :key="item.id" class="operation">
-        <div><strong>{{ item.kind }}</strong><span :class="`status ${item.status}`">{{ item.stage }}</span></div>
+        <div><strong>{{ item.kind }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
         <template v-if="item.status === 'running' && item.progress?.total">
           <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
             :aria-valuenow="Math.round(progressPercent(item.progress))">

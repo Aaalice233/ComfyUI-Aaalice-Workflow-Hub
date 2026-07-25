@@ -10,6 +10,7 @@
       "id": "portrait-basic",
       "name": "Portrait Basic",
       "category": "Portrait",
+      "repository_path": "workflows/Portrait/Portrait Basic",
       "summary": "A minimal portrait workflow",
       "description": "Demonstrates a complete catalog entry.",
       "tags": ["portrait"],
@@ -21,6 +22,7 @@
       "versions": [
         {
           "version": "1.12",
+          "repository_path": "workflows/Portrait/Portrait Basic/versions/v1.12",
           "published_at": "2026-07-24T00:00:00Z",
           "release_tag": "portrait-basic-v1.12",
           "changelog": "Initial stable release.",

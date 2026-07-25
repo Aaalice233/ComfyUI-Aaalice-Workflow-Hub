@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
+import { resolveHostLocale, translateHost } from "./i18n.js";
 
 const PAGE = "/workflow-hub";
-const TOOLTIP = "打开工作流中心（Shift+点击在新窗口打开） / Open Workflow Hub";
 const ICON_CLASS = "aaalice-workflow-hub-icon";
 const ICON_STYLE_ID = "aaalice-workflow-hub-icon-style";
 const MODAL_ID = "aaalice-workflow-hub-modal";
@@ -11,8 +11,18 @@ function getComfyLocale() {
   return app.ui.settings.getSettingValue("Comfy.Locale");
 }
 
+function t(key, params) {
+  return translateHost(resolveHostLocale(getComfyLocale()), key, params);
+}
+
+const TOOLTIP = t("tooltip");
+
 function getHubUrl() {
-  const params = new URLSearchParams({ locale: getComfyLocale() });
+  const params = new URLSearchParams({
+    locale: getComfyLocale(),
+    embedded: "1",
+    revision: String(Date.now()),
+  });
   return `${PAGE}?${params}`;
 }
 
@@ -35,15 +45,14 @@ async function notifyWorkflowUpdates() {
     const { items } = await response.json();
     if (!Array.isArray(items) || items.length === 0) return;
 
-    const isChinese = getComfyLocale()?.toLowerCase().startsWith("zh");
     const visible = items.slice(0, 3).map((item) => `${item.name} v${item.version}`);
     const remaining = items.length - visible.length;
     const detail = remaining > 0
-      ? `${visible.join(isChinese ? "、" : ", ")}${isChinese ? ` 等 ${items.length} 个` : ` and ${remaining} more`}`
-      : visible.join(isChinese ? "、" : ", ");
+      ? t("updateDetailMore", { items: visible.join(t("listSeparator")), remaining, total: items.length })
+      : visible.join(t("listSeparator"));
     app.extensionManager.toast.add({
       severity: "info",
-      summary: isChinese ? `工作流中心有 ${items.length} 个新版本` : `${items.length} workflow update${items.length === 1 ? "" : "s"} available`,
+      summary: t(items.length === 1 ? "updatesAvailableOne" : "updatesAvailable", { count: items.length }),
       detail,
       life: 5000,
     });
@@ -88,8 +97,7 @@ function installIconStyle() {
       display: grid;
       place-items: center;
       padding: 36px;
-      background: rgb(5 8 12 / 55%);
-      backdrop-filter: blur(6px);
+      background: rgb(5 8 12 / 82%);
     }
 
     .aaalice-workflow-hub-panel {
@@ -105,6 +113,7 @@ function installIconStyle() {
     }
 
     .aaalice-workflow-hub-frame {
+      position: relative;
       width: 100%;
       min-height: 0;
       border: 0;
@@ -145,7 +154,7 @@ function handleHubMessage(event) {
     const activeName = (activeWorkflow?.filename || activeWorkflow?.path || "").split(/[\\/]/).at(-1);
     const filename = activeName
       ? (activeName.toLowerCase().endsWith(".json") ? activeName : `${activeName}.json`)
-      : "Unsaved Workflow.json";
+      : t("untitledWorkflowFile");
     const workflow = JSON.parse(JSON.stringify(app.graph.serialize()));
     event.source?.postMessage(
       { type: "AAALICE_WORKFLOW_HUB_CURRENT_WORKFLOW", filename, workflow },
@@ -180,7 +189,7 @@ function openEmbeddedHub() {
   modal.className = "aaalice-workflow-hub-modal";
   modal.setAttribute("role", "dialog");
   modal.setAttribute("aria-modal", "true");
-  modal.setAttribute("aria-label", "工作流中心 / Workflow Hub");
+  modal.setAttribute("aria-label", t("title"));
 
   const panel = document.createElement("section");
   panel.className = "aaalice-workflow-hub-panel";
@@ -188,7 +197,8 @@ function openEmbeddedHub() {
   const frame = document.createElement("iframe");
   frame.className = "aaalice-workflow-hub-frame";
   frame.src = getHubUrl();
-  frame.title = "工作流中心 / Workflow Hub";
+  frame.title = t("title");
+  frame.loading = "eager";
   frame.addEventListener("load", () => {
     frame.contentDocument?.addEventListener("keydown", handleHubKeydown, true);
     frame.focus();

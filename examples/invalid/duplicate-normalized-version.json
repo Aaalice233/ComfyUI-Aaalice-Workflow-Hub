@@ -5,9 +5,12 @@
     {
       "id": "duplicate-version",
       "name": "Duplicate Version",
+      "category": "Tests",
+      "repository_path": "workflows/Tests/Duplicate Version",
       "versions": [
         {
           "version": "1.12",
+          "repository_path": "workflows/Tests/Duplicate Version/versions/v1.12",
           "published_at": "2026-07-24T00:00:00Z",
           "release_tag": "duplicate-version-v1.12",
           "changelog": "First.",
@@ -15,6 +18,7 @@
         },
         {
           "version": "1.12.0",
+          "repository_path": "workflows/Tests/Duplicate Version/versions/v1.12.0",
           "published_at": "2026-07-24T00:00:00Z",
           "release_tag": "duplicate-version-v1.12.0",
           "changelog": "Duplicate.",

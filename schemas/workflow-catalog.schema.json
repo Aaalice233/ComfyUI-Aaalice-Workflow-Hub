@@ -89,7 +89,7 @@
     "workflowVersion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "published_at", "release_tag", "changelog", "package"],
+      "required": ["version", "published_at", "release_tag", "changelog", "package", "repository_path"],
       "properties": {
         "version": { "$ref": "#/$defs/version" },
         "published_at": { "type": "string", "format": "date-time" },
@@ -107,23 +107,25 @@
         "preview": { "oneOf": [{ "$ref": "#/$defs/image" }, { "type": "null" }] },
         "custom_nodes": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/node" } },
         "inputs": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/input" } },
-        "models": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/model" } }
+        "models": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/model" } },
+        "repository_path": { "type": "string", "minLength": 1, "maxLength": 320 }
       }
     },
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "versions"],
+      "required": ["id", "name", "category", "versions", "repository_path"],
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 80 },
-        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
-        "category": { "type": "string", "maxLength": 80, "pattern": "^[^/\\\\]*$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "category": { "type": "string", "minLength": 1, "maxLength": 80 },
         "summary": { "type": "string", "maxLength": 300 },
         "description": { "type": "string", "maxLength": 20000 },
         "tags": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 40 } },
         "archived": { "type": "boolean", "default": false },
         "cover": { "oneOf": [{ "$ref": "#/$defs/image" }, { "type": "null" }] },
-        "versions": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/workflowVersion" } }
+        "versions": { "type": "array", "maxItems": 500, "items": { "$ref": "#/$defs/workflowVersion" } },
+        "repository_path": { "type": "string", "minLength": 1, "maxLength": 240 }
       }
     }
   }

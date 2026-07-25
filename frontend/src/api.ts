@@ -8,8 +8,11 @@ export class ApiError extends Error {
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
-  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${BASE}${path}`, { ...options, headers, credentials: "same-origin" });
+  const method = (options.method || "GET").toUpperCase();
+  const isWrite = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+  if (isWrite && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const body = isWrite && options.body === undefined ? "{}" : options.body;
+  const response = await fetch(`${BASE}${path}`, { ...options, body, headers, credentials: "same-origin" });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new ApiError(data.error || `${response.status} ${response.statusText}`, response.status);
   return data as T;

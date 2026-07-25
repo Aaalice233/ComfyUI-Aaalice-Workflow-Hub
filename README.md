@@ -10,17 +10,19 @@
 
 面向 ComfyUI 的公共工作流订阅、发布和版本管理插件。作者和订阅者使用同一个插件；入口是 ComfyUI 顶栏的“工作流中心”按钮，不创建侧边栏。
 
-## 1.0 能力
+## 当前能力
 
-- 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，浏览历史版本、更新日志，以及每个版本的节点依赖、随包图片和可选 LoRA 清单。
-- 按版本下载并校验 Release 包；每个版本保存为独立工作流文件，绝不覆盖旧版本，并可直接打开所在目录。
-- 直接读取当前 ComfyUI 画布，在单页中选择仓库和单层类别、填写名称、版本与更新日志并发布 GitHub Release；上次选择的仓库会自动记住。
+- 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，浏览历史版本、更新日志，以及每个版本的插件依赖、随包图片和可选 LoRA 清单。
+- 默认分支按“类别 / 名称 / 版本”保存全部工作流文件，访问仓库即可浏览、备份或直接下载，不必逐个翻找 Release。
+- 按版本下载并校验 Release ZIP；Release 只作为安装包和 LoRA 等分发产物，每个本地版本保存为独立工作流文件。
+- 直接读取当前 ComfyUI 画布，通过“确认资源、填写信息、确认发布”三个阶段完成发布；版本目录、产品资料、README 和根清单在一次 Git 提交中更新。
+- 发布时自动记录作者当前的 ComfyUI 内核版本；订阅者内核不匹配时，下载详情页会显示兼容性警告，但不阻止下载。
 - `加载图像` 节点引用的本地图像会自动随包发布；发布器不再要求上传项目封面。
 - 使用 GitHub App Device Flow 登录；凭据优先保存在系统 keyring，keyring 不可用时仅保留在当前进程。
-- 生成自定义节点依赖计划，并在用户二次确认后将安装、升级或明确选择的降级任务串行交给 ComfyUI-Manager。
+- 生成 ComfyUI 插件依赖计划，并在用户二次确认后将安装、升级或明确选择的降级任务串行交给 ComfyUI-Manager。
 - 中英文界面、启动时工作流更新 Toast、真实下载字节进度、轻量活动抽屉、按 ComfyUI 用户隔离的状态和缓存。
 
-发布页会把自动识别的节点依赖、随包图片和 LoRA 逐项列出；发布后，订阅详情页也展示同一组资源清单。作者可选择将 Lora Manager 引用的 LoRA 作为独立 Release 资源发布，也可一键清空当前待发布副本中的引用。LoRA 不进入工作流主包，订阅用户必须自行点击选择是否下载，插件不会自动下载。插件只支持公共 GitHub 仓库，不支持私有仓库、其他 Git 服务或任意下载主机。项目不会静默修改节点环境，也未发布到 Comfy Registry。
+发布页会把实际的 ComfyUI-Manager 插件包、随包图片和 LoRA 逐项列出；节点无法完整映射时，改为列出当前启用的 Manager 插件供作者勾选，不把节点类型冒充插件。Git clone 开发版若有 Registry ID，普通用户仍通过 Manager 安装可用版本，本地 commit 不会被当作版本锁定。作者可选择将 Lora Manager 引用的 LoRA 作为独立 Release 资源发布，也可一键清空当前待发布副本中的引用。LoRA 不进入工作流主包，订阅用户必须自行点击选择是否下载，插件不会自动下载。插件只支持公共 GitHub 仓库，不支持私有仓库、其他 Git 服务或任意下载主机。项目不会静默修改插件环境，也未发布到 Comfy Registry。
 
 ## 安装和使用
 
@@ -46,6 +48,7 @@ workflows/Workflow Hub/{owner}-{repo}/{workflow-id}/{名称}-v{版本}.json
 - [安全边界](docs/security.md)
 - [故障排查](docs/troubleshooting.md)
 - [GitHub Device Flow 与直接发布 ADR](docs/adr/0001-github-app-device-flow.md)
+- [仓库存档与 Release 分发 ADR](docs/adr/0002-repository-archive-and-release-distribution.md)
 
 开发验证：
 
