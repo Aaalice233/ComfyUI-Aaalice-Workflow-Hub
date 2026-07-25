@@ -1,6 +1,6 @@
 import unittest
 
-from workflow_hub.github import GitHubClient, TokenStore
+from workflow_hub.github import BranchState, GitHubClient, GitTreeFile, TokenStore
 
 
 class NotModifiedResponse:
@@ -44,6 +44,24 @@ class InstallationGitHubClient(GitHubClient):
         raise AssertionError(url)
 
 
+class GitDataClient(GitHubClient):
+    def __init__(self):
+        super().__init__("token")
+        self.calls = []
+
+    async def request(self, method: str, url: str, **kwargs):
+        self.calls.append((method, url, kwargs))
+        if url.endswith("/git/blobs") and method == "POST":
+            return {"sha": "new-blob"}, {}
+        if url.endswith("/git/trees") and method == "POST":
+            return {"sha": "new-tree"}, {}
+        if url.endswith("/git/commits") and method == "POST":
+            return {"sha": "new-commit"}, {}
+        if "/git/refs/heads/" in url and method == "PATCH":
+            return {"ref": "refs/heads/main"}, {}
+        raise AssertionError((method, url))
+
+
 class WriteOnlyKeyring:
     def set_password(self, *_args):
         return None
@@ -75,6 +93,41 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
         await store.set("user", {"access_token": "secret"})
 
         self.assertEqual(await store.get("user"), "secret")
+
+    async def test_commits_multiple_repository_files_with_one_ref_update(self):
+        client = GitDataClient()
+        state = BranchState(
+            branch="main",
+            commit_sha="old-commit",
+            tree_sha="old-tree",
+            files={},
+        )
+
+        result = await client.commit_files(
+            "owner",
+            "repo",
+            state,
+            {"workflow-catalog.json": b"{}", "workflows/A/B/product.json": b"{}"},
+            "Publish",
+            delete_paths={"workflows/Old/B/product.json"},
+            copy_blobs={
+                "workflows/A/B/versions/v1.0/workflow.json": GitTreeFile(
+                    "workflows/Old/B/versions/v1.0/workflow.json",
+                    "100644",
+                    "existing-blob",
+                )
+            },
+        )
+
+        self.assertEqual(result, "new-commit")
+        tree_call = next(call for call in client.calls if call[1].endswith("/git/trees"))
+        entries = tree_call[2]["json"]["tree"]
+        self.assertEqual(tree_call[2]["json"]["base_tree"], "old-tree")
+        self.assertTrue(any(item["sha"] is None for item in entries))
+        self.assertTrue(any(item["sha"] == "existing-blob" for item in entries))
+        ref_calls = [call for call in client.calls if "/git/refs/heads/" in call[1]]
+        self.assertEqual(len(ref_calls), 1)
+        self.assertEqual(ref_calls[0][2]["json"], {"sha": "new-commit", "force": False})
 
 
 if __name__ == "__main__":

@@ -14,7 +14,16 @@ from .security import ensure_within, safe_filename, validate_zip_name
 MAX_PACKAGE = 256 * 1024 * 1024
 MAX_ENTRY = 64 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
-ALLOWED = {"manifest.json", "workflow.json", "README.md", "CHANGELOG.md", "preview.png", "preview.webp"}
+ALLOWED = {
+    "manifest.json",
+    "workflow.json",
+    "README.md",
+    "CHANGELOG.md",
+    "preview.png",
+    "preview.webp",
+    "preview.jpg",
+    "preview.jpeg",
+}
 REQUIRED = {"manifest.json", "workflow.json", "CHANGELOG.md"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
@@ -90,6 +99,47 @@ def inspect_package(path: Path, expected_sha256: str | None = None) -> dict[str,
     return {"sha256": digest, "size": path.stat().st_size, "manifest": manifest, "workflow": workflow}
 
 
+def build_package_files(
+    manifest: dict[str, Any],
+    workflow: dict[str, Any],
+    changelog: str,
+    readme: str | None = None,
+    preview: Path | None = None,
+    input_assets: list[dict[str, Any]] | None = None,
+) -> dict[str, bytes]:
+    files = {
+        "manifest.json": (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode(),
+        "workflow.json": json.dumps(workflow, ensure_ascii=False, separators=(",", ":")).encode(),
+        "CHANGELOG.md": changelog.encode(),
+    }
+    if readme:
+        files["README.md"] = readme.encode()
+    if preview:
+        suffix = preview.suffix.lower()
+        if suffix not in {".png", ".webp", ".jpg", ".jpeg"}:
+            raise ValueError("预览图必须是 PNG、WebP 或 JPEG")
+        files[f"preview{suffix}"] = preview.read_bytes()
+    for item in input_assets or []:
+        archive_name = str(item["archive"])
+        files.setdefault(archive_name, Path(item["path"]).read_bytes())
+    return files
+
+
+def write_package(destination: Path, files: dict[str, bytes]) -> dict[str, Any]:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-hub-", suffix=".zip", dir=destination.parent)
+    os.close(descriptor)
+    try:
+        with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for name, content in files.items():
+                archive.writestr(name, content)
+        os.replace(temp_name, destination)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    return inspect_package(destination)
+
+
 def build_package(
     destination: Path,
     manifest: dict[str, Any],
@@ -99,32 +149,16 @@ def build_package(
     preview: Path | None = None,
     input_assets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-hub-", suffix=".zip", dir=destination.parent)
-    os.close(descriptor)
-    try:
-        with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
-            archive.writestr("workflow.json", json.dumps(workflow, ensure_ascii=False, separators=(",", ":")))
-            archive.writestr("CHANGELOG.md", changelog)
-            if readme:
-                archive.writestr("README.md", readme)
-            if preview:
-                suffix = preview.suffix.lower()
-                if suffix not in {".png", ".webp"}:
-                    raise ValueError("预览图必须是 PNG 或 WebP")
-                archive.write(preview, f"preview{suffix}")
-            written_inputs: set[str] = set()
-            for item in input_assets or []:
-                archive_name = str(item["archive"])
-                if archive_name not in written_inputs:
-                    archive.write(Path(item["path"]), archive_name)
-                    written_inputs.add(archive_name)
-        os.replace(temp_name, destination)
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
-    return inspect_package(destination)
+    return write_package(
+        destination,
+        build_package_files(manifest, workflow, changelog, readme, preview, input_assets),
+    )
+
+
+def read_package_files(path: Path, expected_sha256: str | None = None) -> dict[str, bytes]:
+    inspect_package(path, expected_sha256)
+    with zipfile.ZipFile(path) as archive:
+        return {item.filename: archive.read(item.filename) for item in archive.infolist()}
 
 
 def install_workflow(

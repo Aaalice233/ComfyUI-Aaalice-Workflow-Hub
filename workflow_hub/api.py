@@ -10,7 +10,8 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from .assets import clear_lora_manager, scan_workflow_assets
-from .catalog import Catalog, WorkflowProduct
+from .catalog import Catalog, WorkflowProduct, prepare_publish_product
+from .compatibility import current_comfyui_version, stamp_product_comfyui_version
 from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refresh_access_token, start_device_flow, tokens
 from .manager import ManagerAdapter, local_manager_status
 from .operations import Operation, operations
@@ -24,6 +25,7 @@ from .service import (
     list_subscriptions,
     publish,
     refresh_subscription,
+    resume_publication,
     reveal_in_file_manager,
     update_product,
 )
@@ -48,13 +50,13 @@ async def _json(request: web.Request) -> dict[str, Any]:
         parsed = urlparse(origin)
         if parsed.netloc.casefold() != request.host.casefold() or parsed.scheme != request.scheme:
             raise ValueError("拒绝跨来源写请求")
-    if request.content_type != "application/json":
-        raise ValueError("写接口只接受 application/json")
     if request.content_length and request.content_length > MAX_JSON:
         raise ValueError("请求体超过 2 MiB")
     raw = await request.read()
     if len(raw) > MAX_JSON:
         raise ValueError("请求体超过 2 MiB")
+    if raw and request.content_type != "application/json":
+        raise ValueError("JSON 请求体必须使用 application/json")
     data = json.loads(raw or b"{}")
     if not isinstance(data, dict):
         raise ValueError("请求体必须是 JSON 对象")
@@ -144,7 +146,9 @@ def register_routes() -> None:
         path = FRONTEND / "index.html"
         if not path.exists():
             raise RuntimeError("前端构建产物缺失，请重新安装插件")
-        return web.FileResponse(path)
+        response = web.FileResponse(path)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @routes.get("/workflow-hub/assets/{path:.*}")
     @endpoint
@@ -152,7 +156,9 @@ def register_routes() -> None:
         target = ensure_within(FRONTEND / "assets", FRONTEND / "assets" / request.match_info["path"])
         if not target.is_file():
             raise ValueError("资源不存在")
-        return web.FileResponse(target)
+        response = web.FileResponse(target)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
     @routes.get(f"{BASE}/status")
     @endpoint
@@ -166,6 +172,7 @@ def register_routes() -> None:
             {
                 "plugin_version": "1.0.0",
                 "minimum_frontend": "1.33.9",
+                "comfyui_version": current_comfyui_version(),
                 "manager": manager,
                 "github": {
                     "configured": bool(CLIENT_ID),
@@ -440,7 +447,7 @@ def register_routes() -> None:
     @endpoint
     async def publisher_validate(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
-        WorkflowProduct.model_validate(data["product"])
+        WorkflowProduct.model_validate(prepare_publish_product(stamp_product_comfyui_version(data["product"])))
         if not isinstance(data.get("workflow"), dict):
             raise ValueError("工作流 JSON 必须是对象")
         images, loras = scan_workflow_assets(data["workflow"])
@@ -459,8 +466,8 @@ def register_routes() -> None:
         data = await _json(request)
         if not isinstance(data.get("workflow"), dict):
             raise ValueError("工作流 JSON 必须是对象")
-        items = await ManagerAdapter(_origin(request)).scan(data["workflow"])
-        return web.json_response({"items": items})
+        result = await ManagerAdapter(_origin(request)).scan(data["workflow"])
+        return web.json_response(result)
 
     @routes.post(f"{BASE}/publisher/scan-assets")
     @endpoint
@@ -483,33 +490,6 @@ def register_routes() -> None:
         _, remaining = scan_workflow_assets(cleaned)
         return web.json_response({"workflow": cleaned, "loras": [item.public() for item in remaining]})
 
-    @routes.get(f"{BASE}/publisher/drafts")
-    @endpoint
-    async def publisher_drafts(request: web.Request) -> web.StreamResponse:
-        items = await UserStorage.from_request(request).read_json("drafts.json", [])
-        return web.json_response({"items": items})
-
-    @routes.post(f"{BASE}/publisher/drafts")
-    @endpoint
-    async def publisher_draft_save(request: web.Request) -> web.StreamResponse:
-        data = await _json(request)
-        storage = UserStorage.from_request(request)
-        draft_id = str(data.get("id") or __import__("uuid").uuid4().hex)
-        record = {"id": draft_id, "name": str(data.get("name") or "Untitled"), "payload": data.get("payload", {})}
-        await storage.update_json(
-            "drafts.json", [], lambda items: [item for item in items if item.get("id") != draft_id] + [record]
-        )
-        return web.json_response(record)
-
-    @routes.delete(f"{BASE}/publisher/drafts/{{draft_id}}")
-    @endpoint
-    async def publisher_draft_delete(request: web.Request) -> web.StreamResponse:
-        await _json(request)
-        storage = UserStorage.from_request(request)
-        draft_id = request.match_info["draft_id"]
-        await storage.update_json("drafts.json", [], lambda items: [item for item in items if item.get("id") != draft_id])
-        return web.json_response({"deleted": True})
-
     @routes.get(f"{BASE}/publisher/pending")
     @endpoint
     async def publisher_pending(request: web.Request) -> web.StreamResponse:
@@ -531,16 +511,11 @@ def register_routes() -> None:
         asyncio.create_task(
             _run(
                 operation,
-                publish(
+                resume_publication(
                     storage,
                     token,
-                    record["owner"],
-                    record["repo"],
-                    record["repository"],
-                    record["product"],
-                    record["workflow"],
+                    record,
                     operation,
-                    record.get("cover", record.get("preview")),
                 ),
             )
         )
@@ -550,6 +525,7 @@ def register_routes() -> None:
     @endpoint
     async def publisher_publish(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
+        product = stamp_product_comfyui_version(data["product"])
         storage = UserStorage.from_request(request)
         token = await tokens.get(storage.key)
         if not token:
@@ -565,7 +541,7 @@ def register_routes() -> None:
                     owner,
                     repo,
                     data["repository"],
-                    data["product"],
+                    product,
                     data["workflow"],
                     operation,
                     data.get("cover", data.get("preview")),

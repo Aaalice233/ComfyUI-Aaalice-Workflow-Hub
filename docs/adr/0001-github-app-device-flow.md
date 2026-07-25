@@ -11,7 +11,7 @@
 
 使用公开可安装的 GitHub App 和 Device Flow。插件只包含公开 Client ID，环境变量可以覆盖。Token 优先存入系统 keyring，keyring 不可用时仅保留在当前进程。
 
-GitHub App 权限为 Metadata 只读、Contents 读写、Administration 读写；不启用 webhook。发布采用 Draft Release → 上传 assets → 发布 Release → 以内容 SHA 更新目录的事务。目录并发冲突合并重试一次，Release 成功而目录失败时记录待同步状态。
+GitHub App 权限为 Metadata 只读、Contents 读写、Administration 读写；不启用 webhook。发布采用 Draft Release → 上传 assets → 发布 Release → Git Data 原子提交仓库存档的事务。分支并发冲突合并重试一次，Release 成功而仓库存档失败时记录待同步状态。
 
 ## 结果
 

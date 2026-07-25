@@ -20,6 +20,7 @@ def with_version(catalog: Catalog, version: str) -> Catalog:
         update={
             "version": version,
             "release_tag": f"{product.id}-v{version}",
+            "repository_path": f"{product.repository_path}/versions/v{version}",
         }
     )
     updated = product.model_copy(update={"versions": product.versions + [added]})

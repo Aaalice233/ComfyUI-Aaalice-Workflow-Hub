@@ -8,6 +8,13 @@ export default defineConfig({
     outDir: "../web/app",
     emptyOutDir: true,
     assetsDir: "assets",
+    rollupOptions: {
+      output: {
+        entryFileNames: "assets/index.js",
+        chunkFileNames: "assets/[name].js",
+        assetFileNames: ({ name }) => name?.endsWith(".css") ? "assets/index.css" : "assets/[name][extname]",
+      },
+    },
   },
   test: {
     environment: "jsdom",
