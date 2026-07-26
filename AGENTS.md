@@ -1,12 +1,23 @@
 # AGENTS.md
 
-本文件适用于仓库内的全部目录。
+本文件适用于仓库内的全部目录，是开发与协作规范；用户文档见 `README.md`，设计与行为约定见 `docs/`。
 
 ## 项目定位
 
 - 本项目是面向 ComfyUI 的通用工作流订阅、分发与版本管理插件。
 - 当前 `1.0.0` 已完成可用闭环；文档只能把代码和真实验收已经覆盖的能力描述为已实现。
-- 在用户明确决定前，不得发布到 Comfy Registry，也不得添加自动发布 Registry 的流程。
+- 插件本体已发布到 Comfy Registry（发布者 `aaalice`）。发布只能由用户明确要求后，手动执行 `comfy node publish`；不得在代码库中添加自动发布 Registry 的流程。
+
+## 仓库结构
+
+- `workflow_hub/`：Python 后端（aiohttp 路由、GitHub 交互、目录与包处理、依赖计划、存储）。
+- `web/comfyui/`：ComfyUI 宿主扩展桥接层（顶栏按钮、面板加载、宿主词典），随 `WEB_DIRECTORY` 加载。
+- `web/app/`：Vue 前端的生产构建产物，由 `npm run build` 生成，禁止手工修改。
+- `frontend/`：Vue 3 + TypeScript + Vite 前端源码与测试。
+- `docs/`：设计、范围和行为约定的事实来源；`docs/adr/` 保存架构决策记录。
+- `schemas/`：`workflow-catalog.json` 的 JSON Schema。
+- `examples/`：协议示例（含合法与非法样例），供文档和测试引用。
+- `tests/`：Python 后端测试（`python -m unittest`）。
 
 ## 文档同步规范
 
@@ -16,13 +27,14 @@
 - 文档必须明确区分“已实现”“开发中”“计划中”和“不在当前范围”，不得让规划内容看起来已经可用。
 - 如果代码行为与文档不一致，应在合入前同时修正，不能只改一侧。
 - 新增独立设计主题时，应在 `docs/` 中新增文档，并从现有文档或 `README.md` 建立入口。
+- 文档职责区分：`README.md`/`README.en.md` 只面向用户（功能、安装、使用、边界、文档入口）；`AGENTS.md` 只写长期有效的开发规范，不记录具体问题的排障笔记；`docs/troubleshooting.md` 面向用户的故障排查；`docs/adr/` 记录不可轻易推翻的架构决策及其背景。
 
 ## 开发原则
 
 - 修改前先确认 ComfyUI、ComfyUI-Manager 的当前接口和真实行为，不凭印象实现。
 - 优先使用 ComfyUI 与 ComfyUI-Manager 提供的公开接口；不要复制它们的内部安装逻辑。
 - 插件不得静默安装、升级、降级、启用或禁用第三方节点。改变环境前必须展示计划并取得用户确认。
-- 不执行工作流仓库中的任意脚本，不允许压缩包路径穿越，不把模型下载混入首个版本。
+- 不执行工作流仓库中的任意脚本，不允许压缩包路径穿越，不自动下载模型或 LoRA。
 - 节点安装任务默认串行执行；只有下载、校验等不会同时修改环境的步骤才可受控并行。
 - 真实进度无法获得时展示阶段、任务状态和日志，不伪造百分比。
 - 保持实现简单，优先完成最小可用闭环，不为尚未确定的需求提前建立复杂抽象。
@@ -47,6 +59,19 @@
 - 包含名称、数量、版本等动态内容的文案必须使用词典命名参数，例如 `t("managerTasksQueued", { count })`；不得在组件中分别拼接中英文句子。
 - 专有名词、协议字段、文件名、版本号、单位和后端返回的原始错误可以按原值显示；其周围的说明、标签和操作文案仍必须进入词典。
 - 修改词典或用户文案后，必须运行 `frontend` 的 i18n 测试和生产构建。`i18n.test.ts` 必须持续检查参数插值，并阻止 `App.vue`、`workflow_hub.js` 和入口 HTML 重新出现词典外中文或语言条件分支。
+
+## 开发命令
+
+```powershell
+# Python 后端测试（仓库根目录）
+python -m unittest discover -s tests -v
+
+# 前端依赖、测试与生产构建（产物写入 web/app/）
+Set-Location frontend
+npm ci
+npm test
+npm run build
+```
 
 ## 验证
 
@@ -107,4 +132,6 @@ Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinu
 
 确认命令行、PID 和端口属于本轮实例后，才可执行 `Stop-Process -Id $process.Id`。
 
-- 提交信息使用 `type(scope): 中文描述`，标题不超过 72 个字符。
+## 提交规范
+
+- 提交信息使用 `type(scope): 中文描述`，标题不超过 72 个字符；`type` 取 `feat`/`fix`/`refactor`/`perf`/`style`/`docs`/`test`/`chore`。

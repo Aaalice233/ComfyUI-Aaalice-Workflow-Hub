@@ -14,7 +14,7 @@ ComfyUI-Aaalice-Workflow-Hub 是 ComfyUI 内的双向工作流中心：作者在
 
 当前实现包含公共 GitHub 仓库订阅、GitHub Device Flow、可浏览仓库存档、Release 分发、原子目录提交、启动时版本通知、安全包下载、历史版本保留、插件依赖计划、双语界面和用户隔离存储。
 
-当前范围不包含私有仓库、其他 Git 服务、模型自动下载、任意节点 Git 地址、遥测、侧边栏和 Comfy Registry 发布。发布器只自动识别 Lora Manager 的 LoRA 引用；LoRA 是否发布由作者选择，是否下载由订阅用户选择。
+当前范围不包含私有仓库、其他 Git 服务、模型自动下载、任意节点 Git 地址、遥测和侧边栏，也不为工作流提供 Comfy Registry 分发或自动发布流程（插件本体经 Registry 分发属于交付渠道，不在产品功能内）。发布器只自动识别 Lora Manager 的 LoRA 引用；LoRA 是否发布由作者选择，是否下载由订阅用户选择。
 
 ## 原则
 

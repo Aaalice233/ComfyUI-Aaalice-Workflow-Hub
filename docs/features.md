@@ -78,4 +78,4 @@
 - 自动下载模型或 LoRA。
 - 执行工作流仓库脚本。
 - 自动安装、升级、降级、启用节点。
-- Comfy Registry 发布或自动发布流程。
+- 面向工作流的 Comfy Registry 分发，或在插件内自动发布 Registry 的流程。
