@@ -1,6 +1,6 @@
 [project]
 name = "ComfyUI-Aaalice-Workflow-Hub"
-version = "1.0.0"
+version = "1.0.1"
 description = "A workflow subscription and version management hub for ComfyUI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,8 @@ Documentation = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub/tree
 [tool.comfy]
 PublisherId = "aaalice"
 DisplayName = "ComfyUI-Aaalice-Workflow-Hub"
+Icon = "https://raw.githubusercontent.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub/main/assets/icon.png"
+Banner = "https://raw.githubusercontent.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub/main/assets/banner.png"
 
 [build-system]
 requires = ["setuptools>=68"]
