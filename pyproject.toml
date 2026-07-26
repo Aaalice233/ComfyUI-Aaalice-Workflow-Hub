@@ -20,7 +20,7 @@ Documentation = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub/tree
 
 [tool.comfy]
 PublisherId = "aaalice"
-DisplayName = "Aaalice"
+DisplayName = "ComfyUI-Aaalice-Workflow-Hub"
 
 [build-system]
 requires = ["setuptools>=68"]
