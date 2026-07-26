@@ -18,6 +18,10 @@ dependencies = [
 Repository = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub"
 Documentation = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub/tree/main/docs"
 
+[tool.comfy]
+PublisherId = "aaalice"
+DisplayName = "Aaalice"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

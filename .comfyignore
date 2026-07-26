@@ -1,0 +1,22 @@
+# 版本控制与开发环境
+.git/
+.github/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+*.log
+
+# 前端源码与依赖（构建产物已在 web/app 中）
+frontend/
+node_modules/
+
+# 测试与仅面向开发者的文档
+tests/
+AGENTS.md
+CONTEXT.md

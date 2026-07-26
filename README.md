@@ -23,7 +23,7 @@
 - 生成 ComfyUI 插件依赖计划，并在用户二次确认后将安装、升级或明确选择的降级任务串行交给 ComfyUI-Manager。
 - 中英文界面、启动时工作流更新 Toast、真实下载字节进度、轻量活动抽屉、按 ComfyUI 用户隔离的状态和缓存。
 
-发布页会把实际的 ComfyUI-Manager 插件包、随包图片和 LoRA 逐项列出；节点无法完整映射时，改为列出当前启用的 Manager 插件供作者勾选，不把节点类型冒充插件。Git clone 开发版若有 Registry ID，普通用户仍通过 Manager 安装可用版本，本地 commit 不会被当作版本锁定。作者可选择将 Lora Manager 引用的 LoRA 作为独立 Release 资源发布，也可一键清空当前待发布副本中的引用。LoRA 不进入工作流主包，订阅用户必须自行点击选择是否下载，插件不会自动下载。插件只支持公共 GitHub 仓库，不支持私有仓库、其他 Git 服务或任意下载主机。项目不会静默修改插件环境，也未发布到 Comfy Registry。
+发布页会把实际的 ComfyUI-Manager 插件包、随包图片和 LoRA 逐项列出；节点无法完整映射时，改为列出当前启用的 Manager 插件供作者勾选，不把节点类型冒充插件。Git clone 开发版若有 Registry ID，普通用户仍通过 Manager 安装可用版本，本地 commit 不会被当作版本锁定。作者可选择将 Lora Manager 引用的 LoRA 作为独立 Release 资源发布，也可一键清空当前待发布副本中的引用。LoRA 不进入工作流主包，订阅用户必须自行点击选择是否下载，插件不会自动下载。插件只支持公共 GitHub 仓库，不支持私有仓库、其他 Git 服务或任意下载主机。项目不会静默修改插件环境。插件本体已发布到 Comfy Registry（发布者 aaalice），可通过 ComfyUI-Manager 安装。
 
 ## 安装和使用
 
