@@ -14,3 +14,4 @@ frontend/*.tsbuildinfo
 .idea/
 .vscode/
 *.log
+node.zip
