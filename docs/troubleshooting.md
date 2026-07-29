@@ -22,7 +22,7 @@
 
 ## Manager 不可用
 
-工作流仍可下载。插件依赖计划会降级为说明，不会尝试自行安装。安装或升级 ComfyUI-Manager `4.2.1+` 后重启。
+工作流仍可下载。插件依赖计划会降级为说明，不会尝试自行安装。插件支持 ComfyUI-Manager `3.0+`（legacy API）和 `4.2.1+`（v2 API），安装或升级后重启 ComfyUI 即可。Manager 3.x 下如果安装任务被拒绝并返回 403，需把 Manager 的 `security_level` 调整为 `middle` 或更低（默认 `normal` 即可）。
 
 ## 同版本下载失败
 

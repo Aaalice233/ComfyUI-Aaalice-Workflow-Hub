@@ -62,6 +62,7 @@
 - 依赖计划状态：`keep/install/upgrade/newer/conflict/unknown/manual`。
 - `newer` 默认保留；手动依赖和冲突不会自动执行。
 - 节点环境变更必须二次确认，并串行提交给 Manager。
+- 执行后展示队列进度条和逐任务状态；任务结果（成功或失败原因）在 Manager 4.x 下经队列历史读取，在 Manager 3.x 下经 ComfyUI WebSocket 广播接收，完成后提示重启 ComfyUI。
 - Manager 不可用时仍允许下载工作流。
 - 自动扫描并打包 `Load Image` 节点引用的本地图像，安装时写入隔离的 ComfyUI input 子目录并改写引用。
 - 随包图片同时写入版本目录的 `inputs` 字段，使订阅用户无需下载 ZIP 即可确认图片名称、大小和引用节点。

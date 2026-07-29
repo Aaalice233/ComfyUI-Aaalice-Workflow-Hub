@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleUserRound,
+  Clock,
   Compass,
   Copy,
   Download as DownloadIcon,
@@ -23,6 +24,7 @@ import {
   ImagePlus,
   LibraryBig,
   ListFilter,
+  LoaderCircle,
   LogOut,
   PackageOpen,
   Plus,
@@ -72,7 +74,7 @@ type Product = {
 type Status = {
   plugin_version: string;
   comfyui_version: string;
-  manager: { available: boolean; compatible: boolean; version?: string };
+  manager: { available: boolean; compatible: boolean; version?: string; api?: "v2" | "legacy" };
   github: { configured: boolean; authenticated: boolean; user?: { login: string; avatar_url: string }; persistent_credentials: boolean };
 };
 type Operation = {
@@ -92,6 +94,12 @@ type ScannedNodeDependency = NodeDependencyInfo & {
 };
 type PublishCatalogProduct = {
   id: string; name: string; category: string; summary: string; description: string; tags: string[]; versions: string[];
+};
+type DependencyTaskState = "queued" | "installing" | "success" | "failed" | "unknown";
+type DependencyExecutionTask = { registryId: string; name: string; version: string; state: DependencyTaskState; message: string };
+type DependencyExecution = {
+  clientId: string; total: number; done: number; sawActivity: boolean; idlePolls: number; finished: boolean;
+  tasks: DependencyExecutionTask[];
 };
 
 const LAST_PUBLISH_REPOSITORY_KEY = "aaalice-workflow-hub:last-publish-repository";
@@ -145,6 +153,9 @@ const deviceCodeCopied = ref(false);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
 const selectedDependencyActions = reactive<Record<string, string[]>>({});
 const dependencyConfirmed = reactive<Record<string, boolean>>({});
+const dependencyExecutions = reactive<Record<string, DependencyExecution>>({});
+const dependencyTimers: Record<string, number> = {};
+let managerSocket: WebSocket | null = null;
 let operationTimer = 0;
 let loginTimer = 0;
 let copiedTimer = 0;
@@ -200,6 +211,21 @@ const activeDetailVersion = computed(() =>
   detailVersions.value.find((version) => version.version === selectedDetailVersion.value) || detailVersions.value[0] || null
 );
 const publishStepLabels = computed(() => [t.value("stepResources"), t.value("stepDetails"), t.value("stepReview")]);
+const activeDependencyExecution = computed(() =>
+  selected.value && activeDetailVersion.value
+    ? dependencyExecutions[dependencyKey(selected.value, activeDetailVersion.value)] || null
+    : null
+);
+const dependencyExecutionFailures = computed(() =>
+  activeDependencyExecution.value?.tasks.filter((task) => task.state === "failed").length || 0
+);
+const dependencyTaskStateKeys: Record<DependencyTaskState, MessageKey> = {
+  queued: "installTaskQueued",
+  installing: "installTaskInstalling",
+  success: "installTaskSuccess",
+  failed: "installTaskFailed",
+  unknown: "installTaskUnknown",
+};
 const canAdvancePublish = computed(() => {
   return !!form.repository_url.trim() && !!form.repository_name.trim() && !!form.author.trim();
 });
@@ -548,12 +574,123 @@ async function executeDependencyPlan(item: Product, version: Version) {
     return [{ ...entry, action: entry.action === "newer" ? "downgrade" : entry.action }];
   });
   await withBusy("dependency-execute", async () => {
+    const clientId = `workflow-hub-${Math.random().toString(36).slice(2, 10)}`;
     const result = await post<{ queued: DependencyPlan[] }>("/workflows/dependencies/execute", {
-      confirmed: true, actions, client_id: "workflow-hub",
+      confirmed: true, actions, client_id: clientId,
     });
-    notice.value = t.value("managerTasksQueued", { count: result.queued.length });
     dependencyConfirmed[key] = false;
+    if (!result.queued.length) {
+      notice.value = t.value("managerTasksQueued", { count: 0 });
+      return;
+    }
+    startDependencyExecution(key, result.queued, clientId);
   });
+}
+function startDependencyExecution(key: string, queued: DependencyPlan[], clientId: string) {
+  window.clearTimeout(dependencyTimers[key]);
+  dependencyExecutions[key] = {
+    clientId,
+    total: queued.length,
+    done: 0,
+    sawActivity: false,
+    idlePolls: 0,
+    finished: false,
+    tasks: queued.map((entry) => ({
+      registryId: String(entry.registry_id || entry.name),
+      name: entry.name,
+      version: entry.requested || "",
+      state: "queued",
+      message: "",
+    })),
+  };
+  ensureManagerSocket();
+  void pollDependencyExecution(key);
+}
+async function pollDependencyExecution(key: string) {
+  const execution = dependencyExecutions[key];
+  if (!execution || execution.finished) return;
+  try {
+    const queue = await api<{ api?: string; total: number; done: number; in_progress: number; processing: boolean }>(
+      `/manager/queue-status?client_id=${encodeURIComponent(execution.clientId)}`
+    );
+    if (queue.processing || queue.total > 0) {
+      execution.sawActivity = true;
+      execution.idlePolls = 0;
+    } else if (execution.sawActivity) {
+      // Legacy Manager broadcasts per-task results over the WebSocket right before
+      // draining the queue, so only wrap up after two consecutive idle polls.
+      execution.idlePolls += 1;
+    }
+    execution.done = Math.min(queue.done, execution.total);
+    execution.tasks.forEach((task, index) => {
+      if (task.state === "success" || task.state === "failed") return;
+      task.state = index < execution.done ? "unknown" : index === execution.done && queue.processing ? "installing" : "queued";
+    });
+    if (execution.sawActivity && execution.idlePolls >= 2) {
+      await finalizeDependencyExecution(key);
+      return;
+    }
+  } catch {
+    // A missed progress poll only drops one frame of feedback; the Manager queue keeps installing.
+  }
+  dependencyTimers[key] = window.setTimeout(() => void pollDependencyExecution(key), 1000);
+}
+async function finalizeDependencyExecution(key: string) {
+  const execution = dependencyExecutions[key];
+  if (!execution || execution.finished) return;
+  if (status.value?.manager.api === "v2") {
+    try {
+      const history = await api<{ items: Record<string, { outcome: string; message: string }> }>(
+        `/manager/queue-history?client_id=${encodeURIComponent(execution.clientId)}`
+      );
+      for (const task of execution.tasks) {
+        const item = history.items[task.registryId];
+        if (!item) continue;
+        task.state = item.outcome === "success" ? "success" : item.outcome === "failed" ? "failed" : "unknown";
+        task.message = item.outcome === "failed" ? item.message : "";
+      }
+    } catch {
+      // Without history the tasks stay "unknown" and the UI points the user at the console.
+    }
+  }
+  for (const task of execution.tasks) {
+    if (task.state === "installing" || task.state === "queued") task.state = "unknown";
+  }
+  execution.done = execution.total;
+  execution.finished = true;
+  maybeCloseManagerSocket();
+}
+function ensureManagerSocket() {
+  if (managerSocket && managerSocket.readyState <= WebSocket.OPEN) return;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${protocol}://${window.location.host}/ws?clientId=workflow-hub-progress`);
+  socket.addEventListener("message", (event) => {
+    let payload: { type?: string; data?: Record<string, unknown> };
+    try { payload = JSON.parse(String(event.data)); } catch { return; }
+    if (payload?.type !== "cm-queue-status" || !payload.data) return;
+    handleManagerQueueEvent(payload.data);
+  });
+  managerSocket = socket;
+}
+function handleManagerQueueEvent(data: Record<string, unknown>) {
+  // Legacy Manager only broadcasts per-task results via nodepack_result when the queue drains
+  // (ui_id is the registry_id we queued with).
+  if (data.status !== "done" || typeof data.nodepack_result !== "object" || !data.nodepack_result) return;
+  const results = data.nodepack_result as Record<string, unknown>;
+  for (const execution of Object.values(dependencyExecutions)) {
+    if (execution.finished) continue;
+    for (const task of execution.tasks) {
+      const message = results[task.registryId];
+      if (typeof message !== "string") continue;
+      task.state = message === "success" ? "success" : "failed";
+      task.message = message === "success" ? "" : message;
+    }
+  }
+}
+function maybeCloseManagerSocket() {
+  if (Object.values(dependencyExecutions).some((execution) => !execution.finished)) return;
+  managerSocket?.close();
+  managerSocket = null;
 }
 async function pollOperations() {
   operations.value = (await api<{ items: Operation[] }>("/operations")).items;
@@ -1007,6 +1144,8 @@ onBeforeUnmount(() => {
   clearTimeout(operationTimer);
   clearTimeout(loginTimer);
   clearTimeout(copiedTimer);
+  Object.values(dependencyTimers).forEach((timer) => clearTimeout(timer));
+  managerSocket?.close();
 });
 </script>
 
@@ -1547,6 +1686,29 @@ onBeforeUnmount(() => {
             <button class="primary wide"
               :disabled="!dependencyConfirmed[dependencyKey(selected, activeDetailVersion)] || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.length || !status?.manager.available || !status?.manager.compatible || !!busy"
               @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("execute") }}</button>
+
+            <div v-if="activeDependencyExecution" class="dependency-execution">
+              <div class="dependency-progress-head">
+                <span>{{ t("installProgress", { done: activeDependencyExecution.done, total: activeDependencyExecution.total }) }}</span>
+                <div class="dependency-progress"><div class="dependency-progress-bar" :style="{ width: `${Math.round((activeDependencyExecution.done / Math.max(activeDependencyExecution.total, 1)) * 100)}%` }"></div></div>
+              </div>
+              <ul class="dependency-tasks">
+                <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
+                  <LoaderCircle v-if="task.state === 'installing'" :size="15" class="dependency-task-spin" />
+                  <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
+                  <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
+                  <Clock v-else :size="15" />
+                  <span class="dependency-task-name"><strong>{{ task.name }}</strong><small v-if="task.version">{{ task.version }}</small></span>
+                  <span class="dependency-task-state">{{ t(dependencyTaskStateKeys[task.state]) }}</span>
+                  <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
+                </li>
+              </ul>
+              <div v-if="activeDependencyExecution.finished" class="dependency-result">
+                <span>{{ dependencyExecutionFailures ? t("installFinishedWithFailures", { count: dependencyExecutionFailures }) : t("installFinished") }}</span>
+                <span>{{ t("restartToApply") }}</span>
+                <span v-if="activeDependencyExecution.tasks.some((task) => task.state === 'unknown')">{{ t("installDetailConsoleHint") }}</span>
+              </div>
+            </div>
           </div>
         </article>
         </div>

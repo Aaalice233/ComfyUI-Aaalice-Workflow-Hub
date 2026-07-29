@@ -19,7 +19,7 @@
 - 按版本下载并校验 Release ZIP；每个本地版本保存为独立工作流文件，可从详情页直接打开所在目录。
 - 详情页展示每个版本的插件依赖、随包图片和可选 LoRA 清单；LoRA 必须逐项主动下载，绝不自动下载。
 - 发布时记录打包所用的 ComfyUI 内核版本；内核不匹配时下载页显示兼容性警告，但不阻止下载。
-- 插件依赖生成只读计划，经二次确认后串行交给 ComfyUI-Manager 执行；Manager 不可用时仍可正常下载。
+- 插件依赖生成只读计划，经二次确认后串行交给 ComfyUI-Manager 执行，并展示进度条与每个插件的安装结果；Manager 不可用时仍可正常下载。
 
 ### 发布与管理
 
@@ -41,7 +41,7 @@
 
 **方式二（手动）**：将本仓库放入 `ComfyUI/custom_nodes/`，执行 `pip install -r requirements.txt`。
 
-要求 ComfyUI Frontend `1.33.9+`，推荐使用 Manager `4.2.1+`。
+要求 ComfyUI Frontend `1.33.9+`；支持 ComfyUI-Manager `3.0+`，推荐 `4.2.1+`。
 
 ## 使用
 

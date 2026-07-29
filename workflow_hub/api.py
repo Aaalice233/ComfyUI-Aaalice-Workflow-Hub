@@ -188,6 +188,9 @@ def register_routes() -> None:
         credential = await tokens.get_record(storage.key)
         github_user = credential.get("user") if credential and isinstance(credential.get("user"), dict) else None
         manager = local_manager_status()
+        detected = await ManagerAdapter(_origin(request)).status()
+        if detected.get("api"):
+            manager["api"] = detected["api"]
         return web.json_response(
             {
                 "plugin_version": "1.0.0",
@@ -456,6 +459,18 @@ def register_routes() -> None:
         await _json(request)
         await tokens.delete(UserStorage.from_request(request).key)
         return web.json_response({"authenticated": False})
+
+    @routes.get(f"{BASE}/manager/queue-status")
+    @endpoint
+    async def manager_queue_status(request: web.Request) -> web.StreamResponse:
+        client_id = request.query.get("client_id") or None
+        return web.json_response(await ManagerAdapter(_origin(request)).queue_status(client_id))
+
+    @routes.get(f"{BASE}/manager/queue-history")
+    @endpoint
+    async def manager_queue_history(request: web.Request) -> web.StreamResponse:
+        client_id = str(request.query.get("client_id") or "")
+        return web.json_response({"items": await ManagerAdapter(_origin(request)).queue_history(client_id)})
 
     @routes.post(f"{BASE}/github/repositories")
     @endpoint

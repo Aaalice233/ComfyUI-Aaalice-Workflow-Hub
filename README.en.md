@@ -19,7 +19,7 @@ A public workflow subscription, publishing, and version-management extension for
 - Download and verify Release ZIPs by version. Each local version is stored as a separate workflow file, and its folder can be opened directly from the detail page.
 - The detail page lists each version's plugin dependencies, bundled images, and optional LoRAs. LoRAs are downloaded one at a time and only on explicit request — never automatically.
 - Publishing records the ComfyUI core version used to build the package; a mismatch shows a compatibility warning on the download page without blocking the download.
-- Plugin dependencies produce a read-only plan that is handed to ComfyUI-Manager in sequence after explicit confirmation. Downloads still work when Manager is unavailable.
+- Plugin dependencies produce a read-only plan that is handed to ComfyUI-Manager in sequence after explicit confirmation, with a progress bar and per-plugin install results. Downloads still work when Manager is unavailable.
 
 ### Publish and manage
 
@@ -41,7 +41,7 @@ A public workflow subscription, publishing, and version-management extension for
 
 **Option 2 (manual)**: place this repository under `ComfyUI/custom_nodes/` and run `pip install -r requirements.txt`.
 
-Requires ComfyUI Frontend `1.33.9+`; Manager `4.2.1+` is recommended.
+Requires ComfyUI Frontend `1.33.9+`; ComfyUI-Manager `3.0+` is supported, `4.2.1+` recommended.
 
 ## Usage
 

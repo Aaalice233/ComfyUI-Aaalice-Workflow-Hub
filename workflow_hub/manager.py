@@ -7,6 +7,25 @@ from typing import Any
 import aiohttp
 
 
+_flavor_cache: dict[str, tuple[str, str]] = {}
+
+
+def _parse_version_numbers(version: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in str(version).lstrip("Vv").split(".")[:3])
+    except ValueError:
+        return ()
+
+
+def _is_compatible_version(numbers: tuple[int, ...]) -> bool:
+    # Manager 3.x 只暴露 legacy REST 端点，4.2.1+ 才提供 v2 端点，两条 API 路径都受支持。
+    if not numbers:
+        return False
+    if numbers[0] == 3:
+        return True
+    return numbers >= (4, 2, 1)
+
+
 @dataclass
 class DependencyAction:
     registry_id: str | None
@@ -124,20 +143,41 @@ class ManagerAdapter:
     def __init__(self, origin: str):
         self.origin = origin.rstrip("/")
 
-    async def status(self) -> dict[str, Any]:
+    async def _detect(self) -> tuple[str, str] | None:
+        cached = _flavor_cache.get(self.origin)
+        if cached is not None:
+            return cached
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.origin}/v2/manager/version", timeout=3) as response:
-                    if response.status != 200:
-                        return {"available": False, "compatible": False}
-                    text = await response.text()
-                    return {"available": True, "compatible": True, "version": text.strip('"')}
+                for flavor, path in (("v2", "/v2/manager/version"), ("legacy", "/manager/version")):
+                    try:
+                        async with session.get(f"{self.origin}{path}", timeout=3) as response:
+                            if response.status != 200:
+                                continue
+                            version = (await response.text()).strip().strip('"')
+                            detected = (flavor, version)
+                            _flavor_cache[self.origin] = detected
+                            return detected
+                    except Exception:
+                        continue
         except Exception:
+            pass
+        return None
+
+    async def status(self) -> dict[str, Any]:
+        detected = await self._detect()
+        if detected is None:
             return {"available": False, "compatible": False}
+        flavor, version = detected
+        return {"available": True, "compatible": True, "version": version, "api": flavor}
 
     async def installed(self) -> dict[str, dict[str, Any]]:
+        detected = await self._detect()
+        if detected is None:
+            raise RuntimeError("ComfyUI-Manager 未提供兼容的已安装节点接口")
+        path = "/v2/customnode/installed" if detected[0] == "v2" else "/customnode/installed"
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.origin}/v2/customnode/installed") as response:
+            async with session.get(f"{self.origin}{path}") as response:
                 if response.status != 200:
                     raise RuntimeError("ComfyUI-Manager 未提供兼容的已安装节点接口")
                 data = await response.json()
@@ -188,11 +228,17 @@ class ManagerAdapter:
 
         walk(workflow)
         installed = await self.installed()
+        detected = await self._detect()
+        mappings_url = (
+            f"{self.origin}/v2/customnode/getmappings?mode=local"
+            if detected and detected[0] == "v2"
+            else f"{self.origin}/customnode/getmappings?mode=local"
+        )
         mappings: dict[str, Any] = {}
         object_info: dict[str, Any] = {}
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(f"{self.origin}/v2/customnode/getmappings?mode=local", timeout=10) as response:
+                async with session.get(mappings_url, timeout=10) as response:
                     data = await response.json() if response.status == 200 else {}
                     if isinstance(data, dict):
                         mappings = data
@@ -257,30 +303,100 @@ class ManagerAdapter:
 
     async def execute(self, actions: list[dict[str, Any]], client_id: str) -> list[dict[str, Any]]:
         allowed = {"install", "upgrade", "downgrade"}
+        detected = await self._detect()
+        flavor = detected[0] if detected else "v2"
         queued: list[dict[str, Any]] = []
         async with aiohttp.ClientSession() as session:
             for item in actions:
                 if item.get("action") not in allowed or not item.get("registry_id"):
                     continue
                 target_version = item.get("requested") or "latest"
-                params = {
-                    "id": item["registry_id"],
-                    "version": target_version,
-                    "selected_version": target_version,
-                    "mode": "cache",
-                    "channel": "default",
-                    "skip_post_install": False,
-                }
-                payload = {"ui_id": item["registry_id"], "client_id": client_id, "kind": "install", "params": params}
-                async with session.post(f"{self.origin}/v2/manager/queue/task", json=payload) as response:
+                if flavor == "legacy":
+                    payload = {
+                        "id": item["registry_id"],
+                        "version": target_version,
+                        "selected_version": target_version,
+                        "skip_post_install": False,
+                        "ui_id": item["registry_id"],
+                        "channel": "default",
+                        "mode": "cache",
+                    }
+                    request = session.post(f"{self.origin}/manager/queue/install", json=payload)
+                else:
+                    params = {
+                        "id": item["registry_id"],
+                        "version": target_version,
+                        "selected_version": target_version,
+                        "mode": "cache",
+                        "channel": "default",
+                        "skip_post_install": False,
+                    }
+                    payload = {"ui_id": item["registry_id"], "client_id": client_id, "kind": "install", "params": params}
+                    request = session.post(f"{self.origin}/v2/manager/queue/task", json=payload)
+                async with request as response:
                     if response.status not in (200, 201):
                         raise RuntimeError(f"Manager 拒绝依赖任务 {item['name']}: {await response.text()}")
                 queued.append(item)
             if queued:
-                async with session.post(f"{self.origin}/v2/manager/queue/start", json={"client_id": client_id}) as response:
-                    if response.status not in (200, 201):
-                        raise RuntimeError(f"Manager 无法启动依赖队列: {await response.text()}")
+                if flavor == "legacy":
+                    async with session.get(f"{self.origin}/manager/queue/start") as response:
+                        if response.status not in (200, 201):
+                            raise RuntimeError(f"Manager 无法启动依赖队列: {await response.text()}")
+                else:
+                    async with session.post(f"{self.origin}/v2/manager/queue/start", json={"client_id": client_id}) as response:
+                        if response.status not in (200, 201):
+                            raise RuntimeError(f"Manager 无法启动依赖队列: {await response.text()}")
         return queued
+
+
+    async def queue_status(self, client_id: str | None = None) -> dict[str, Any]:
+        detected = await self._detect()
+        if detected is None:
+            raise RuntimeError("ComfyUI-Manager 未提供兼容的队列状态接口")
+        flavor, _ = detected
+        url = f"{self.origin}/v2/manager/queue/status" if flavor == "v2" else f"{self.origin}/manager/queue/status"
+        if flavor == "v2" and client_id:
+            url += f"?client_id={client_id}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"Manager 无法提供队列状态: {await response.text()}")
+                data = await response.json()
+        done = int(data.get("done_count") or 0)
+        in_progress = int(data.get("in_progress_count") or 0)
+        if flavor == "v2":
+            # v2 的 total_count 只含等待和执行中的任务，已完成任务在 history 里单独计数。
+            total = done + in_progress + int(data.get("pending_count") or 0)
+        else:
+            total = int(data.get("total_count") or 0)
+        return {"api": flavor, "total": total, "done": done, "in_progress": in_progress, "processing": bool(data.get("is_processing"))}
+
+    async def queue_history(self, client_id: str) -> dict[str, dict[str, Any]]:
+        detected = await self._detect()
+        if detected is None:
+            raise RuntimeError("ComfyUI-Manager 未提供兼容的队列历史接口")
+        if detected[0] != "v2":
+            # legacy 的逐任务结果只通过 WebSocket 广播，REST 不提供。
+            return {}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{self.origin}/v2/manager/queue/history?client_id={client_id}", timeout=5) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"Manager 无法提供队列历史: {await response.text()}")
+                data = await response.json()
+        history = data.get("history") if isinstance(data, dict) else None
+        if not isinstance(history, dict):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for task_id, item in history.items():
+            if not isinstance(item, dict):
+                continue
+            status = item.get("status") if isinstance(item.get("status"), dict) else {}
+            outcome = str(status.get("status_str") or "").casefold()
+            result[str(item.get("ui_id") or task_id)] = {
+                "outcome": "success" if outcome in {"success", "skipped", "skip"} else ("failed" if outcome else "unknown"),
+                "message": str(item.get("result") or ""),
+            }
+        return result
 
 
 def local_manager_status() -> dict[str, Any]:
@@ -288,9 +404,13 @@ def local_manager_status() -> dict[str, Any]:
         try:
             from comfyui_manager.glob import manager_core
         except ImportError:
-            from comfyui_manager.legacy import manager_core
+            try:
+                from comfyui_manager.legacy import manager_core
+            except ImportError:
+                # Manager 3.x 把 glob/ 加进 sys.path，core 以顶层模块形式存在。
+                import manager_core
         version = str(manager_core.version_str)
-        numbers = tuple(int(part) for part in version.lstrip("Vv").split(".")[:3])
-        return {"available": True, "compatible": numbers >= (4, 2, 1), "version": version}
+        numbers = _parse_version_numbers(version)
+        return {"available": True, "compatible": _is_compatible_version(numbers), "version": version}
     except Exception:
         return {"available": False, "compatible": False}

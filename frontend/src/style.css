@@ -3106,6 +3106,114 @@ code {
   color: var(--muted);
 }
 
+.dependency-execution {
+  display: grid;
+  margin-top: 12px;
+  gap: 10px;
+}
+
+.dependency-progress-head {
+  display: grid;
+  color: var(--text-soft);
+  font-size: 13px;
+  gap: 6px;
+}
+
+.dependency-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 8%);
+}
+
+.dependency-progress-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.dependency-tasks {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 8px;
+  list-style: none;
+}
+
+.dependency-tasks li {
+  display: flex;
+  align-items: baseline;
+  color: var(--text-soft);
+  font-size: 13px;
+  gap: 8px;
+}
+
+.dependency-tasks li svg {
+  flex: none;
+  align-self: center;
+}
+
+.dependency-tasks li[data-state="queued"] svg,
+.dependency-tasks li[data-state="unknown"] svg {
+  color: var(--muted);
+}
+
+.dependency-tasks li[data-state="installing"] svg {
+  color: var(--accent);
+}
+
+.dependency-tasks li[data-state="success"] svg,
+.dependency-tasks li[data-state="success"] .dependency-task-state {
+  color: var(--success);
+}
+
+.dependency-tasks li[data-state="failed"] svg,
+.dependency-tasks li[data-state="failed"] .dependency-task-state {
+  color: var(--danger);
+}
+
+.dependency-task-name {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+}
+
+.dependency-task-name small,
+.dependency-task-message {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dependency-task-message {
+  flex-basis: 100%;
+  word-break: break-word;
+}
+
+.dependency-tasks li {
+  flex-wrap: wrap;
+}
+
+.dependency-task-spin {
+  animation: dependency-spin 1s linear infinite;
+}
+
+@keyframes dependency-spin {
+  to { transform: rotate(360deg); }
+}
+
+.dependency-result {
+  display: grid;
+  color: var(--text-soft);
+  font-size: 13px;
+  gap: 4px;
+}
+
+.dependency-result span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 pre {
   max-height: 220px;
   overflow: auto;
