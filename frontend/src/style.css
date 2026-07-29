@@ -3097,7 +3097,8 @@ code {
   box-shadow: none;
 }
 
-.dependency-row span {
+.dependency-row span,
+.confirm-row span {
   display: grid;
   gap: 3px;
 }
@@ -3212,6 +3213,41 @@ code {
 .dependency-result span:last-child {
   color: var(--muted);
   font-size: 12px;
+}
+
+.dep-tone-ok {
+  color: var(--success);
+}
+
+.dep-tone-missing {
+  color: var(--danger);
+}
+
+.dep-tone-warn {
+  color: var(--warning);
+}
+
+.dependency-status {
+  margin-left: 8px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.dependency-status[data-tone="ok"] {
+  color: var(--success);
+}
+
+.dependency-status[data-tone="missing"] {
+  color: var(--danger);
+}
+
+.dependency-status[data-tone="warn"] {
+  color: var(--warning);
+}
+
+.dependency-status[data-tone="muted"] {
+  color: var(--muted);
 }
 
 pre {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import {
   Activity as ActivityIcon,
   AlertCircle,
@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleUserRound,
+  CircleX,
   Clock,
   Compass,
   Copy,
@@ -154,6 +155,7 @@ const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
 const selectedDependencyActions = reactive<Record<string, string[]>>({});
 const dependencyConfirmed = reactive<Record<string, boolean>>({});
 const dependencyExecutions = reactive<Record<string, DependencyExecution>>({});
+const dependencyAlignVersions = reactive<Record<string, boolean>>({});
 const dependencyTimers: Record<string, number> = {};
 let managerSocket: WebSocket | null = null;
 let operationTimer = 0;
@@ -549,17 +551,63 @@ async function revealLocalVersion(item: Product, version: Version) {
   });
 }
 async function planDependencies(item: Product, version: Version) {
-  const key = dependencyKey(item, version);
-  await withBusy("dependency-plan", async () => {
-    const result = await post<{ items: DependencyPlan[] }>("/workflows/dependencies/plan", { dependencies: version.custom_nodes });
-    dependencyPlans[key] = result.items;
-    selectedDependencyActions[key] = result.items
-      .map((entry, index) => ({ entry, id: dependencyActionKey(entry, index) }))
-      .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade")
-      .map(({ id }) => id);
-    dependencyConfirmed[key] = false;
-  });
+  await withBusy("dependency-plan", () => fetchDependencyPlan(item, version));
 }
+function dependencyAlign(key: string) {
+  return dependencyAlignVersions[key] ?? true;
+}
+function toggleDependencyAlign(key: string, value: boolean) {
+  dependencyAlignVersions[key] = value;
+  const plan = dependencyPlans[key] || [];
+  const newerIds = plan.flatMap((entry, index) => (entry.action === "newer" ? [dependencyActionKey(entry, index)] : []));
+  const current = new Set(selectedDependencyActions[key] || []);
+  for (const id of newerIds) {
+    if (value) current.add(id);
+    else current.delete(id);
+  }
+  selectedDependencyActions[key] = [...current];
+}
+async function fetchDependencyPlan(item: Product, version: Version) {
+  const key = dependencyKey(item, version);
+  const result = await post<{ items: DependencyPlan[] }>("/workflows/dependencies/plan", { dependencies: version.custom_nodes });
+  dependencyPlans[key] = result.items;
+  selectedDependencyActions[key] = result.items
+    .map((entry, index) => ({ entry, id: dependencyActionKey(entry, index) }))
+    .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade" || (dependencyAlign(key) && entry.action === "newer"))
+    .map(({ id }) => id);
+  dependencyConfirmed[key] = false;
+}
+async function autoPlanDependencies(item: Product | null, version: Version | null) {
+  if (!item || !version || !version.custom_nodes.length) return;
+  if (!status.value?.manager.available || !status.value?.manager.compatible) return;
+  if (dependencyPlans[dependencyKey(item, version)]) return;
+  try {
+    await fetchDependencyPlan(item, version);
+  } catch {
+    // A failed background pre-check just leaves the list without status badges;
+    // the manual check button still surfaces the error.
+  }
+}
+watch([selected, activeDetailVersion, status], ([item, version]) => {
+  void autoPlanDependencies(item, version);
+});
+function dependencyPlanEntry(node: NodeDependencyInfo): DependencyPlan | null {
+  const item = selected.value;
+  const version = activeDetailVersion.value;
+  if (!item || !version) return null;
+  const plan = dependencyPlans[dependencyKey(item, version)];
+  if (!plan) return null;
+  return plan.find((entry) => (node.registry_id && entry.registry_id === node.registry_id) || entry.name === node.name) || null;
+}
+const dependencyActionLabels: Record<DependencyPlan["action"], MessageKey> = {
+  keep: "depStatusInstalled",
+  newer: "depStatusInstalledNewer",
+  install: "depStatusMissing",
+  upgrade: "depStatusUpgrade",
+  conflict: "depStatusConflict",
+  manual: "depStatusManual",
+  unknown: "depStatusUnknown",
+};
 function toggleDependencyAction(key: string, id: string, checked: boolean) {
   const values = selectedDependencyActions[key] || [];
   selectedDependencyActions[key] = checked ? [...new Set([...values, id])] : values.filter(value => value !== id);
@@ -569,9 +617,12 @@ async function executeDependencyPlan(item: Product, version: Version) {
   if (!dependencyConfirmed[key]) return;
   if (!confirm(t.value("confirmPluginChanges"))) return;
   const selectedIds = new Set(selectedDependencyActions[key] || []);
+  const align = dependencyAlign(key);
   const actions = (dependencyPlans[key] || []).flatMap((entry, index) => {
     if (!selectedIds.has(dependencyActionKey(entry, index))) return [];
-    return [{ ...entry, action: entry.action === "newer" ? "downgrade" : entry.action }];
+    if (entry.action === "newer") return align ? [{ ...entry, action: "downgrade" }] : [];
+    if (!align && (entry.action === "install" || entry.action === "upgrade")) return [{ ...entry, requested: null }];
+    return [{ ...entry }];
   });
   await withBusy("dependency-execute", async () => {
     const clientId = `workflow-hub-${Math.random().toString(36).slice(2, 10)}`;
@@ -659,6 +710,14 @@ async function finalizeDependencyExecution(key: string) {
   execution.done = execution.total;
   execution.finished = true;
   maybeCloseManagerSocket();
+  // Installed states changed, so the cached plan (and its status badges) is stale.
+  if (selected.value && activeDetailVersion.value && key === dependencyKey(selected.value, activeDetailVersion.value)) {
+    try {
+      await fetchDependencyPlan(selected.value, activeDetailVersion.value);
+    } catch {
+      // The badges simply refresh on the next manual check.
+    }
+  }
 }
 function ensureManagerSocket() {
   if (managerSocket && managerSocket.readyState <= WebSocket.OPEN) return;
@@ -1646,8 +1705,19 @@ onBeforeUnmount(() => {
               <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group">
                 <div class="resource-group-heading"><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong></div>
                 <div v-for="node in activeDetailVersion.custom_nodes" :key="node.registry_id || node.name" class="asset-row">
-                  <span><PackageOpen :size="15" /><strong>{{ node.name }}</strong><small>{{ node.registry_id || t("registryNotMatchedComfy") }}</small></span>
-                  <em>{{ node.version || (node.manual ? t("manualInstall") : t("anyVersion")) }}</em>
+                  <template v-for="entry in [dependencyPlanEntry(node)]" :key="`plan-${node.registry_id || node.name}`">
+                    <span>
+                      <CheckCircle2 v-if="entry && (entry.action === 'keep' || entry.action === 'newer')" :size="15" class="dep-tone-ok" />
+                      <CircleX v-else-if="entry && entry.action === 'install'" :size="15" class="dep-tone-missing" />
+                      <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'conflict')" :size="15" class="dep-tone-warn" />
+                      <PackageOpen v-else :size="15" />
+                      <strong>{{ node.name }}</strong><small>{{ node.registry_id || t("registryNotMatchedComfy") }}</small>
+                    </span>
+                    <em>{{ node.version || (node.manual ? t("manualInstall") : t("anyVersion")) }}<b
+                      v-if="entry" class="dependency-status"
+                      :data-tone="entry.action === 'keep' || entry.action === 'newer' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
+                    >{{ t(dependencyActionLabels[entry.action]) }}</b></em>
+                  </template>
                 </div>
               </section>
               <section v-if="activeDetailVersion.inputs?.length" class="resource-group">
@@ -1682,6 +1752,14 @@ onBeforeUnmount(() => {
                 @change="toggleDependencyAction(dependencyKey(selected, activeDetailVersion), dependencyActionKey(entry, index), ($event.target as HTMLInputElement).checked)" />
               <span><strong>{{ entry.name }}</strong><small>{{ entry.installed || "—" }} → {{ entry.requested || "latest" }} · {{ entry.action }}<template v-if="entry.warning"> · {{ entry.warning }}</template></small></span>
             </label>
+            <label class="confirm-row">
+              <input type="checkbox"
+                :checked="dependencyAlign(dependencyKey(selected, activeDetailVersion))"
+                :disabled="!status?.manager.available || !status?.manager.compatible"
+                @change="toggleDependencyAlign(dependencyKey(selected, activeDetailVersion), ($event.target as HTMLInputElement).checked)" />
+              <span>{{ t("alignAuthorVersions") }}<small>{{ t("alignAuthorVersionsHint") }}</small></span>
+            </label>
+            <div v-if="activeCoreMismatch" class="message warning"><TriangleAlert :size="16" /><span>{{ t("coreVersionMismatchDetail", { required: comfyuiCompatibilityLabel(activeDetailVersion), current: status?.comfyui_version || "—" }) }}</span></div>
             <label class="confirm-row"><input v-model="dependencyConfirmed[dependencyKey(selected, activeDetailVersion)]" type="checkbox" />{{ t("confirmEnvironment") }}</label>
             <button class="primary wide"
               :disabled="!dependencyConfirmed[dependencyKey(selected, activeDetailVersion)] || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.length || !status?.manager.available || !status?.manager.compatible || !!busy"
