@@ -1,26 +1,52 @@
 import unittest
 
-from workflow_hub.assets import clear_lora_manager
+from workflow_hub.assets import _image_references
+from workflow_hub.packages import _replace_load_image_references
 
 
 class AssetTests(unittest.TestCase):
-    def test_clear_lora_manager_only_changes_recognized_nodes(self):
+    def test_image_references_include_subgraphs_and_image_widgets(self):
         workflow = {
             "nodes": [
+                {"id": 1, "type": "LoadImage", "widgets_values": ["root.png"]},
                 {
-                    "id": 1,
-                    "type": "Lora Loader (LoraManager)",
-                    "widgets_values": [
-                        {"version": 1, "textWidgetName": "text"},
-                        "<lora:daily/style:0.7> portrait",
-                        [{"name": "daily/style", "strength": 0.7, "active": True}],
-                    ],
+                    "id": 2,
+                    "type": "CustomImageNode",
+                    "inputs": [{"name": "image", "widget": {"name": "image"}}],
+                    "widgets_values": ["sidebar.jpg"],
                 },
-                {"id": 2, "type": "Text", "widgets_values": ["<lora:keep:1>"]},
-            ]
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {"nodes": [{"id": 3, "type": "LoadImageMask", "widgets_values": ["nested.webp", "alpha"]}]}
+                ]
+            },
         }
-        cleaned = clear_lora_manager(workflow)
-        self.assertEqual(cleaned["nodes"][0]["widgets_values"][1], "portrait")
-        self.assertEqual(cleaned["nodes"][0]["widgets_values"][2], [])
-        self.assertEqual(cleaned["nodes"][1]["widgets_values"][0], "<lora:keep:1>")
-        self.assertIn("<lora:daily/style:0.7>", workflow["nodes"][0]["widgets_values"][1])
+        references = _image_references(workflow)
+        self.assertEqual(set(references), {"root.png", "sidebar.jpg", "nested.webp"})
+        self.assertEqual(references["nested.webp"], {"3"})
+
+    def test_package_rewrites_nested_and_image_widget_references(self):
+        workflow = {
+            "nodes": [
+                {"id": 1, "type": "LoadImage", "widgets_values": ["root.png"]},
+                {
+                    "id": 2,
+                    "type": "CustomImageNode",
+                    "inputs": [{"name": "image", "widget": {"name": "image"}}],
+                    "widgets_values": ["sidebar.jpg"],
+                },
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {"nodes": [{"id": 3, "type": "LoadImageMask", "widgets_values": ["nested.webp", "alpha"]}]}
+                ]
+            },
+        }
+        _replace_load_image_references(
+            workflow,
+            {"root.png": "inputs/root.png", "sidebar.jpg": "inputs/sidebar.jpg", "nested.webp": "inputs/nested.webp"},
+        )
+        self.assertEqual(workflow["nodes"][0]["widgets_values"][0], "inputs/root.png")
+        self.assertEqual(workflow["nodes"][1]["widgets_values"][0], "inputs/sidebar.jpg")
+        self.assertEqual(workflow["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0], "inputs/nested.webp")

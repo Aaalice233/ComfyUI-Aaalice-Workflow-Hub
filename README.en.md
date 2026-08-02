@@ -17,14 +17,14 @@ A public workflow subscription, publishing, and version-management extension for
 - Subscribe to public GitHub repositories containing `workflow-catalog.json`, then search, filter, and browse version history and release notes in one aggregated catalog.
 - Every workflow version lives on the default branch under a readable category/name/version path, so repository visitors can browse, back up, or download source files without searching through Releases.
 - Download and verify Release ZIPs by version. Each local version is stored as a separate workflow file, and its folder can be opened directly from the detail page.
-- The detail page lists each version's plugin dependencies, bundled images, and optional LoRAs. LoRAs are downloaded one at a time and only on explicit request — never automatically.
+- The detail page retains each published version's plugin dependencies, bundled images, and LoRA list. Historical LoRAs are downloaded one at a time and only on explicit request — never automatically.
 - Publishing records the ComfyUI core version used to build the package; a mismatch shows a compatibility warning on the download page without blocking the download.
 - Plugin dependencies produce a read-only plan that is handed to ComfyUI-Manager in sequence after explicit confirmation, with a progress bar and per-plugin install results. Downloads still work when Manager is unavailable.
 
 ### Publish and manage
 
-- Capture the current ComfyUI canvas and publish through three stages: review resources, enter details, confirm publish.
-- Automatically detects ComfyUI-Manager plugin dependencies, `Load Image` bundled assets, and Lora Manager references — raw node types are never passed off as plugins.
+- Capture the current ComfyUI canvas and publish through three stages: review resources, enter details, confirm publish; automatically parse a trailing `-v{version}` or `_v{version}` in the filename, fill the name and version, and keep downloaded versions as separate versioned files.
+- Lists every ComfyUI-Manager plugin installed for the current user during publishing, so the author can deselect unrelated plugins; it also handles bundled images from canvas nodes, subgraphs, and sidebar image controls. Detected LoRA references only show a warning and do not block publishing; LoRAs are not bundled or downloaded automatically.
 - An optional cover image (up to 10 MiB) serves as both the workflow cover and that version's preview.
 - The Manage tab is for authors with write access: edit metadata, archive, edit version changelogs, and delete versions or entire workflows. The subscription side only offers downloading and viewing.
 - Sign in through GitHub App Device Flow. Credentials are stored in the system keyring when available and otherwise remain only in the current process.

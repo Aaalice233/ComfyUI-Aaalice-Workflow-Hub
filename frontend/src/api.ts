@@ -1,7 +1,14 @@
 const BASE = "/workflow-hub/api/v1";
 
+type ApiErrorParams = Record<string, string | number>;
+
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly params?: ApiErrorParams,
+  ) {
     super(message);
   }
 }
@@ -14,7 +21,14 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const body = isWrite && options.body === undefined ? "{}" : options.body;
   const response = await fetch(`${BASE}${path}`, { ...options, body, headers, credentials: "same-origin" });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError(data.error || `${response.status} ${response.statusText}`, response.status);
+  if (!response.ok) {
+    throw new ApiError(
+      data.error || data.error_code || `${response.status} ${response.statusText}`,
+      response.status,
+      data.error_code,
+      data.error_params,
+    );
+  }
   return data as T;
 }
 

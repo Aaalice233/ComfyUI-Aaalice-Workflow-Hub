@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from workflow_hub import manager as manager_module
-from workflow_hub.manager import ManagerAdapter, local_manager_status, resolve_workflow_dependencies
+from workflow_hub.manager import ManagerAdapter, local_manager_status
 
 
 class FakeResponse:
@@ -55,102 +55,29 @@ def fake_session_factory(responses, record):
     return lambda *args, **kwargs: FakeSession(responses, record)
 
 
-class ManagerDependencyResolutionTests(unittest.TestCase):
-    def test_object_info_maps_node_type_to_installed_manager_plugin(self):
-        dependencies, mode, unresolved = resolve_workflow_dependencies(
-            {"Text (LoraManager)"},
-            {},
-            {"Text (LoraManager)": {"python_module": "custom_nodes.comfyui-lora-manager"}},
-            {
-                "comfyui-lora-manager": {
-                    "key": "comfyui-lora-manager",
-                    "registry_id": "comfyui-lora-manager",
-                    "aux_id": "AIGODLIKE/ComfyUI-Lora-Manager",
-                    "name": "comfyui-lora-manager",
-                    "version": "1.1.6",
-                    "enabled": True,
-                }
+class ManagerInstalledDependencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_installed_dependencies_returns_all_plugins_in_name_order(self):
+        adapter = ManagerAdapter("http://127.0.0.1:8188")
+        with patch.object(adapter, "installed", AsyncMock(return_value={
+            "pack-b": {
+                "key": "pack-b",
+                "registry_id": "pack-b",
+                "name": "Pack B",
+                "version": "2.0.0",
+                "enabled": False,
             },
-        )
-
-        self.assertEqual(mode, "workflow")
-        self.assertEqual(unresolved, [])
-        self.assertEqual(dependencies[0]["registry_id"], "comfyui-lora-manager")
-        self.assertEqual(dependencies[0]["version"], "1.1.6")
-
-    def test_unresolved_node_falls_back_to_enabled_manager_plugins(self):
-        dependencies, mode, unresolved = resolve_workflow_dependencies(
-            {"lth_extended_prompting_nodes"},
-            {},
-            {},
-            {
-                "pack-a": {
-                    "key": "pack-a",
-                    "registry_id": "pack-a",
-                    "name": "Pack A",
-                    "version": "1.0.0",
-                    "enabled": True,
-                },
-                "pack-b": {
-                    "key": "pack-b",
-                    "registry_id": "pack-b",
-                    "name": "Pack B",
-                    "version": "2.0.0",
-                    "enabled": False,
-                },
+            "pack-a": {
+                "key": "pack-a",
+                "registry_id": "pack-a",
+                "name": "Pack A",
+                "version": "1.0.0",
+                "enabled": True,
             },
-        )
+        })):
+            dependencies = await adapter.installed_dependencies()
 
-        self.assertEqual(mode, "installed_fallback")
-        self.assertEqual(unresolved, ["lth_extended_prompting_nodes"])
-        self.assertEqual([item["name"] for item in dependencies], ["Pack A"])
-        self.assertNotIn("lth_extended_prompting_nodes", [item["name"] for item in dependencies])
-
-    def test_git_clone_with_registry_id_uses_manager_installable_dependency(self):
-        dependencies, mode, unresolved = resolve_workflow_dependencies(
-            {"DevNode"},
-            {"comfyui-dev-pack": [["DevNode"], {}]},
-            {},
-            {
-                "comfyui-dev-pack": {
-                    "key": "comfyui-dev-pack",
-                    "registry_id": "comfyui-dev-pack",
-                    "aux_id": "owner/ComfyUI-Dev-Pack",
-                    "name": "ComfyUI-Dev-Pack",
-                    "version": "abcdef1234567890",
-                    "enabled": True,
-                }
-            },
-        )
-
-        self.assertEqual((mode, unresolved), ("workflow", []))
-        self.assertEqual(dependencies[0]["registry_id"], "comfyui-dev-pack")
-        self.assertIsNone(dependencies[0]["version"])
-        self.assertFalse(dependencies[0]["manual"])
-        self.assertTrue(dependencies[0]["development"])
-        self.assertEqual(dependencies[0]["installed_version"], "abcdef1234567890")
-
-    def test_git_clone_without_registry_id_stays_manual_github_dependency(self):
-        dependencies, mode, unresolved = resolve_workflow_dependencies(
-            {"DevNode"},
-            {"owner/ComfyUI-Dev-Pack": [["DevNode"], {}]},
-            {},
-            {
-                "github:owner/ComfyUI-Dev-Pack": {
-                    "key": "github:owner/ComfyUI-Dev-Pack",
-                    "registry_id": None,
-                    "aux_id": "owner/ComfyUI-Dev-Pack",
-                    "name": "ComfyUI-Dev-Pack",
-                    "version": "abcdef1234567890",
-                    "enabled": True,
-                }
-            },
-        )
-
-        self.assertEqual((mode, unresolved), ("workflow", []))
-        self.assertIsNone(dependencies[0]["registry_id"])
-        self.assertTrue(dependencies[0]["manual"])
-        self.assertEqual(dependencies[0]["source_url"], "https://github.com/owner/ComfyUI-Dev-Pack")
+        self.assertEqual([item["name"] for item in dependencies], ["Pack A", "Pack B"])
+        self.assertFalse(dependencies[1]["manual"])
 
 
 class ManagerVersionGateTests(unittest.TestCase):
@@ -233,6 +160,24 @@ class ManagerLegacyApiTests(unittest.IsolatedAsyncioTestCase):
         git_pack = installed["github:rgthree/rgthree-comfy"]
         self.assertIsNone(git_pack["registry_id"])
         self.assertEqual(git_pack["version"], "abcdef1")
+
+    async def test_installed_dependencies_does_not_query_workflow_mappings(self):
+        origin = "http://127.0.0.1:8189"
+        record = []
+        responses = {
+            ("GET", f"{origin}/v2/manager/version"): FakeResponse(404),
+            ("GET", f"{origin}/manager/version"): FakeResponse(200, "V3.39"),
+            ("GET", f"{origin}/customnode/installed"): FakeResponse(200, payload={
+                "Pack A": {"ver": "1.0.0", "cnr_id": "pack-a", "enabled": True},
+                "Pack B": {"ver": "2.0.0", "cnr_id": "pack-b", "enabled": False},
+            }),
+        }
+        adapter = ManagerAdapter(origin)
+        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
+            dependencies = await adapter.installed_dependencies()
+
+        self.assertEqual([item["name"] for item in dependencies], ["Pack A", "Pack B"])
+        self.assertFalse(any("getmappings" in url or url.endswith("/object_info") for _, url, _ in record))
 
     async def test_execute_queues_legacy_installs_then_starts_queue(self):
         origin = "http://127.0.0.1:8190"

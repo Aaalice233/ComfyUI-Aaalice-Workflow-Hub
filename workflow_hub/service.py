@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -29,12 +30,33 @@ from .catalog import (
     product_repository_path,
     version_repository_path,
 )
+from .errors import UserFacingError
 from .github import BranchState, GitHubClient, GitHubError, GitTreeFile
 from .operations import Operation
 from .packages import build_package_files, install_workflow, read_package_files, write_package
 from .repository import build_projection_files, build_repository_files, json_bytes, render_workflows_readme
 from .security import ensure_within, parse_public_repository, require_github_https, safe_filename
 from .storage import UserStorage
+
+_WORKFLOW_FILENAME_RE = re.compile(
+    r"^(.*?)(?P<separator>[-_])v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))?)\.json$",
+    re.IGNORECASE,
+)
+
+
+def _workflow_filename_separator(filename: str | None, version: str) -> str:
+    if not filename:
+        return "-"
+    basename = re.split(r"[\\/]", str(filename))[-1]
+    match = _WORKFLOW_FILENAME_RE.fullmatch(basename)
+    if not match:
+        return "-"
+    try:
+        if normalize_version(match.group("version")) != normalize_version(version):
+            return "-"
+    except ValueError:
+        return "-"
+    return match.group("separator")
 
 
 def _folder_paths() -> Any:
@@ -250,20 +272,20 @@ async def download_version(
 
 async def download_optional_lora(model: ModelDependency, operation: Operation) -> dict[str, Any]:
     if model.type != "loras":
-        raise ValueError("仅支持下载 LoRA 类型的可选资源")
+        raise UserFacingError("lora.invalid_type")
     require_github_https(str(model.source_url))
     roots = _folder_paths().get_folder_paths("loras")
     if not roots:
-        raise ValueError("ComfyUI 未配置 LoRA 目录")
+        raise UserFacingError("lora.directory_unavailable")
     root = Path(roots[0]).resolve()
     target = ensure_within(root, root / model.filename.replace("\\", "/"))
     if target.suffix.lower() not in {".safetensors", ".ckpt", ".pt", ".bin"}:
-        raise ValueError("LoRA 文件扩展名不受支持")
+        raise UserFacingError("lora.unsupported_extension")
     directory = target.parent
     directory.mkdir(parents=True, exist_ok=True)
     if target.exists():
         if model.sha256 and hashlib.sha256(target.read_bytes()).hexdigest() != model.sha256:
-            raise ValueError("同名 LoRA 内容不一致，已拒绝覆盖")
+            raise UserFacingError("lora.existing_content_mismatch")
         operation.stage = "complete"
         operation.status = "success"
         operation.result = {"path": str(target), "already_exists": True}
@@ -276,7 +298,7 @@ async def download_optional_lora(model: ModelDependency, operation: Operation) -
         await GitHubClient().download(str(model.source_url), temp_path, operation)
         operation.stage = "verifying"
         if model.sha256 and hashlib.sha256(temp_path.read_bytes()).hexdigest() != model.sha256:
-            raise ValueError("LoRA SHA-256 不一致")
+            raise UserFacingError("lora.checksum_mismatch")
         os.replace(temp_path, target)
         operation.stage = "complete"
         operation.status = "success"
@@ -423,19 +445,21 @@ async def publish(
     workflow: dict[str, Any],
     operation: Operation,
     preview_data: dict[str, str] | None = None,
-    selected_loras: list[str] | None = None,
+    workflow_filename: str | None = None,
 ) -> dict[str, Any]:
     client = GitHubClient(token)
     product = WorkflowProduct.model_validate(prepare_publish_product(product_data))
     if len(product.versions) != 1:
         raise ValueError("每次发布必须且只能包含一个版本")
     version = product.versions[0]
+    if any(model.type == "loras" for model in version.models):
+        raise UserFacingError("publisher.lora_forbidden")
     operation.stage = "validating"
     state = await client.get_branch_state(owner, repo)
     catalog = await _catalog_at_state(client, owner, repo, state, repository)
     merge_product(catalog, product)
 
-    images, detected_loras = scan_workflow_assets(workflow)
+    images, _ = scan_workflow_assets(workflow)
     unavailable_images = [item for item in images if item.status != "ready"]
     if unavailable_images:
         details = ", ".join(f"{item.name} ({item.status})" for item in unavailable_images)
@@ -445,33 +469,7 @@ async def publish(
         BundledInput.model_validate({key: value for key, value in item.items() if key != "path"})
         for item in bundled_inputs
     ]
-    selected_names = set(selected_loras or [])
-    lora_by_name = {item.name: item for item in detected_loras}
-    unknown_loras = selected_names - set(lora_by_name)
-    if unknown_loras:
-        raise ValueError(f"所选 LoRA 不在当前工作流中: {', '.join(sorted(unknown_loras))}")
-    selected_assets = [lora_by_name[name] for name in selected_names]
-    unavailable_loras = [item for item in selected_assets if item.status != "ready" or not item.path]
-    if unavailable_loras:
-        details = ", ".join(f"{item.name} ({item.status})" for item in unavailable_loras)
-        raise ValueError(f"所选 LoRA 无法发布: {details}")
-
     tag = f"{product.id}-v{version.version}"
-    for lora in selected_assets:
-        assert lora.sha256 is not None
-        key = ("loras", lora.filename)
-        version.models = [item for item in version.models if (item.type, item.filename) != key]
-        asset_name = safe_filename(f"{tag}-lora-{lora.sha256[:12]}-{Path(lora.filename).name}").replace(" ", "_")
-        version.models.append(
-            ModelDependency(
-                name=lora.name,
-                type="loras",
-                filename=lora.filename,
-                source_url=f"https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}",
-                sha256=lora.sha256,
-            )
-        )
-
     package_name = safe_filename(f"{product.name}-v{version.version}.zip").replace(" ", "_")
     draft_name = safe_filename(f"{tag}-{package_name}").replace(" ", "_")
     package_path = storage.drafts_dir / draft_name
@@ -481,6 +479,7 @@ async def publish(
         "workflow_id": product.id,
         "name": product.name,
         "version": version.version,
+        "filename_separator": _workflow_filename_separator(workflow_filename, version.version),
         "custom_nodes": [item.model_dump(mode="json") for item in version.custom_nodes],
         "models": [item.model_dump(mode="json") for item in version.models],
         "inputs": [{key: value for key, value in item.items() if key != "path"} for item in bundled_inputs],
@@ -514,16 +513,6 @@ async def publish(
     version.package.size = int(asset.get("size") or built["size"])
     digest = str(asset.get("digest") or "")
     version.package.sha256 = digest.removeprefix("sha256:") if digest.startswith("sha256:") else built["sha256"]
-    for lora in selected_assets:
-        assert lora.path is not None and lora.sha256 is not None
-        asset_name = safe_filename(f"{tag}-lora-{lora.sha256[:12]}-{Path(lora.filename).name}").replace(" ", "_")
-        if not next((item for item in release.get("assets", []) if item["name"] == asset_name), None):
-            await client.upload_asset(
-                release["upload_url"],
-                asset_name,
-                lora.path.read_bytes(),
-                "application/octet-stream",
-            )
     if preview_path and preview_bytes:
         if not next((item for item in release.get("assets", []) if item["name"] == preview_path.name), None):
             await client.upload_asset(

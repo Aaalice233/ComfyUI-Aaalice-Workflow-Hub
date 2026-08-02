@@ -9,9 +9,10 @@ from urllib.parse import urlparse
 from aiohttp import web
 from pydantic import ValidationError
 
-from .assets import clear_lora_manager, scan_workflow_assets
+from .assets import scan_workflow_assets
 from .catalog import Catalog, WorkflowProduct, prepare_publish_product
 from .compatibility import current_comfyui_version, stamp_product_comfyui_version
+from .errors import UserFacingError
 from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refresh_access_token, start_device_flow, tokens
 from .manager import ManagerAdapter, local_manager_status
 from .operations import Operation, operations
@@ -68,6 +69,8 @@ async def _json(request: web.Request) -> dict[str, Any]:
 
 
 def _response_error(exc: Exception) -> web.Response:
+    if isinstance(exc, UserFacingError):
+        return web.json_response({"error_code": exc.code, "error_params": exc.params}, status=400)
     if isinstance(exc, ValidationError):
         return web.json_response({"error": "数据校验失败", "details": exc.errors(include_url=False)}, status=400)
     if isinstance(exc, GitHubError):
@@ -107,6 +110,11 @@ async def _guarded_github_call(storage: UserStorage, action: Awaitable[T]) -> T:
 async def _run(operation: Operation, action: Awaitable[dict[str, Any]]) -> None:
     try:
         await action
+    except UserFacingError as exc:
+        operation.status = "failed"
+        operation.stage = "failed"
+        operation.error_code = exc.code
+        operation.error_params = exc.params
     except Exception as exc:
         operation.status = "failed"
         operation.stage = "failed"
@@ -275,7 +283,7 @@ def register_routes() -> None:
     async def workflow_model_download(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         if data.get("confirmed") is not True:
-            raise ValueError("必须由用户明确选择后才能下载 LoRA")
+            raise UserFacingError("lora.download_confirmation_required")
         storage = UserStorage.from_request(request)
         cache = storage.cache_dir / f"{data['owner']}-{data['repo']}.json"
         catalog = Catalog.model_validate_json(cache.read_bytes())
@@ -492,27 +500,23 @@ def register_routes() -> None:
     @endpoint
     async def publisher_validate(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
-        WorkflowProduct.model_validate(prepare_publish_product(stamp_product_comfyui_version(data["product"])))
+        product = WorkflowProduct.model_validate(prepare_publish_product(stamp_product_comfyui_version(data["product"])))
+        if any(model.type == "loras" for version in product.versions for model in version.models):
+            raise UserFacingError("publisher.lora_forbidden")
         if not isinstance(data.get("workflow"), dict):
             raise ValueError("工作流 JSON 必须是对象")
-        images, loras = scan_workflow_assets(data["workflow"])
+        images, _ = scan_workflow_assets(data["workflow"])
         failed_images = [item for item in images if item.status != "ready"]
         if failed_images:
             raise ValueError("工作流引用的加载图像存在缺失、超限或不支持的文件")
-        selected = set(data.get("selected_loras", []))
-        detected = {item.name: item for item in loras}
-        if selected - set(detected) or any(detected[name].status != "ready" for name in selected):
-            raise ValueError("所选 LoRA 存在缺失、歧义、超限或不支持的文件")
         return web.json_response({"valid": True})
 
     @routes.post(f"{BASE}/publisher/scan-dependencies")
     @endpoint
     async def publisher_scan_dependencies(request: web.Request) -> web.StreamResponse:
-        data = await _json(request)
-        if not isinstance(data.get("workflow"), dict):
-            raise ValueError("工作流 JSON 必须是对象")
-        result = await ManagerAdapter(_origin(request)).scan(data["workflow"])
-        return web.json_response(result)
+        await _json(request)
+        items = await ManagerAdapter(_origin(request)).installed_dependencies()
+        return web.json_response({"items": items})
 
     @routes.post(f"{BASE}/publisher/scan-assets")
     @endpoint
@@ -524,16 +528,6 @@ def register_routes() -> None:
         return web.json_response(
             {"images": [item.public() for item in images], "loras": [item.public() for item in loras]}
         )
-
-    @routes.post(f"{BASE}/publisher/clear-loras")
-    @endpoint
-    async def publisher_clear_loras(request: web.Request) -> web.StreamResponse:
-        data = await _json(request)
-        if not isinstance(data.get("workflow"), dict):
-            raise ValueError("工作流 JSON 必须是对象")
-        cleaned = clear_lora_manager(data["workflow"])
-        _, remaining = scan_workflow_assets(cleaned)
-        return web.json_response({"workflow": cleaned, "loras": [item.public() for item in remaining]})
 
     @routes.get(f"{BASE}/publisher/pending")
     @endpoint
@@ -595,7 +589,7 @@ def register_routes() -> None:
                         data["workflow"],
                         operation,
                         data.get("cover", data.get("preview")),
-                        data.get("selected_loras", []),
+                        data.get("workflow_filename"),
                     ),
                 ),
             )

@@ -22,6 +22,19 @@ class PackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "拒绝覆盖"):
                 install_workflow(package, root / "workflows", "owner", "repo", "demo", "Demo", "1.0", result["sha256"])
 
+    def test_install_preserves_filename_separator_from_manifest(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            package = root / "demo-v1.0.zip"
+            result = build_package(
+                package,
+                {"schema_version": 1, "filename_separator": "_"},
+                {"nodes": []},
+                "# 1.0",
+            )
+            target, _ = install_workflow(package, root / "workflows", "owner", "repo", "demo", "Demo", "1.0", result["sha256"])
+            self.assertEqual(target.name, "Demo_v1.0.json")
+
     def test_zip_slip_extra_files_and_symlink_are_rejected(self):
         cases = [("../workflow.json", 0), ("script.py", 0), ("workflow.json", (stat.S_IFLNK | 0o777) << 16)]
         for bad_name, external_attr in cases:

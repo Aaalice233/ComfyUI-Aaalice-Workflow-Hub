@@ -28,6 +28,7 @@ def require_github_https(url: str) -> str:
 
 
 def parse_public_repository(value: str) -> tuple[str, str]:
+    value = value.strip()
     parsed = urlparse(value if "://" in value else f"https://github.com/{value}")
     if parsed.scheme != "https" or parsed.hostname != "github.com":
         raise ValueError("请输入公开 GitHub 仓库地址")

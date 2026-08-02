@@ -38,10 +38,6 @@ class DependencyAction:
     warning: str | None = None
 
 
-def _normalized_identifier(value: str | None) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", str(value or "").casefold()).strip("-")
-
-
 def _is_git_revision(value: str | None) -> bool:
     return bool(re.fullmatch(r"[a-f0-9]{7,40}", str(value or "").casefold()))
 
@@ -68,75 +64,6 @@ def _public_dependency(item: dict[str, Any]) -> dict[str, Any]:
         "development": development,
         "install_source": "registry" if registry_id else ("github" if aux_id else "manual"),
     }
-
-
-def resolve_workflow_dependencies(
-    node_types: set[str],
-    mappings: dict[str, Any],
-    object_info: dict[str, Any],
-    installed: dict[str, dict[str, Any]],
-) -> tuple[list[dict[str, Any]], str, list[str]]:
-    installed_items = list(installed.values())
-
-    def find_installed(identifier: str | None) -> dict[str, Any] | None:
-        normalized = _normalized_identifier(identifier)
-        for item in installed_items:
-            candidates = {
-                _normalized_identifier(item.get("registry_id")),
-                _normalized_identifier(item.get("aux_id")),
-                _normalized_identifier(item.get("name")),
-                _normalized_identifier(str(item.get("aux_id") or "").split("/")[-1]),
-            }
-            if normalized and normalized in candidates:
-                return item
-        return None
-
-    dependencies: list[dict[str, Any]] = []
-    matched_install_keys: set[str] = set()
-    remaining = set(node_types)
-
-    def append_installed(item: dict[str, Any]) -> None:
-        key = str(item.get("key") or item.get("registry_id") or item.get("aux_id") or item["name"])
-        if key in matched_install_keys:
-            return
-        matched_install_keys.add(key)
-        dependencies.append(_public_dependency(item))
-
-    for mapping_id, value in mappings.items():
-        if not isinstance(value, list) or not value or not isinstance(value[0], list):
-            continue
-        matched = sorted(remaining.intersection(str(node) for node in value[0]))
-        if not matched:
-            continue
-        local = find_installed(str(mapping_id))
-        if local is None and len(value) > 1 and isinstance(value[1], dict):
-            local = find_installed(str(value[1].get("title_aux") or ""))
-        if local is None:
-            continue
-        remaining.difference_update(matched)
-        append_installed(local)
-
-    unresolved: list[str] = []
-    for node_type in sorted(remaining):
-        info = object_info.get(node_type)
-        if not isinstance(info, dict):
-            unresolved.append(node_type)
-            continue
-        module = str(info.get("python_module") or "")
-        if module and not module.startswith("custom_nodes."):
-            continue
-        local = find_installed(module.split(".", 1)[-1] if module else None)
-        if local is None:
-            unresolved.append(node_type)
-            continue
-        append_installed(local)
-
-    if unresolved:
-        fallback = [_public_dependency(item) for item in installed_items if item.get("enabled", True)]
-        fallback.sort(key=lambda item: str(item["name"]).casefold())
-        return fallback, "installed_fallback", unresolved
-    dependencies.sort(key=lambda item: str(item["name"]).casefold())
-    return dependencies, "workflow", []
 
 
 class ManagerAdapter:
@@ -205,56 +132,18 @@ class ManagerAdapter:
                 "key": str(item.get("id")),
                 "registry_id": item.get("cnr_id") or item.get("id"),
                 "aux_id": item.get("aux_id"),
+                "name": str(item.get("name") or item.get("title") or item.get("id")),
+                "version": item.get("version") or item.get("ver"),
             }
             for item in data
             if isinstance(item, dict) and item.get("id")
         }
 
-    async def scan(self, workflow: dict[str, Any]) -> dict[str, Any]:
-        node_types: set[str] = set()
-
-        def walk(value: Any) -> None:
-            if isinstance(value, dict):
-                nodes = value.get("nodes")
-                if isinstance(nodes, list):
-                    for node in nodes:
-                        if isinstance(node, dict) and isinstance(node.get("type"), str):
-                            node_types.add(node["type"])
-                for child in value.values():
-                    walk(child)
-            elif isinstance(value, list):
-                for child in value:
-                    walk(child)
-
-        walk(workflow)
+    async def installed_dependencies(self) -> list[dict[str, Any]]:
         installed = await self.installed()
-        detected = await self._detect()
-        mappings_url = (
-            f"{self.origin}/v2/customnode/getmappings?mode=local"
-            if detected and detected[0] == "v2"
-            else f"{self.origin}/customnode/getmappings?mode=local"
-        )
-        mappings: dict[str, Any] = {}
-        object_info: dict[str, Any] = {}
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(mappings_url, timeout=10) as response:
-                    data = await response.json() if response.status == 200 else {}
-                    if isinstance(data, dict):
-                        mappings = data
-            except (aiohttp.ClientError, TimeoutError, ValueError):
-                # The installed-list fallback remains useful when Manager cannot expose mappings.
-                pass
-            try:
-                async with session.get(f"{self.origin}/object_info", timeout=10) as response:
-                    data = await response.json() if response.status == 200 else {}
-                    if isinstance(data, dict):
-                        object_info = data
-            except (aiohttp.ClientError, TimeoutError, ValueError):
-                # Missing object metadata is represented by unresolved nodes below.
-                pass
-        dependencies, mode, unresolved = resolve_workflow_dependencies(node_types, mappings, object_info, installed)
-        return {"items": dependencies, "mode": mode, "unresolved_nodes": unresolved}
+        dependencies = [_public_dependency(item) for item in installed.values()]
+        dependencies.sort(key=lambda item: str(item["name"]).casefold())
+        return dependencies
 
     async def plan(self, dependencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:

@@ -80,6 +80,7 @@ type Status = {
 };
 type Operation = {
   id: string; kind: string; stage: string; status: string; logs: string[];
+  error_code?: string; error_params?: Record<string, string | number>;
   progress?: { received: number; total: number }; result?: Record<string, unknown>;
 };
 type DependencyPlan = {
@@ -136,17 +137,14 @@ const workflow = ref<Record<string, unknown> | null>(null);
 const workflowSourceName = ref("");
 const canvasWorkflowError = ref("");
 const dependencyScanError = ref("");
-const dependencyScanMode = ref<"workflow" | "installed_fallback">("workflow");
 const scannedPluginDependencies = ref<ScannedNodeDependency[]>([]);
 const selectedPluginKeys = ref<string[]>([]);
-const unresolvedPluginNodes = ref<string[]>([]);
 const resourceScanPending = ref(true);
 const publishCatalogProducts = ref<PublishCatalogProduct[]>([]);
 const repositoryCategories = ref<string[]>([]);
 const selectedCatalogProductId = ref("");
 const imageReferences = ref<AssetReference[]>([]);
 const loraReferences = ref<AssetReference[]>([]);
-const selectedLoras = ref<string[]>([]);
 const coverImage = ref<{ name: string; filename: string; data_base64: string; previewUrl: string; size: number } | null>(null);
 const publishStep = ref<1 | 2 | 3>(1);
 const device = ref<{ user_code: string; verification_uri: string; interval: number } | null>(null);
@@ -174,6 +172,14 @@ const operationStageMessages: Record<string, MessageKey> = {
   complete: "stageComplete",
   failed: "stageFailed",
 };
+const backendErrorMessages: Record<string, MessageKey> = {
+  "lora.download_confirmation_required": "loraDownloadConfirmationRequired",
+  "lora.invalid_type": "loraInvalidType",
+  "lora.directory_unavailable": "loraDirectoryUnavailable",
+  "lora.unsupported_extension": "loraUnsupportedExtension",
+  "lora.existing_content_mismatch": "loraExistingContentMismatch",
+  "lora.checksum_mismatch": "loraChecksumMismatch",
+};
 
 const form = reactive({
   repository_url: "",
@@ -189,7 +195,6 @@ const form = reactive({
   version: "1.0",
   changelog: "",
   custom_nodes: "[]",
-  models: [] as ModelAsset[],
 });
 
 const visibleProducts = computed(() => {
@@ -269,10 +274,6 @@ const customNodeDependencies = computed<NodeDependencyInfo[]>(() => {
   }
 });
 const customNodeCount = computed(() => customNodeDependencies.value.length);
-const pluginDetectionHintKey = computed(() => {
-  if (dependencyScanMode.value === "installed_fallback") return "managerPluginFallbackHint";
-  return "pluginDetectionHint";
-});
 function pluginKey(item: NodeDependencyInfo) {
   return item.registry_id || item.source_url || item.name;
 }
@@ -318,6 +319,12 @@ function pluginSourceLabel(item: ScannedNodeDependency) {
 function normalizeVersion(value: string): number[] {
   const parts = value.split(".").map(Number);
   return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+function parseWorkflowFilename(filename: string) {
+  const stem = filename.replace(/\.json$/i, "");
+  const match = stem.match(/^(.*?)[-_]v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))?)$/i);
+  if (!match || !match[1].trim()) return { name: stem, version: null };
+  return { name: match[1], version: match[2] };
 }
 function compareVersions(a: Version, b: Version) {
   const left = normalizeVersion(a.version), right = normalizeVersion(b.version);
@@ -381,6 +388,19 @@ function humanBytes(value: number) {
 }
 function operationStageLabel(stage: string) {
   return t.value(operationStageMessages[stage] || "stageUnknown", { stage });
+}
+function errorMessage(reason: unknown) {
+  if (reason instanceof ApiError && reason.code) {
+    const key = backendErrorMessages[reason.code];
+    if (key) return t.value(key, reason.params);
+  }
+  return reason instanceof Error ? reason.message : String(reason);
+}
+function operationErrorMessage(item: Operation) {
+  if (item.error_code) {
+    return t.value(backendErrorMessages[item.error_code] || "operationFailed", item.error_params);
+  }
+  return item.logs.join("\n");
 }
 function moveToPublishStep(step: 1 | 2 | 3) {
   if (step === 1 || (step === 2 && canConfirmPublishResources.value) || (step === 3 && canFinalizePublish.value)) {
@@ -477,10 +497,12 @@ async function load() {
 async function withBusy(name: string, action: () => Promise<void>) {
   busy.value = name;
   clearMessages();
-  try { await action(); } catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  try { await action(); } catch (reason) { error.value = errorMessage(reason); }
   finally { busy.value = ""; }
 }
 async function addSource() {
+  sourceUrl.value = sourceUrl.value.trim();
+  if (!sourceUrl.value) return;
   await withBusy("add-source", async () => {
     await post("/subscriptions", { url: sourceUrl.value });
     sourceUrl.value = "";
@@ -788,35 +810,33 @@ async function handleHubMessage(event: MessageEvent) {
   loraReferences.value = [];
   scannedPluginDependencies.value = [];
   selectedPluginKeys.value = [];
-  unresolvedPluginNodes.value = [];
-  dependencyScanMode.value = "workflow";
+  const filename = String(event.data?.filename || t.value("untitledWorkflowFile"));
+  const sourceChanged = !workflow.value || workflowSourceName.value !== filename;
   workflow.value = current as Record<string, unknown>;
-  workflowSourceName.value = String(event.data?.filename || t.value("untitledWorkflowFile"));
-  if (!form.name) form.name = workflowSourceName.value.replace(/\.json$/i, "");
+  workflowSourceName.value = filename;
+  if (sourceChanged) {
+    const parsed = parseWorkflowFilename(filename);
+    form.name = parsed.name;
+    form.version = parsed.version || "1.0";
+    form.id = "";
+  }
   try {
     await scanWorkflowAssets();
   } catch (reason) {
-    canvasWorkflowError.value = reason instanceof Error ? reason.message : String(reason);
+    canvasWorkflowError.value = errorMessage(reason);
   }
   try {
     await scanDependencies();
     dependencyScanError.value = "";
   } catch (reason) {
-    dependencyScanError.value = reason instanceof Error ? reason.message : String(reason);
+    dependencyScanError.value = errorMessage(reason);
   } finally {
     resourceScanPending.value = false;
   }
 }
 async function scanDependencies() {
-  if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
-  const result = await post<{
-    items: ScannedNodeDependency[];
-    mode: "workflow" | "installed_fallback";
-    unresolved_nodes: string[];
-  }>("/publisher/scan-dependencies", { workflow: workflow.value });
+  const result = await post<{ items: ScannedNodeDependency[] }>("/publisher/scan-dependencies", {});
   scannedPluginDependencies.value = result.items;
-  dependencyScanMode.value = result.mode;
-  unresolvedPluginNodes.value = result.unresolved_nodes;
   selectedPluginKeys.value = result.items.map(pluginKey);
   syncSelectedPlugins();
 }
@@ -827,27 +847,6 @@ async function scanWorkflowAssets() {
   });
   imageReferences.value = result.images;
   loraReferences.value = result.loras;
-  selectedLoras.value = selectedLoras.value.filter(name =>
-    result.loras.some(item => item.name === name && item.status === "ready")
-  );
-}
-function toggleLora(name: string, checked: boolean) {
-  selectedLoras.value = checked
-    ? [...new Set([...selectedLoras.value, name])]
-    : selectedLoras.value.filter(item => item !== name);
-}
-async function clearWorkflowLoras() {
-  if (!workflow.value) return;
-  if (!confirm(t.value("confirmClearLoras"))) return;
-  await withBusy("clear-loras", async () => {
-    const result = await post<{ workflow: Record<string, unknown>; loras: AssetReference[] }>("/publisher/clear-loras", {
-      workflow: workflow.value,
-    });
-    workflow.value = result.workflow;
-    loraReferences.value = result.loras;
-    selectedLoras.value = [];
-    notice.value = t.value("loraReferencesCleared");
-  });
 }
 function generatedWorkflowId(name: string, category = form.category.trim()) {
   const source = `${category}-${name}`;
@@ -913,7 +912,7 @@ async function applySelectedRepository() {
   } catch (reason) {
     repositoryCategories.value = [];
     publishCatalogProducts.value = [];
-    error.value = reason instanceof Error ? reason.message : String(reason);
+    error.value = errorMessage(reason);
   }
   if (!publishCatalogProducts.value.some((item) => item.id === selectedCatalogProductId.value)) {
     selectedCatalogProductId.value = "";
@@ -951,7 +950,6 @@ function payload() {
     },
     package: { url: "https://github.com/pending/package.zip", size: 1, sha256: "0".repeat(64) },
     custom_nodes: customNodes,
-    models: form.models,
   };
   return {
     repository_url: form.repository_url,
@@ -961,7 +959,7 @@ function payload() {
       tags: form.tags.split(",").map((item) => item.trim()).filter(Boolean), archived: false, versions: [version],
     },
     workflow: workflow.value,
-    selected_loras: selectedLoras.value,
+    workflow_filename: workflowSourceName.value,
     ...(coverImage.value ? { cover: { filename: coverImage.value.filename, data_base64: coverImage.value.data_base64 } } : {}),
   };
 }
@@ -1184,7 +1182,7 @@ async function pollLogin() {
     loginTimer = window.setTimeout(pollLogin, Math.max(device.value?.interval || 5, 5) * 1000);
     return;
   }
-  error.value = result.error || "GitHub login failed";
+  error.value = result.error || t.value("githubLoginFailed");
 }
 async function logout() {
   await post("/github/logout", {});
@@ -1195,7 +1193,7 @@ onMounted(async () => {
   window.addEventListener("message", handleHubMessage);
   requestCurrentCanvasWorkflow();
   try { await load(); await pollOperations(); }
-  catch (reason) { error.value = reason instanceof Error ? reason.message : String(reason); }
+  catch (reason) { error.value = errorMessage(reason); }
 });
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleWorkspaceShortcut);
@@ -1291,18 +1289,23 @@ onBeforeUnmount(() => {
             <div v-if="sourceComposerOpen" class="source-composer">
               <div class="source-form">
                 <GitBranch :size="18" />
-                <input ref="sourceInput" v-model="sourceUrl" :placeholder="t('sourcePlaceholder')" @keyup.enter="addSource" />
+                <input ref="sourceInput" v-model.trim="sourceUrl" :placeholder="t('sourcePlaceholder')" @keyup.enter="addSource" />
                 <button class="primary" :disabled="!sourceUrl || !!busy" @click="addSource">
                   <Plus :size="17" />{{ t("add") }}
                 </button>
               </div>
-              <div v-if="sources.length" class="source-chips">
-                <div v-for="item in sources" :key="item.url" class="source-chip" :class="{ invalid: item.error }" :title="item.error || item.url">
-                  <AlertCircle v-if="item.error" :size="15" /><FolderGit2 v-else :size="15" />
-                  <span>{{ item.owner }}/{{ item.repo }}</span>
-                  <button :title="t('refresh')" :aria-label="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="14" /></button>
-                  <button :title="t('remove')" :aria-label="t('remove')" @click="removeSource(item)"><Trash2 :size="14" /></button>
-                </div>
+            </div>
+
+            <div v-if="sources.length" class="source-chips source-chips-persistent">
+              <div v-for="item in sources" :key="item.url" class="source-chip" :class="{ invalid: item.error }" :title="item.error || item.url">
+                <AlertCircle v-if="item.error" :size="17" /><FolderGit2 v-else :size="17" />
+                <span>{{ item.owner }}/{{ item.repo }}</span>
+                <button :title="t('refresh')" :aria-label="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="15" /></button>
+                <button :title="t('remove')" :aria-label="t('remove')" @click="removeSource(item)"><Trash2 :size="15" /></button>
+                <a class="source-chip-action" :href="item.url" target="_blank" rel="noopener"
+                  :title="t('openSource')" :aria-label="`${t('openSource')}: ${item.owner}/${item.repo}`" @click.stop>
+                  <ExternalLink :size="15" />
+                </a>
               </div>
             </div>
 
@@ -1424,19 +1427,18 @@ onBeforeUnmount(() => {
                     <div v-if="resourceScanPending" class="resource-scan-pending"><RefreshCw :size="17" />{{ t("scanningCanvasResources") }}</div>
 
                     <div class="resource-review-group">
-                      <div class="resource-review-heading"><span><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong><em>{{ customNodeCount }}</em></span><small>{{ dependencyScanError || t(pluginDetectionHintKey) }}</small></div>
-                      <div v-if="dependencyScanMode === 'installed_fallback' && !resourceScanPending && !dependencyScanError" class="plugin-fallback-warning">
+                      <div class="resource-review-heading"><span><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong><em>{{ customNodeCount }}</em></span><small>{{ dependencyScanError || t("managerPluginSelectionHint") }}</small></div>
+                      <div v-if="!resourceScanPending && !dependencyScanError" class="plugin-selection-hint">
                         <TriangleAlert :size="17" />
-                        <span><strong>{{ t("managerPluginFallbackTitle") }}</strong><small>{{ t("managerPluginFallbackDescription", { count: unresolvedPluginNodes.length }) }}</small></span>
+                        <span><strong>{{ t("pluginSelectionTitle") }}</strong><small>{{ t("pluginSelectionDescription") }}</small></span>
                       </div>
                       <label
                         v-for="item in scannedPluginDependencies"
                         :key="pluginKey(item)"
-                        class="publish-resource-row"
-                        :class="{ selectable: dependencyScanMode === 'installed_fallback', selected: selectedPluginKeys.includes(pluginKey(item)), 'with-checkbox': dependencyScanMode === 'installed_fallback' }"
+                        class="publish-resource-row selectable with-checkbox"
+                        :class="{ selected: selectedPluginKeys.includes(pluginKey(item)) }"
                       >
                         <input
-                          v-if="dependencyScanMode === 'installed_fallback'"
                           type="checkbox"
                           :checked="selectedPluginKeys.includes(pluginKey(item))"
                           @change="togglePlugin(item, ($event.target as HTMLInputElement).checked)"
@@ -1461,13 +1463,11 @@ onBeforeUnmount(() => {
                     <div class="resource-review-group">
                       <div class="resource-review-heading">
                         <span><TriangleAlert :size="16" /><strong>{{ t("loraReferences") }}</strong><em>{{ loraReferences.length }}</em></span>
-                        <button v-if="loraReferences.length" class="ghost danger-action compact-action" :disabled="!!busy" @click="clearWorkflowLoras"><Trash2 :size="14" />{{ t("clearReferences") }}</button>
                       </div>
-                      <label v-for="item in loraReferences" :key="item.name" class="publish-resource-row selectable" :class="{ invalid: item.status !== 'ready', selected: selectedLoras.includes(item.name) }">
-                        <input type="checkbox" :checked="selectedLoras.includes(item.name)" :disabled="item.status !== 'ready'" @change="toggleLora(item.name, ($event.target as HTMLInputElement).checked)" />
-                        <span><strong>{{ item.name }}</strong><small>{{ item.filename }}</small></span>
-                        <em>{{ item.status === "ready" && item.size != null ? humanBytes(item.size) : item.status }}</em>
-                      </label>
+                      <div v-if="loraReferences.length" class="plugin-selection-hint lora-reference-warning">
+                        <TriangleAlert :size="17" />
+                        <span><strong>{{ t("loraReferenceWarning", { count: loraReferences.length }) }}</strong><small>{{ t("loraReferenceWarningDescription") }}</small></span>
+                      </div>
                       <div v-if="!resourceScanPending && !loraReferences.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ t("noLoraReferences") }}</strong><small>{{ t("nothingElseToReview") }}</small></span></div>
                     </div>
 
@@ -1549,7 +1549,6 @@ onBeforeUnmount(() => {
                     <div class="publish-review-resources">
                       <span><PackageOpen :size="16" /><strong>{{ customNodeCount }}</strong><small>{{ t("plugins") }}</small></span>
                       <span><FileUp :size="16" /><strong>{{ imageReferences.length }}</strong><small>{{ t("images") }}</small></span>
-                      <span><TriangleAlert :size="16" /><strong>{{ selectedLoras.length }}</strong><small>{{ t("lorasIncluded") }}</small></span>
                     </div>
                     <div class="publish-review-notes"><small>{{ t("releaseNotes") }}</small><p>{{ form.changelog }}</p></div>
                     <p class="publish-final-warning"><AlertCircle :size="16" />{{ t("immutableReleaseWarning") }}</p>
@@ -1698,7 +1697,7 @@ onBeforeUnmount(() => {
             <div class="resource-metrics">
               <div><PackageOpen :size="17" /><span><strong>{{ activeDetailVersion.custom_nodes.length }}</strong><small>{{ t("plugins") }}</small></span></div>
               <div><FileUp :size="17" /><span><strong>{{ activeDetailVersion.inputs?.length || 0 }}</strong><small>{{ t("includedImages") }}</small></span></div>
-              <div><TriangleAlert :size="17" /><span><strong>{{ loraAssets(activeDetailVersion).length }}</strong><small>LoRA</small></span></div>
+              <div><TriangleAlert :size="17" /><span><strong>{{ loraAssets(activeDetailVersion).length }}</strong><small>{{ t("lora") }}</small></span></div>
             </div>
 
             <div v-if="activeDetailVersion.custom_nodes.length || activeDetailVersion.inputs?.length || loraAssets(activeDetailVersion).length" class="resource-groups">
@@ -1831,7 +1830,7 @@ onBeforeUnmount(() => {
           </div>
           <small class="progress-copy">{{ humanBytes(item.progress.received) }} / {{ humanBytes(item.progress.total) }}</small>
         </template>
-        <pre v-if="item.logs.length">{{ item.logs.join("\n") }}</pre>
+        <pre v-if="item.error_code || item.logs.length">{{ operationErrorMessage(item) }}</pre>
       </article>
     </aside>
 

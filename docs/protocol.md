@@ -37,7 +37,7 @@ Release title: {类别} / {工作流名称} v{version}
 ZIP asset: {工作流名称}-v{version}.zip
 ```
 
-ZIP 与对应版本目录中的文件字节一致。Release 还可保存作者选择发布的 LoRA 和预览资源。Release 成功而仓库提交失败时，发布进入“待同步发布”，恢复操作直接读取已经生成并校验的 ZIP，不重新扫描作者的本地资源。
+ZIP 与对应版本目录中的文件字节一致。历史 Release 可保存已发布的 LoRA 和预览资源；新的工作流版本不再上传 LoRA。Release 成功而仓库提交失败时，发布进入“待同步发布”，恢复操作直接读取已经生成并校验的 ZIP，不重新扫描作者的本地资源。
 
 ## 版本内容
 
@@ -49,14 +49,18 @@ workflow.json       必需
 README.md           可选
 CHANGELOG.md        必需
 preview.*           可选且最多一个
-inputs/*            可选，仅限 Load Image 引用的受支持图像
+inputs/*            可选，仅限画布、子图和侧边栏图像控件引用的受支持图像
 ```
 
-不得包含模型、第三方节点代码、脚本、可执行文件、符号链接或其它子目录。`manifest.inputs` 必须声明原引用、包内路径、大小、SHA-256 和节点 ID；安装时图像写入 `input/Workflow Hub/{owner-repo}/{workflow-id}/` 并改写工作流引用。
+不得包含模型、第三方节点代码、脚本、可执行文件、符号链接或其它子目录。`manifest.inputs` 必须声明原引用、包内路径、大小、SHA-256 和节点 ID；安装时图像写入 `input/Workflow Hub/{owner-repo}/{workflow-id}/` 并改写工作流引用。`manifest.filename_separator` 可选为 `-` 或 `_`，用于让安装后的文件名沿用发布者的 `名称-v{版本}.json` 或 `名称_v{版本}.json` 格式；旧包缺少该字段时使用 `-`。
 
 `custom_nodes` 声明 ComfyUI-Manager 插件包，而不是节点类型。带 `registry_id` 的依赖由 Manager 安装；`manual: true` 的依赖必须没有 `registry_id`，并可通过 `source_url` 指向公开 GitHub 仓库。本地 Git clone 若有 `cnr_id`，只发布 Registry ID；commit SHA 不得作为可安装版本。
 
-LoRA 不进入 ZIP 或仓库历史，由 Release asset 分发，并在 `models` 中以 `type: "loras"` 声明。订阅者只能主动逐项下载。
+新版本发布不得在 ZIP、仓库历史或 `models` 中声明 LoRA。历史版本的 LoRA 由 Release asset 分发，并在 `models` 中以 `type: "loras"` 声明；订阅者只能主动逐项下载。
+
+## API 错误与多语言
+
+需要用户采取行动的后端错误返回稳定的 `error_code` 和可插值的 `error_params`，前端根据当前语言词典显示提示；后端不直接拼接中文或英文操作文案。第三方原始错误和调试诊断信息可以作为 `error` 或操作日志原样保留。
 
 ## 发布一致性与安全
 

@@ -585,6 +585,15 @@ p {
   gap: 8px;
 }
 
+.source-chips-persistent {
+  margin: 0 0 16px;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: 0 14px 34px rgb(0 0 0 / 15%), inset 0 1px rgb(255 255 255 / 5%);
+  gap: 10px;
+}
+
 .library-divider {
   height: 1px;
   margin: 14px -16px 16px;
@@ -593,30 +602,40 @@ p {
 
 .source-chip {
   display: flex;
-  min-height: 32px;
-  padding: 4px 5px 4px 10px;
-  border-radius: 9px;
+  min-height: 42px;
+  padding: 7px 7px 7px 12px;
+  border-radius: 10px;
   align-items: center;
   color: var(--text-soft);
   background: var(--surface-soft);
   font-size: 14px;
-  gap: 7px;
+  gap: 8px;
 }
 
-.source-chip button {
+.source-chip > span {
+  white-space: nowrap;
+}
+
+.source-chip button,
+.source-chip-action {
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   padding: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   place-items: center;
   color: var(--faint);
   background: transparent;
 }
 
-.source-chip button:hover {
+.source-chip button:hover,
+.source-chip-action:hover {
   color: var(--text);
   background: rgb(255 255 255 / 6%);
+}
+
+.source-chip-action {
+  text-decoration: none;
 }
 
 .source-chip.invalid {
@@ -2162,7 +2181,7 @@ select:focus {
   grid-template-columns: auto auto minmax(0, 1fr) auto;
 }
 
-.plugin-fallback-warning {
+.plugin-selection-hint {
   display: flex;
   margin: 4px 0 8px;
   padding: 10px 11px;
@@ -2174,18 +2193,18 @@ select:focus {
   gap: 9px;
 }
 
-.plugin-fallback-warning > span {
+.plugin-selection-hint > span {
   display: grid;
   min-width: 0;
   gap: 3px;
 }
 
-.plugin-fallback-warning strong {
+.plugin-selection-hint strong {
   color: var(--text);
   font-size: 12px;
 }
 
-.plugin-fallback-warning small {
+.plugin-selection-hint small {
   color: #c9a77c;
   font-size: 12px;
   line-height: 1.5;

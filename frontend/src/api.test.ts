@@ -20,4 +20,19 @@ describe("api", () => {
     expect(options.body).toBe("{}");
     expect(options.headers.get("Content-Type")).toBe("application/json");
   });
+
+  it("preserves backend error codes and interpolation parameters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      json: async () => ({ error_code: "publisher.lora_forbidden", error_params: { count: 2 } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api("/publisher/validate", { method: "POST" })).rejects.toMatchObject({
+      code: "publisher.lora_forbidden",
+      params: { count: 2 },
+    });
+  });
 });

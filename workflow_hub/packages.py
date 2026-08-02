@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .assets import IMAGE_LOADER_TYPES, _image_widget_indexes, _ui_nodes
 from .security import ensure_within, safe_filename, validate_zip_name
 
 MAX_PACKAGE = 256 * 1024 * 1024
@@ -26,6 +27,7 @@ ALLOWED = {
 }
 REQUIRED = {"manifest.json", "workflow.json", "CHANGELOG.md"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+FILENAME_SEPARATORS = {"-", "_"}
 
 
 def sha256_file(path: Path) -> str:
@@ -175,7 +177,10 @@ def install_workflow(
     inspected = inspect_package(package_path, expected_sha256)
     directory = ensure_within(workflows_root, workflows_root / safe_filename(f"{owner}-{repo}") / workflow_id)
     directory.mkdir(parents=True, exist_ok=True)
-    target = ensure_within(directory, directory / f"{safe_filename(display_name)}-v{version}.json")
+    separator = inspected["manifest"].get("filename_separator", "-")
+    if separator not in FILENAME_SEPARATORS:
+        separator = "-"
+    target = ensure_within(directory, directory / f"{safe_filename(display_name)}{separator}v{version}.json")
     workflow = inspected["workflow"]
     inputs = inspected["manifest"].get("inputs", [])
     if inputs:
@@ -220,17 +225,21 @@ def install_workflow(
 
 
 def _replace_load_image_references(workflow: dict[str, Any], replacements: dict[str, str]) -> None:
-    nodes = workflow.get("nodes")
-    if isinstance(nodes, list):
-        for node in nodes:
-            if not isinstance(node, dict) or node.get("type") != "LoadImage":
-                continue
-            values = node.get("widgets_values")
-            if isinstance(values, list) and values and isinstance(values[0], str) and values[0] in replacements:
-                values[0] = replacements[values[0]]
+    for node in _ui_nodes(workflow):
+        values = node.get("widgets_values")
+        if not isinstance(values, list):
+            continue
+        for index in _image_widget_indexes(node):
+            if index < len(values) and isinstance(values[index], str) and values[index] in replacements:
+                values[index] = replacements[values[index]]
     for node in workflow.values():
-        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+        if not isinstance(node, dict) or not isinstance(node.get("class_type"), str):
             continue
         inputs = node.get("inputs")
-        if isinstance(inputs, dict) and isinstance(inputs.get("image"), str) and inputs["image"] in replacements:
-            inputs["image"] = replacements[inputs["image"]]
+        if not isinstance(inputs, dict):
+            continue
+        names = {"image"} if node.get("class_type") in IMAGE_LOADER_TYPES else set()
+        names.update(key for key in inputs if str(key).casefold() in {"image", "images", "image_file", "image_path"})
+        for key in names:
+            if isinstance(inputs.get(key), str) and inputs[key] in replacements:
+                inputs[key] = replacements[inputs[key]]

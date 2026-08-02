@@ -17,6 +17,8 @@ class Operation:
     stage: str = "queued"
     status: str = "running"
     logs: list[str] = field(default_factory=list)
+    error_code: str | None = None
+    error_params: dict[str, str | int] | None = None
     progress: dict[str, int] | None = None
     result: dict[str, Any] | None = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

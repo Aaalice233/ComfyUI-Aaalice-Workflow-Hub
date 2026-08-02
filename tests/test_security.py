@@ -8,6 +8,7 @@ from workflow_hub.security import ensure_within, parse_public_repository, redact
 class SecurityTests(unittest.TestCase):
     def test_repository_parser(self):
         self.assertEqual(parse_public_repository("https://github.com/owner/repo"), ("owner", "repo"))
+        self.assertEqual(parse_public_repository("  https://github.com/owner/repo  "), ("owner", "repo"))
         with self.assertRaises(ValueError):
             parse_public_repository("https://example.com/owner/repo")
 

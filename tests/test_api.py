@@ -1,6 +1,8 @@
+import json
 import unittest
 
 from workflow_hub.api import _guarded_github_call, _json, _response_error
+from workflow_hub.errors import UserFacingError
 from workflow_hub.github import GitHubError, tokens
 
 
@@ -73,3 +75,11 @@ class ResponseErrorTests(unittest.TestCase):
     def test_github_403_keeps_http_400(self) -> None:
         response = _response_error(GitHubError("Forbidden", 403))
         self.assertEqual(response.status, 400)
+
+    def test_user_facing_errors_return_a_localization_code(self) -> None:
+        response = _response_error(UserFacingError("publisher.lora_forbidden", {"count": 2}))
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(response.text), {
+            "error_code": "publisher.lora_forbidden",
+            "error_params": {"count": 2},
+        })
