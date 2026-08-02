@@ -101,6 +101,7 @@ class NodeDependency(StrictModel):
     registry_id: Annotated[str, Field(min_length=1, max_length=150)] | None = None
     name: Annotated[str, Field(min_length=1, max_length=150)]
     version: Annotated[str, Field(min_length=1, max_length=80)] | None = None
+    commit: Annotated[str, Field(pattern=r"^[a-f0-9]{40}$")] | None = None
     required: bool = True
     manual: bool = False
     source_url: HttpUrl | None = None
@@ -109,6 +110,8 @@ class NodeDependency(StrictModel):
     def mapped_or_manual(self) -> "NodeDependency":
         if self.manual == (self.registry_id is not None):
             raise ValueError("依赖必须是 Registry 依赖或手动依赖之一")
+        if self.commit is not None and self.source_url is None:
+            raise ValueError("Git commit 依赖必须提供 source_url")
         return self
 
 

@@ -14,7 +14,8 @@ from .catalog import Catalog, WorkflowProduct, prepare_publish_product
 from .compatibility import current_comfyui_version, stamp_product_comfyui_version
 from .errors import UserFacingError
 from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refresh_access_token, start_device_flow, tokens
-from .manager import ManagerAdapter, local_manager_status
+from .legacy_manager import ManagerAdapter, local_manager_status
+from .manager import GitAdapter, local_git_status
 from .operations import Operation, operations
 from .security import ensure_within, parse_public_repository
 from .service import (
@@ -43,10 +44,6 @@ MAX_JSON = 20 * 1024 * 1024
 _registered = False
 _startup_refresh_tasks: dict[str, asyncio.Task[list[dict[str, str]]]] = {}
 _startup_notifications_delivered: set[str] = set()
-
-
-def _origin(request: web.Request) -> str:
-    return f"{request.scheme}://{request.host}"
 
 
 async def _json(request: web.Request) -> dict[str, Any]:
@@ -119,6 +116,140 @@ async def _run(operation: Operation, action: Awaitable[dict[str, Any]]) -> None:
         operation.status = "failed"
         operation.stage = "failed"
         operation.logs.append(str(exc))
+
+
+_dependency_lock = asyncio.Lock()
+
+
+async def _perform_dependency_operation(
+    operation: Operation,
+    actions: list[dict[str, Any]],
+    manager_origin: str,
+) -> None:
+    executable = [item for item in actions if item.get("action") in {"install", "upgrade", "downgrade"}]
+    manager_actions = [item for item in executable if item.get("registry_id") and not item.get("source_url")]
+    git_actions = [item for item in executable if item not in manager_actions]
+    operation.progress_mode = "tasks"
+    operation.progress = {"received": 0, "total": len(executable)}
+    results: list[dict[str, Any]] = []
+
+    async def add_log(line: str) -> None:
+        text = line.replace("\r", "").strip()
+        if text:
+            operation.logs.append(text)
+
+    async def update_progress(done: int, total: int) -> None:
+        operation.progress = {"received": done, "total": total}
+
+    async def update_result(result: dict[str, Any]) -> None:
+        if result not in results:
+            results.append(result)
+        operation.result = {"tasks": list(results)}
+        if result.get("state") == "failed":
+            code = result.get("error_code") or "dependencies.git_command_failed"
+            params = result.get("error_params") or {}
+            await add_log(f"{result.get('name', '')}: {code} {params}")
+
+    try:
+        operation.stage = "installing"
+        completed = 0
+        if manager_actions:
+            manager = ManagerAdapter(manager_origin)
+            await add_log("manager queue: submitting dependency tasks")
+            queued = await manager.execute(manager_actions, operation.id)
+            for item in queued:
+                results.append({
+                    "name": item.get("name", item.get("registry_id", "")),
+                    "requested": item.get("requested"),
+                    "action": item.get("action", "install"),
+                    "state": "installing",
+                    "registry_id": item.get("registry_id"),
+                })
+            operation.result = {"tasks": list(results)}
+            await update_progress(0, len(executable))
+            history_seen: set[str] = set()
+            last_status: tuple[int, int, int, bool] | None = None
+            for _ in range(1800):
+                status = await manager.queue_status(operation.id)
+                snapshot = (status["total"], status["done"], status["in_progress"], status["processing"])
+                if snapshot != last_status:
+                    await add_log(f"manager queue: total={snapshot[0]} done={snapshot[1]} in_progress={snapshot[2]} processing={snapshot[3]}")
+                    last_status = snapshot
+                history = await manager.queue_history(operation.id)
+                await update_progress(max(completed, min(status["done"], len(manager_actions)), 0), len(executable))
+                for item in results:
+                    key = str(item.get("registry_id") or "")
+                    outcome = history.get(key)
+                    if not outcome or key in history_seen:
+                        continue
+                    history_seen.add(key)
+                    item["state"] = outcome["outcome"]
+                    item["message"] = outcome.get("message", "")
+                    if item["state"] == "failed":
+                        item["error_code"] = "dependencies.manager_task_failed"
+                        item["error_params"] = {"name": item["name"]}
+                    completed += 1
+                    await update_result(item)
+                    await update_progress(completed, len(executable))
+                if completed >= len(manager_actions):
+                    break
+                if not status["processing"] and (status["total"] == 0 or status["done"] >= len(manager_actions)):
+                    for item in results:
+                        if item.get("state") == "installing":
+                            item["state"] = "unknown"
+                            await add_log(f"{item.get('name', '')}: manager task result unavailable")
+                            completed += 1
+                            await update_result(item)
+                            await update_progress(completed, len(executable))
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise UserFacingError("dependencies.manager_timeout")
+        if git_actions:
+            async def update_git_progress(done: int, total: int) -> None:
+                await update_progress(completed + done, len(executable))
+
+            await GitAdapter().execute(
+                git_actions,
+                on_log=add_log,
+                on_progress=update_git_progress,
+                on_result=update_result,
+            )
+        operation.result = {"tasks": list(results)}
+        failed = next((item for item in results if item.get("state") == "failed"), None)
+        if failed:
+            operation.error_code = failed.get("error_code") or "dependencies.git_command_failed"
+            operation.error_params = failed.get("error_params") or {}
+            operation.status = "failed"
+            operation.stage = "failed"
+        else:
+            operation.status = "success"
+            operation.stage = "complete"
+    except UserFacingError as exc:
+        for item in results:
+            if item.get("state") in {"queued", "installing"}:
+                item["state"] = "failed"
+                item["error_code"] = exc.code
+                item["error_params"] = exc.params
+        operation.result = {"tasks": list(results)}
+        operation.status = "failed"
+        operation.stage = "failed"
+        operation.error_code = exc.code
+        operation.error_params = exc.params
+    except Exception as exc:
+        operation.result = {"tasks": list(results)}
+        operation.status = "failed"
+        operation.stage = "failed"
+        operation.logs.append(str(exc))
+
+
+async def _run_dependency_operation(
+    operation: Operation,
+    actions: list[dict[str, Any]],
+    manager_origin: str,
+) -> None:
+    async with _dependency_lock:
+        await _perform_dependency_operation(operation, actions, manager_origin)
 
 
 async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> list[dict[str, str]]:
@@ -195,16 +326,13 @@ def register_routes() -> None:
         _startup_refresh(storage)
         credential = await tokens.get_record(storage.key)
         github_user = credential.get("user") if credential and isinstance(credential.get("user"), dict) else None
-        manager = local_manager_status()
-        detected = await ManagerAdapter(_origin(request)).status()
-        if detected.get("api"):
-            manager["api"] = detected["api"]
         return web.json_response(
             {
                 "plugin_version": "1.0.0",
                 "minimum_frontend": "1.33.9",
                 "comfyui_version": current_comfyui_version(),
-                "manager": manager,
+                "git": local_git_status(),
+                "manager": local_manager_status(),
                 "github": {
                     "configured": bool(CLIENT_ID),
                     "authenticated": bool(credential and credential.get("access_token")),
@@ -352,7 +480,20 @@ def register_routes() -> None:
     @endpoint
     async def dependency_plan(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
-        result = await ManagerAdapter(_origin(request)).plan(data.get("dependencies", []))
+        dependencies = data.get("dependencies", [])
+        git_items = await GitAdapter().plan(dependencies)
+        manager_items = await ManagerAdapter(f"{request.scheme}://{request.host}").plan(dependencies)
+        planned = {
+            (str(item.get("registry_id") or "") or str(item.get("source_url") or item.get("name"))): item
+            for item in [*git_items, *manager_items]
+        }
+        result = [
+            planned.get(
+                str(item.get("registry_id") or "") or str(item.get("source_url") or item.get("name")),
+                item,
+            )
+            for item in dependencies
+        ]
         return web.json_response({"items": result})
 
     @routes.post(f"{BASE}/workflows/dependencies/execute")
@@ -361,8 +502,10 @@ def register_routes() -> None:
         data = await _json(request)
         if data.get("confirmed") is not True:
             raise ValueError("必须明确确认后才能修改节点环境")
-        queued = await ManagerAdapter(_origin(request)).execute(data.get("actions", []), str(data.get("client_id", "workflow-hub")))
-        return web.json_response({"queued": queued, "restart_may_be_required": bool(queued)})
+        operation = await operations.create("dependencies")
+        manager_origin = f"{request.scheme}://{request.host}"
+        asyncio.create_task(_run_dependency_operation(operation, data.get("actions", []), manager_origin))
+        return web.json_response({"operation_id": operation.id}, status=202)
 
     @routes.get(f"{BASE}/github/repositories")
     @endpoint
@@ -468,18 +611,6 @@ def register_routes() -> None:
         await tokens.delete(UserStorage.from_request(request).key)
         return web.json_response({"authenticated": False})
 
-    @routes.get(f"{BASE}/manager/queue-status")
-    @endpoint
-    async def manager_queue_status(request: web.Request) -> web.StreamResponse:
-        client_id = request.query.get("client_id") or None
-        return web.json_response(await ManagerAdapter(_origin(request)).queue_status(client_id))
-
-    @routes.get(f"{BASE}/manager/queue-history")
-    @endpoint
-    async def manager_queue_history(request: web.Request) -> web.StreamResponse:
-        client_id = str(request.query.get("client_id") or "")
-        return web.json_response({"items": await ManagerAdapter(_origin(request)).queue_history(client_id)})
-
     @routes.post(f"{BASE}/github/repositories")
     @endpoint
     async def github_repository_create(request: web.Request) -> web.StreamResponse:
@@ -515,7 +646,7 @@ def register_routes() -> None:
     @endpoint
     async def publisher_scan_dependencies(request: web.Request) -> web.StreamResponse:
         await _json(request)
-        items = await ManagerAdapter(_origin(request)).installed_dependencies()
+        items = await GitAdapter().installed_dependencies()
         return web.json_response({"items": items})
 
     @routes.post(f"{BASE}/publisher/scan-assets")

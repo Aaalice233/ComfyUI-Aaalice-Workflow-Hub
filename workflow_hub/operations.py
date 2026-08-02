@@ -20,6 +20,7 @@ class Operation:
     error_code: str | None = None
     error_params: dict[str, str | int] | None = None
     progress: dict[str, int] | None = None
+    progress_mode: str = "bytes"
     result: dict[str, Any] | None = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

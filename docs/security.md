@@ -9,7 +9,7 @@
 - 不执行包、仓库或清单中的任何代码。
 - Token 只存系统 keyring；keyring 失败时只存当前 Python 进程内存。Token、设备码和 Authorization header 会从日志中脱敏。GitHub 对受信请求返回 401 时自动删除已存凭据并按未登录处理。
 - 所有写 API 要求同源、请求体不超过 20 MiB，并通过 ComfyUI 当前请求解析用户目录；携带 JSON 请求体时必须使用 `application/json`，无参数写操作允许空请求体。
-- 依赖计划默认只读。安装、升级或降级只有在请求明确携带确认后才提交给 Manager，且按顺序提交。
+- 依赖计划默认只读。安装、升级或降级只有在请求明确携带确认后才执行；Git 依赖由 ComfyUI 环境中的 Git 处理，历史 Registry 依赖提交给 ComfyUI-Manager，所有任务按顺序执行并通过统一操作记录进度和日志。
 - 删除已发布版本或工作流同样要求请求明确确认；删除会连同对应 Release 与 tag 一并移除，且不可恢复。
 - 插件不收集遥测。
 

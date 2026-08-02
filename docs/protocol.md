@@ -54,7 +54,7 @@ inputs/*            可选，仅限画布、子图和侧边栏图像控件引用
 
 不得包含模型、第三方节点代码、脚本、可执行文件、符号链接或其它子目录。`manifest.inputs` 必须声明原引用、包内路径、大小、SHA-256 和节点 ID；安装时图像写入 `input/Workflow Hub/{owner-repo}/{workflow-id}/` 并改写工作流引用。`manifest.filename_separator` 可选为 `-` 或 `_`，用于让安装后的文件名沿用发布者的 `名称-v{版本}.json` 或 `名称_v{版本}.json` 格式；旧包缺少该字段时使用 `-`。
 
-`custom_nodes` 声明 ComfyUI-Manager 插件包，而不是节点类型。带 `registry_id` 的依赖由 Manager 安装；`manual: true` 的依赖必须没有 `registry_id`，并可通过 `source_url` 指向公开 GitHub 仓库。本地 Git clone 若有 `cnr_id`，只发布 Registry ID；commit SHA 不得作为可安装版本。
+`custom_nodes` 声明插件仓库，而不是节点类型。新发布的依赖使用 `manual: true`、`source_url` 和完整 40 位 `commit` 锁定 GitHub 工作副本；发布扫描和用户补全都以 Git commit 为准，并调用 ComfyUI 环境中的 `git` 串行 clone、fetch 和 checkout。历史清单中的 `registry_id` 依赖仍可由 ComfyUI-Manager 补全，以保持已有工作流兼容。Git 与 Manager 安装都通过统一异步操作报告插件级进度、安装日志和错误结果。
 
 新版本发布不得在 ZIP、仓库历史或 `models` 中声明 LoRA。历史版本的 LoRA 由 Release asset 分发，并在 `models` 中以 `type: "loras"` 声明；订阅者只能主动逐项下载。
 

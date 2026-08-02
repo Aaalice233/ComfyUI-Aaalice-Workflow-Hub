@@ -1,305 +1,367 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
 from typing import Any
 
-import aiohttp
+from .errors import UserFacingError
+from .security import ensure_within, parse_public_repository
+
+_COMMIT_RE = r"[0-9a-f]{40}"
+_GIT_TIMEOUT = 600
 
 
-_flavor_cache: dict[str, tuple[str, str]] = {}
+class GitCommandError(RuntimeError):
+    def __init__(self, detail: str):
+        self.detail = detail.strip() or "git command failed"
+        super().__init__(self.detail)
 
 
-def _parse_version_numbers(version: str) -> tuple[int, ...]:
-    try:
-        return tuple(int(part) for part in str(version).lstrip("Vv").split(".")[:3])
-    except ValueError:
-        return ()
-
-
-def _is_compatible_version(numbers: tuple[int, ...]) -> bool:
-    # Manager 3.x 只暴露 legacy REST 端点，4.2.1+ 才提供 v2 端点，两条 API 路径都受支持。
-    if not numbers:
-        return False
-    if numbers[0] == 3:
-        return True
-    return numbers >= (4, 2, 1)
+@dataclass
+class GitRepository:
+    name: str
+    path: Path
+    source_url: str | None
+    commit: str | None
+    dirty: bool
 
 
 @dataclass
 class DependencyAction:
     registry_id: str | None
+    source_url: str | None
     name: str
     requested: str | None
     installed: str | None
     action: str
     required: bool
     manual: bool
-    warning: str | None = None
+    installer: str = "git"
+    warning_code: str | None = None
+    warning_params: dict[str, str | int] | None = None
 
 
-def _is_git_revision(value: str | None) -> bool:
-    return bool(re.fullmatch(r"[a-f0-9]{7,40}", str(value or "").casefold()))
+def _canonical_source(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        owner, repo = parse_public_repository(text)
+    except ValueError:
+        return None
+    return f"https://github.com/{owner}/{repo}"
 
 
-def _github_url(aux_id: str | None) -> str | None:
-    value = str(aux_id or "").strip().strip("/")
-    return f"https://github.com/{value}" if value.count("/") == 1 else None
+def _remote_source(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if text.startswith("git@github.com:"):
+        text = f"https://github.com/{text.removeprefix('git@github.com:')}"
+    elif text.startswith("ssh://git@github.com/"):
+        text = f"https://github.com/{text.removeprefix('ssh://git@github.com/')}"
+    return _canonical_source(text)
 
 
-def _public_dependency(item: dict[str, Any]) -> dict[str, Any]:
-    registry_id = str(item.get("registry_id") or "").strip() or None
-    aux_id = str(item.get("aux_id") or "").strip() or None
-    installed_version = str(item.get("version") or "").strip() or None
-    development = _is_git_revision(installed_version)
+def _is_commit(value: str | None) -> bool:
+    return bool(value and re.fullmatch(_COMMIT_RE, str(value).casefold()))
+
+
+def _comfyui_root() -> Path:
+    try:
+        import folder_paths
+
+        return Path(folder_paths.__file__).resolve().parent
+    except (ImportError, AttributeError):
+        return Path(__file__).resolve().parents[3]
+
+
+def _custom_node_roots() -> list[Path]:
+    try:
+        import folder_paths
+
+        roots = [Path(item).resolve() for item in folder_paths.get_folder_paths("custom_nodes")]
+    except (ImportError, AttributeError, KeyError):
+        roots = []
+    if roots:
+        return roots
+    return [_comfyui_root() / "custom_nodes"]
+
+
+def _git_executable() -> str | None:
+    candidates: list[Path] = []
+    prefix = Path(sys.prefix)
+    candidates.extend((prefix / "Scripts" / "git.exe", prefix / "bin" / "git"))
+    executable_dir = Path(sys.executable).resolve().parent
+    candidates.extend((executable_dir / "git.exe", executable_dir / "Scripts" / "git.exe"))
+    for root in (_comfyui_root(), _comfyui_root().parent):
+        candidates.extend((root / "git" / "cmd" / "git.exe", root / "git" / "bin" / "git"))
+    path_git = shutil.which("git")
+    if path_git:
+        candidates.append(Path(path_git))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+async def _run_git(
+    *args: str,
+    cwd: Path | None = None,
+    timeout: int = _GIT_TIMEOUT,
+    on_log: Callable[[str], Awaitable[None]] | None = None,
+) -> str:
+    executable = _git_executable()
+    if executable is None:
+        raise UserFacingError("dependencies.git_unavailable")
+    process = await asyncio.create_subprocess_exec(
+        executable,
+        *args,
+        cwd=str(cwd) if cwd else None,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    async def read_stream(stream: asyncio.StreamReader) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if on_log:
+                for line in chunk.decode(errors="replace").replace("\r", "\n").splitlines():
+                    line = line.strip()
+                    if line:
+                        await on_log(line)
+        return b"".join(chunks)
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.gather(read_stream(process.stdout), read_stream(process.stderr)),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise GitCommandError("git command timed out") from exc
+    if process.returncode:
+        detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+        raise GitCommandError(detail)
+    return stdout.decode(errors="replace").strip()
+
+
+async def _inspect_repository(path: Path) -> GitRepository | None:
+    if not (path / ".git").exists():
+        return None
+    try:
+        commit = (await _run_git("rev-parse", "HEAD", cwd=path, timeout=15)).casefold()
+        remote = await _run_git("remote", "get-url", "origin", cwd=path, timeout=15)
+        dirty = bool(await _run_git("status", "--porcelain", cwd=path, timeout=15))
+    except (GitCommandError, UserFacingError):
+        return None
+    return GitRepository(path.name, path, _remote_source(remote), commit if _is_commit(commit) else None, dirty)
+
+
+async def _scan_repositories() -> list[GitRepository]:
+    if _git_executable() is None:
+        raise UserFacingError("dependencies.git_unavailable")
+    repositories: list[GitRepository] = []
+    seen: set[Path] = set()
+    for root in _custom_node_roots():
+        if not root.is_dir():
+            continue
+        for path in sorted(root.iterdir(), key=lambda item: item.name.casefold()):
+            if not path.is_dir() or path in seen:
+                continue
+            seen.add(path)
+            repository = await _inspect_repository(path)
+            if repository is not None:
+                repositories.append(repository)
+    return repositories
+
+
+def _requested_commit(item: dict[str, Any]) -> str | None:
+    commit = str(item.get("commit") or "").strip().casefold()
+    if _is_commit(commit):
+        return commit
+    legacy_version = str(item.get("version") or "").strip().casefold()
+    return legacy_version if _is_commit(legacy_version) else None
+
+
+def _failure(item: dict[str, Any], code: str, params: dict[str, str | int] | None = None) -> dict[str, Any]:
     return {
-        "registry_id": registry_id,
-        "name": str(item["name"]),
-        # Git revisions are local development state, not installable Registry versions.
-        "version": None if development else installed_version,
-        "required": True,
-        "manual": registry_id is None,
-        "source_url": _github_url(aux_id),
-        "installed_version": installed_version,
-        "development": development,
-        "install_source": "registry" if registry_id else ("github" if aux_id else "manual"),
+        "name": str(item.get("name") or ""),
+        "source_url": _canonical_source(item.get("source_url")),
+        "requested": _requested_commit(item),
+        "action": str(item.get("action") or ""),
+        "state": "failed",
+        "error_code": code,
+        "error_params": params or {},
     }
 
 
-class ManagerAdapter:
-    def __init__(self, origin: str):
-        self.origin = origin.rstrip("/")
-
-    async def _detect(self) -> tuple[str, str] | None:
-        cached = _flavor_cache.get(self.origin)
-        if cached is not None:
-            return cached
-        try:
-            async with aiohttp.ClientSession() as session:
-                for flavor, path in (("v2", "/v2/manager/version"), ("legacy", "/manager/version")):
-                    try:
-                        async with session.get(f"{self.origin}{path}", timeout=3) as response:
-                            if response.status != 200:
-                                continue
-                            version = (await response.text()).strip().strip('"')
-                            detected = (flavor, version)
-                            _flavor_cache[self.origin] = detected
-                            return detected
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        return None
-
-    async def status(self) -> dict[str, Any]:
-        detected = await self._detect()
-        if detected is None:
-            return {"available": False, "compatible": False}
-        flavor, version = detected
-        return {"available": True, "compatible": True, "version": version, "api": flavor}
-
-    async def installed(self) -> dict[str, dict[str, Any]]:
-        detected = await self._detect()
-        if detected is None:
-            raise RuntimeError("ComfyUI-Manager 未提供兼容的已安装节点接口")
-        path = "/v2/customnode/installed" if detected[0] == "v2" else "/customnode/installed"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.origin}{path}") as response:
-                if response.status != 200:
-                    raise RuntimeError("ComfyUI-Manager 未提供兼容的已安装节点接口")
-                data = await response.json()
-        if isinstance(data, dict):
-            result: dict[str, dict[str, Any]] = {}
-            for module_name, item in data.items():
-                if not isinstance(item, dict):
-                    continue
-                registry_id = str(item.get("cnr_id") or item.get("id") or "").strip() or None
-                aux_id = str(item.get("aux_id") or "").strip() or None
-                key = registry_id or (f"github:{aux_id}" if aux_id else f"module:{module_name}")
-                result[key] = {
-                    **item,
-                    "key": key,
-                    "id": registry_id or aux_id or module_name,
-                    "registry_id": registry_id,
-                    "aux_id": aux_id,
-                    "name": module_name,
-                    "version": item.get("version") or item.get("ver"),
-                }
-            return result
-        return {
-            str(item.get("id")): {
-                **item,
-                "key": str(item.get("id")),
-                "registry_id": item.get("cnr_id") or item.get("id"),
-                "aux_id": item.get("aux_id"),
-                "name": str(item.get("name") or item.get("title") or item.get("id")),
-                "version": item.get("version") or item.get("ver"),
-            }
-            for item in data
-            if isinstance(item, dict) and item.get("id")
-        }
-
+class GitAdapter:
     async def installed_dependencies(self) -> list[dict[str, Any]]:
-        installed = await self.installed()
-        dependencies = [_public_dependency(item) for item in installed.values()]
-        dependencies.sort(key=lambda item: str(item["name"]).casefold())
-        return dependencies
+        repositories = await _scan_repositories()
+        result = []
+        for repository in repositories:
+            if not repository.source_url or not repository.commit:
+                continue
+            result.append(
+                {
+                    "registry_id": None,
+                    "source_url": repository.source_url,
+                    "name": repository.name,
+                    "version": None,
+                    "commit": repository.commit,
+                    "required": True,
+                    "manual": True,
+                    "dirty": repository.dirty,
+                }
+            )
+        return result
 
     async def plan(self, dependencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        try:
-            installed = await self.installed()
-        except Exception:
-            installed = {}
-        result: list[DependencyAction] = []
-        requested_by_id: dict[str, set[str]] = {}
+        dependencies = [
+            item for item in dependencies
+            if item.get("source_url") or not item.get("registry_id")
+        ]
+        if not dependencies:
+            return []
+        installed = (
+            {item.source_url: item for item in await _scan_repositories() if item.source_url}
+            if any(item.get("source_url") for item in dependencies)
+            else {}
+        )
+        requested_by_source: dict[str, set[str]] = {}
         for dependency in dependencies:
-            if dependency.get("registry_id") and dependency.get("version"):
-                requested_by_id.setdefault(str(dependency["registry_id"]), set()).add(str(dependency["version"]))
-        for dependency in dependencies:
-            registry_id = dependency.get("registry_id")
-            requested = dependency.get("version")
-            current = installed.get(registry_id or "")
-            installed_version = current.get("version") if current else None
-            if registry_id and len(requested_by_id.get(registry_id, set())) > 1:
-                action, warning = "conflict", "多个工作流版本要求了互不相同的节点版本"
-            elif dependency.get("manual") or not registry_id:
-                action, warning = "manual", "该节点未映射到 Comfy Registry，需要手动处理"
-            elif not installed_version:
-                action, warning = "install", None
-            elif not requested or installed_version == requested:
-                action, warning = "keep", None
-            else:
-                from packaging.version import InvalidVersion, Version
+            source = _canonical_source(dependency.get("source_url"))
+            requested = _requested_commit(dependency)
+            if source and requested:
+                requested_by_source.setdefault(source, set()).add(requested)
 
-                try:
-                    action = "upgrade" if Version(installed_version) < Version(requested) else "newer"
-                    warning = "本地版本更高，默认保留" if action == "newer" else None
-                except InvalidVersion:
-                    action, warning = "unknown", "无法可靠比较依赖版本"
+        result: list[DependencyAction] = []
+        for dependency in dependencies:
+            source = _canonical_source(dependency.get("source_url"))
+            requested = _requested_commit(dependency)
+            current = installed.get(source or "")
+            installed_commit = current.commit if current else None
+            warning_code = None
+            warning_params: dict[str, str | int] = {}
+
+            if source and len(requested_by_source.get(source, set())) > 1:
+                action = "conflict"
+                warning_code = "dependencies.conflicting_commits"
+            elif not source:
+                action = "manual"
+                warning_code = "dependencies.github_source_missing"
+            elif not requested:
+                action = "manual"
+                warning_code = "dependencies.commit_missing"
+            elif not current:
+                action = "install"
+            elif current.dirty:
+                action = "manual"
+                warning_code = "dependencies.local_changes"
+            elif installed_commit == requested:
+                action = "keep"
+            else:
+                action = "upgrade"
+
             result.append(
                 DependencyAction(
-                    registry_id=registry_id,
-                    name=dependency["name"],
+                    registry_id=str(dependency.get("registry_id") or "").strip() or None,
+                    source_url=source,
+                    name=str(dependency.get("name") or source or "GitHub repository"),
                     requested=requested,
-                    installed=installed_version,
+                    installed=installed_commit,
                     action=action,
                     required=dependency.get("required", True),
-                    manual=dependency.get("manual", False),
-                    warning=warning,
+                    manual=dependency.get("manual", True),
+                    warning_code=warning_code,
+                    warning_params=warning_params,
                 )
             )
         return [asdict(item) for item in result]
 
-    async def execute(self, actions: list[dict[str, Any]], client_id: str) -> list[dict[str, Any]]:
-        allowed = {"install", "upgrade", "downgrade"}
-        detected = await self._detect()
-        flavor = detected[0] if detected else "v2"
-        queued: list[dict[str, Any]] = []
-        async with aiohttp.ClientSession() as session:
-            for item in actions:
-                if item.get("action") not in allowed or not item.get("registry_id"):
-                    continue
-                target_version = item.get("requested") or "latest"
-                if flavor == "legacy":
-                    payload = {
-                        "id": item["registry_id"],
-                        "version": target_version,
-                        "selected_version": target_version,
-                        "skip_post_install": False,
-                        "ui_id": item["registry_id"],
-                        "channel": "default",
-                        "mode": "cache",
-                    }
-                    request = session.post(f"{self.origin}/manager/queue/install", json=payload)
-                else:
-                    params = {
-                        "id": item["registry_id"],
-                        "version": target_version,
-                        "selected_version": target_version,
-                        "mode": "cache",
-                        "channel": "default",
-                        "skip_post_install": False,
-                    }
-                    payload = {"ui_id": item["registry_id"], "client_id": client_id, "kind": "install", "params": params}
-                    request = session.post(f"{self.origin}/v2/manager/queue/task", json=payload)
-                async with request as response:
-                    if response.status not in (200, 201):
-                        raise RuntimeError(f"Manager 拒绝依赖任务 {item['name']}: {await response.text()}")
-                queued.append(item)
-            if queued:
-                if flavor == "legacy":
-                    async with session.get(f"{self.origin}/manager/queue/start") as response:
-                        if response.status not in (200, 201):
-                            raise RuntimeError(f"Manager 无法启动依赖队列: {await response.text()}")
-                else:
-                    async with session.post(f"{self.origin}/v2/manager/queue/start", json={"client_id": client_id}) as response:
-                        if response.status not in (200, 201):
-                            raise RuntimeError(f"Manager 无法启动依赖队列: {await response.text()}")
-        return queued
+    async def execute(
+        self,
+        actions: list[dict[str, Any]],
+        on_log: Callable[[str], Awaitable[None]] | None = None,
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        on_result: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> list[dict[str, Any]]:
+        executable = [item for item in actions if item.get("action") in {"install", "upgrade", "downgrade"}]
+        results: list[dict[str, Any]] = []
+        total = len(executable)
+        for index, item in enumerate(executable, start=1):
+            if on_log:
+                await on_log(f"{item.get('name') or item.get('source_url')}: starting Git operation")
+            result = await self._execute_one(item, on_log=on_log)
+            results.append(result)
+            if on_result:
+                await on_result(result)
+            if on_progress:
+                await on_progress(index, total)
+        return results
 
+    async def _execute_one(
+        self,
+        item: dict[str, Any],
+        on_log: Callable[[str], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        source = _canonical_source(item.get("source_url"))
+        requested = _requested_commit(item)
+        if not source:
+            return _failure(item, "dependencies.github_source_invalid")
+        if not requested:
+            return _failure(item, "dependencies.commit_missing")
 
-    async def queue_status(self, client_id: str | None = None) -> dict[str, Any]:
-        detected = await self._detect()
-        if detected is None:
-            raise RuntimeError("ComfyUI-Manager 未提供兼容的队列状态接口")
-        flavor, _ = detected
-        url = f"{self.origin}/v2/manager/queue/status" if flavor == "v2" else f"{self.origin}/manager/queue/status"
-        if flavor == "v2" and client_id:
-            url += f"?client_id={client_id}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=5) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"Manager 无法提供队列状态: {await response.text()}")
-                data = await response.json()
-        done = int(data.get("done_count") or 0)
-        in_progress = int(data.get("in_progress_count") or 0)
-        if flavor == "v2":
-            # v2 的 total_count 只含等待和执行中的任务，已完成任务在 history 里单独计数。
-            total = done + in_progress + int(data.get("pending_count") or 0)
-        else:
-            total = int(data.get("total_count") or 0)
-        return {"api": flavor, "total": total, "done": done, "in_progress": in_progress, "processing": bool(data.get("is_processing"))}
-
-    async def queue_history(self, client_id: str) -> dict[str, dict[str, Any]]:
-        detected = await self._detect()
-        if detected is None:
-            raise RuntimeError("ComfyUI-Manager 未提供兼容的队列历史接口")
-        if detected[0] != "v2":
-            # legacy 的逐任务结果只通过 WebSocket 广播，REST 不提供。
-            return {}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.origin}/v2/manager/queue/history?client_id={client_id}", timeout=5) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"Manager 无法提供队列历史: {await response.text()}")
-                data = await response.json()
-        history = data.get("history") if isinstance(data, dict) else None
-        if not isinstance(history, dict):
-            return {}
-        result: dict[str, dict[str, Any]] = {}
-        for task_id, item in history.items():
-            if not isinstance(item, dict):
-                continue
-            status = item.get("status") if isinstance(item.get("status"), dict) else {}
-            outcome = str(status.get("status_str") or "").casefold()
-            result[str(item.get("ui_id") or task_id)] = {
-                "outcome": "success" if outcome in {"success", "skipped", "skip"} else ("failed" if outcome else "unknown"),
-                "message": str(item.get("result") or ""),
-            }
-        return result
-
-
-def local_manager_status() -> dict[str, Any]:
-    try:
+        repositories = await _scan_repositories()
+        current = next((repository for repository in repositories if repository.source_url == source), None)
         try:
-            from comfyui_manager.glob import manager_core
-        except ImportError:
-            try:
-                from comfyui_manager.legacy import manager_core
-            except ImportError:
-                # Manager 3.x 把 glob/ 加进 sys.path，core 以顶层模块形式存在。
-                import manager_core
-        version = str(manager_core.version_str)
-        numbers = _parse_version_numbers(version)
-        return {"available": True, "compatible": _is_compatible_version(numbers), "version": version}
-    except Exception:
-        return {"available": False, "compatible": False}
+            if current is not None:
+                if current.dirty:
+                    return _failure(item, "dependencies.local_changes")
+                if on_log:
+                    await on_log(f"{current.name}: fetching commit {requested}")
+                await _run_git("fetch", "--no-tags", "origin", cwd=current.path, on_log=on_log)
+                await _run_git("checkout", "--detach", requested, cwd=current.path, on_log=on_log)
+            else:
+                _owner, repo = parse_public_repository(source)
+                root = _custom_node_roots()[0]
+                root.mkdir(parents=True, exist_ok=True)
+                target = ensure_within(root, root / repo)
+                if target.exists():
+                    return _failure(item, "dependencies.target_exists", {"path": target.name})
+                if on_log:
+                    await on_log(f"{repo}: cloning {source}")
+                await _run_git("clone", "--progress", source, str(target), on_log=on_log)
+                try:
+                    await _run_git("checkout", "--detach", requested, cwd=target, on_log=on_log)
+                except (GitCommandError, UserFacingError):
+                    shutil.rmtree(target, ignore_errors=True)
+                    raise
+        except UserFacingError as exc:
+            return _failure(item, exc.code, exc.params)
+        except GitCommandError as exc:
+            return _failure(item, "dependencies.git_command_failed", {"name": str(item.get("name") or source), "detail": exc.detail[-1000:]})
+        return {
+            "name": str(item.get("name") or source),
+            "source_url": source,
+            "requested": requested,
+            "action": str(item.get("action") or ""),
+            "state": "success",
+            "error_code": None,
+            "error_params": {},
+        }
+
+
+def local_git_status() -> dict[str, Any]:
+    return {"available": _git_executable() is not None, "source": "github"}

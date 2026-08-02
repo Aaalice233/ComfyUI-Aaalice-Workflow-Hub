@@ -22,7 +22,7 @@
 
 ## Manager 不可用
 
-工作流仍可下载。插件依赖计划会降级为说明，不会尝试自行安装。插件支持 ComfyUI-Manager `3.0+`（legacy API）和 `4.2.1+`（v2 API），安装或升级后重启 ComfyUI 即可。Manager 3.x 下如果安装任务被拒绝并返回 403，需把 Manager 的 `security_level` 调整为 `middle` 或更低（默认 `normal` 即可）。
+工作流仍可下载。GitHub 依赖使用 ComfyUI 环境中的 Git；历史 Registry 依赖才需要 ComfyUI-Manager `3.0+`（legacy API）或 `4.2.1+`（v2 API）。安装详情会在依赖面板和活动详情中持续显示进度、日志和结果；安装或升级后重启 ComfyUI 即可。Manager 3.x 下如果队列任务被拒绝并返回 403，需把 Manager 的 `security_level` 调整为 `middle` 或更低（默认 `normal` 即可）。
 
 ## 同版本下载失败
 

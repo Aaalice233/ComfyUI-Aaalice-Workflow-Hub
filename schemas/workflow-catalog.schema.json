@@ -53,6 +53,7 @@
         "registry_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 150 },
         "name": { "type": "string", "minLength": 1, "maxLength": 150 },
         "version": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+        "commit": { "type": ["string", "null"], "pattern": "^[a-f0-9]{40}$" },
         "required": { "type": "boolean", "default": true },
         "manual": { "type": "boolean", "default": false },
         "source_url": { "type": ["string", "null"], "format": "uri" }

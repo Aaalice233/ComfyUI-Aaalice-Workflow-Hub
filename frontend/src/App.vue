@@ -11,7 +11,6 @@ import {
   ChevronDown,
   CircleUserRound,
   CircleX,
-  Clock,
   Compass,
   Copy,
   Download as DownloadIcon,
@@ -25,7 +24,6 @@ import {
   ImagePlus,
   LibraryBig,
   ListFilter,
-  LoaderCircle,
   LogOut,
   PackageOpen,
   Plus,
@@ -75,34 +73,38 @@ type Product = {
 type Status = {
   plugin_version: string;
   comfyui_version: string;
-  manager: { available: boolean; compatible: boolean; version?: string; api?: "v2" | "legacy" };
+  git: { available: boolean; source?: string };
+  manager?: { available: boolean; compatible: boolean; version?: string; api?: string };
   github: { configured: boolean; authenticated: boolean; user?: { login: string; avatar_url: string }; persistent_credentials: boolean };
 };
 type Operation = {
   id: string; kind: string; stage: string; status: string; logs: string[];
   error_code?: string; error_params?: Record<string, string | number>;
-  progress?: { received: number; total: number }; result?: Record<string, unknown>;
+  progress?: { received: number; total: number }; progress_mode?: "bytes" | "tasks";
+  result?: Record<string, unknown>;
 };
 type DependencyPlan = {
-  registry_id?: string | null; name: string; requested?: string | null; installed?: string | null;
-  action: "keep" | "install" | "upgrade" | "newer" | "conflict" | "unknown" | "manual";
-  warning?: string | null;
+  registry_id?: string | null; source_url?: string | null; name: string; requested?: string | null; installed?: string | null;
+  action: "keep" | "install" | "upgrade" | "downgrade" | "newer" | "conflict" | "unknown" | "manual";
+  installer?: "git" | "manager";
+  warning_code?: string | null; warning_params?: Record<string, string | number>;
 };
 type NodeDependencyInfo = {
-  registry_id?: string | null; name: string; version?: string | null; required?: boolean; manual?: boolean; source_url?: string | null;
+  registry_id?: string | null; name: string; version?: string | null; commit?: string | null; required?: boolean; manual?: boolean; source_url?: string | null;
 };
 type ScannedNodeDependency = NodeDependencyInfo & {
-  installed_version?: string | null; development?: boolean; install_source?: "registry" | "github" | "manual";
+  dirty?: boolean;
 };
+type DependencyResult = {
+  name: string; registry_id?: string | null; source_url?: string | null; requested?: string | null; action: string;
+  state: "queued" | "installing" | "success" | "failed" | "unknown";
+  error_code?: string | null; error_params?: Record<string, string | number>;
+};
+type DependencyExecutionTask = DependencyResult & { registryId: string; version: string; message: string };
 type PublishCatalogProduct = {
   id: string; name: string; category: string; summary: string; description: string; tags: string[]; versions: string[];
 };
-type DependencyTaskState = "queued" | "installing" | "success" | "failed" | "unknown";
-type DependencyExecutionTask = { registryId: string; name: string; version: string; state: DependencyTaskState; message: string };
-type DependencyExecution = {
-  clientId: string; total: number; done: number; sawActivity: boolean; idlePolls: number; finished: boolean;
-  tasks: DependencyExecutionTask[];
-};
+type DependencyTaskState = DependencyResult["state"];
 
 const LAST_PUBLISH_REPOSITORY_KEY = "aaalice-workflow-hub:last-publish-repository";
 const tab = ref<"subscribe" | "publish" | "manage">("subscribe");
@@ -152,9 +154,10 @@ const deviceCodeCopied = ref(false);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
 const selectedDependencyActions = reactive<Record<string, string[]>>({});
 const dependencyConfirmed = reactive<Record<string, boolean>>({});
-const dependencyExecutions = reactive<Record<string, DependencyExecution>>({});
-const dependencyAlignVersions = reactive<Record<string, boolean>>({});
-const dependencyTimers: Record<string, number> = {};
+const dependencyOperationIds = reactive<Record<string, string>>({});
+const dependencyOperationSynced = reactive<Record<string, boolean>>({});
+const managerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
+const pendingManagerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 let managerSocket: WebSocket | null = null;
 let operationTimer = 0;
 let loginTimer = 0;
@@ -162,6 +165,7 @@ let copiedTimer = 0;
 
 const operationStageMessages: Record<string, MessageKey> = {
   queued: "stageQueued",
+  installing: "stageInstalling",
   downloading: "stageDownloading",
   verifying: "stageVerifying",
   validating: "stageValidating",
@@ -179,6 +183,20 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "lora.unsupported_extension": "loraUnsupportedExtension",
   "lora.existing_content_mismatch": "loraExistingContentMismatch",
   "lora.checksum_mismatch": "loraChecksumMismatch",
+  "dependencies.git_unavailable": "dependenciesGitUnavailable",
+  "dependencies.github_source_invalid": "dependenciesGithubSourceInvalid",
+  "dependencies.github_source_missing": "dependenciesGithubSourceMissing",
+  "dependencies.commit_missing": "dependenciesCommitMissing",
+  "dependencies.conflicting_commits": "dependenciesConflictingCommits",
+  "dependencies.local_changes": "dependenciesLocalChanges",
+  "dependencies.target_exists": "dependenciesTargetExists",
+  "dependencies.git_command_failed": "dependenciesGitCommandFailed",
+  "dependencies.manager_unavailable": "dependenciesManagerUnavailable",
+  "dependencies.manager_request_failed": "dependenciesManagerRequestFailed",
+  "dependencies.manager_timeout": "dependenciesManagerTimeout",
+  "dependencies.manager_task_failed": "dependenciesManagerTaskFailed",
+  "dependencies.manager_version_unknown": "dependenciesManagerVersionUnknown",
+  "dependencies.conflicting_registry_versions": "dependenciesConflictingRegistryVersions",
 };
 
 const form = reactive({
@@ -218,14 +236,40 @@ const activeDetailVersion = computed(() =>
   detailVersions.value.find((version) => version.version === selectedDetailVersion.value) || detailVersions.value[0] || null
 );
 const publishStepLabels = computed(() => [t.value("stepResources"), t.value("stepDetails"), t.value("stepReview")]);
-const activeDependencyExecution = computed(() =>
-  selected.value && activeDetailVersion.value
-    ? dependencyExecutions[dependencyKey(selected.value, activeDetailVersion.value)] || null
-    : null
-);
+const activeDependencyOperation = computed(() => {
+  if (!selected.value || !activeDetailVersion.value) return null;
+  const operationId = dependencyOperationIds[dependencyKey(selected.value, activeDetailVersion.value)];
+  return operations.value.find((item) => item.id === operationId) || null;
+});
+const activeDependencyExecution = computed(() => {
+  const operation = activeDependencyOperation.value;
+  if (!operation) return null;
+  const rawTasks = Array.isArray(operation.result?.tasks) ? operation.result.tasks as DependencyResult[] : [];
+  const tasks: DependencyExecutionTask[] = rawTasks.map((entry) => {
+    const registryId = String(entry.registry_id || entry.source_url || entry.name);
+    const override = managerTaskOverrides[`${operation.id}:${registryId}`] || pendingManagerTaskOverrides[registryId];
+    return {
+      ...entry,
+      registryId,
+      state: override?.state || entry.state,
+      version: entry.requested || "",
+      message: override?.message || (entry.error_code ? localizedBackendError(entry.error_code, entry.error_params) : ""),
+    };
+  });
+  return {
+    total: operation.progress?.total || tasks.length,
+    done: operation.progress?.received || (operation.status === "running" ? 0 : tasks.length),
+    finished: operation.status !== "running",
+    tasks,
+    logs: [...operation.logs, ...Object.entries(managerTaskOverrides)
+      .filter(([key]) => key.startsWith(`${operation.id}:`))
+      .map(([key, value]) => `${key.slice(operation.id.length + 1)}: ${value.message || value.state}`)],
+  };
+});
 const dependencyExecutionFailures = computed(() =>
   activeDependencyExecution.value?.tasks.filter((task) => task.state === "failed").length || 0
 );
+const dependencyOperationRunning = computed(() => operations.value.some((item) => item.kind === "dependencies" && item.status === "running"));
 const dependencyTaskStateKeys: Record<DependencyTaskState, MessageKey> = {
   queued: "installTaskQueued",
   installing: "installTaskInstalling",
@@ -279,11 +323,12 @@ function pluginKey(item: NodeDependencyInfo) {
 }
 function catalogDependency(item: ScannedNodeDependency): NodeDependencyInfo {
   return {
-    registry_id: item.registry_id || null,
+    registry_id: null,
     name: item.name,
-    version: item.version || null,
-    required: item.required !== false,
-    manual: !!item.manual,
+    version: null,
+    commit: item.commit || null,
+    required: true,
+    manual: true,
     source_url: item.source_url || null,
   };
 }
@@ -302,19 +347,13 @@ function togglePlugin(item: ScannedNodeDependency, checked: boolean) {
   syncSelectedPlugins();
 }
 function pluginVersionLabel(item: ScannedNodeDependency) {
-  if (item.development) {
-    return t.value("gitDevelopmentVersion", { version: item.installed_version?.slice(0, 8) || t.value("unknownRevision") });
-  }
-  return item.version || (item.manual ? t.value("manualInstall") : t.value("anyVersion"));
+  return item.commit
+    ? t.value("gitCommitVersion", { version: item.commit.slice(0, 8) })
+    : t.value("gitRevisionUnavailable");
 }
 function pluginSourceLabel(item: ScannedNodeDependency) {
-  if (item.development && item.registry_id) {
-    return t.value("registryDevelopmentSource", { id: item.registry_id });
-  }
-  if (item.development && item.source_url) {
-    return t.value("githubDevelopmentSource", { url: item.source_url });
-  }
-  return item.registry_id || item.source_url || t.value("registryNotMatched");
+  const source = item.source_url || t.value("githubSourceUnavailable");
+  return item.dirty ? t.value("gitSourceDirty", { source }) : source;
 }
 function normalizeVersion(value: string): number[] {
   const parts = value.split(".").map(Number);
@@ -375,11 +414,11 @@ function openDetails(item: Product) {
   selected.value = item;
   selectedDetailVersion.value = latest(item)?.version || "";
 }
-function dependencyKey(item: Product, version: Version) {
-  return `${item.source.owner}/${item.source.repo}/${item.id}@${version.version}`;
+function dependencyKey(item: Product | null, version: Version | null) {
+  return item && version ? `${item.source.owner}/${item.source.repo}/${item.id}@${version.version}` : "";
 }
 function dependencyActionKey(item: DependencyPlan, index: number) {
-  return `${index}:${item.registry_id || item.name}:${item.requested || ""}:${item.action}`;
+  return `${index}:${item.source_url || item.registry_id || item.name}:${item.requested || ""}:${item.action}`;
 }
 function humanBytes(value: number) {
   if (value < 1024) return `${value} B`;
@@ -389,18 +428,17 @@ function humanBytes(value: number) {
 function operationStageLabel(stage: string) {
   return t.value(operationStageMessages[stage] || "stageUnknown", { stage });
 }
+function localizedBackendError(code: string, params?: Record<string, string | number>) {
+  const key = backendErrorMessages[code];
+  return key ? t.value(key, params) : code;
+}
 function errorMessage(reason: unknown) {
-  if (reason instanceof ApiError && reason.code) {
-    const key = backendErrorMessages[reason.code];
-    if (key) return t.value(key, reason.params);
-  }
+  if (reason instanceof ApiError && reason.code) return localizedBackendError(reason.code, reason.params);
   return reason instanceof Error ? reason.message : String(reason);
 }
 function operationErrorMessage(item: Operation) {
-  if (item.error_code) {
-    return t.value(backendErrorMessages[item.error_code] || "operationFailed", item.error_params);
-  }
-  return item.logs.join("\n");
+  const summary = item.error_code ? t.value(backendErrorMessages[item.error_code] || "operationFailed", item.error_params) : "";
+  return [summary, ...item.logs].filter(Boolean).join("\n");
 }
 function moveToPublishStep(step: 1 | 2 | 3) {
   if (step === 1 || (step === 2 && canConfirmPublishResources.value) || (step === 3 && canFinalizePublish.value)) {
@@ -575,33 +613,19 @@ async function revealLocalVersion(item: Product, version: Version) {
 async function planDependencies(item: Product, version: Version) {
   await withBusy("dependency-plan", () => fetchDependencyPlan(item, version));
 }
-function dependencyAlign(key: string) {
-  return dependencyAlignVersions[key] ?? true;
-}
-function toggleDependencyAlign(key: string, value: boolean) {
-  dependencyAlignVersions[key] = value;
-  const plan = dependencyPlans[key] || [];
-  const newerIds = plan.flatMap((entry, index) => (entry.action === "newer" ? [dependencyActionKey(entry, index)] : []));
-  const current = new Set(selectedDependencyActions[key] || []);
-  for (const id of newerIds) {
-    if (value) current.add(id);
-    else current.delete(id);
-  }
-  selectedDependencyActions[key] = [...current];
-}
 async function fetchDependencyPlan(item: Product, version: Version) {
   const key = dependencyKey(item, version);
   const result = await post<{ items: DependencyPlan[] }>("/workflows/dependencies/plan", { dependencies: version.custom_nodes });
   dependencyPlans[key] = result.items;
   selectedDependencyActions[key] = result.items
     .map((entry, index) => ({ entry, id: dependencyActionKey(entry, index) }))
-    .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade" || (dependencyAlign(key) && entry.action === "newer"))
+    .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade")
     .map(({ id }) => id);
   dependencyConfirmed[key] = false;
 }
 async function autoPlanDependencies(item: Product | null, version: Version | null) {
   if (!item || !version || !version.custom_nodes.length) return;
-  if (!status.value?.manager.available || !status.value?.manager.compatible) return;
+  if (!status.value?.git.available && !status.value?.manager?.available) return;
   if (dependencyPlans[dependencyKey(item, version)]) return;
   try {
     await fetchDependencyPlan(item, version);
@@ -613,133 +637,60 @@ async function autoPlanDependencies(item: Product | null, version: Version | nul
 watch([selected, activeDetailVersion, status], ([item, version]) => {
   void autoPlanDependencies(item, version);
 });
+function dependencyWarning(entry: DependencyPlan) {
+  if (!entry.warning_code) return "";
+  const key = backendErrorMessages[entry.warning_code];
+  return key ? t.value(key, entry.warning_params) : entry.warning_code;
+}
 function dependencyPlanEntry(node: NodeDependencyInfo): DependencyPlan | null {
   const item = selected.value;
   const version = activeDetailVersion.value;
   if (!item || !version) return null;
   const plan = dependencyPlans[dependencyKey(item, version)];
   if (!plan) return null;
-  return plan.find((entry) => (node.registry_id && entry.registry_id === node.registry_id) || entry.name === node.name) || null;
+  return plan.find((entry) => (node.source_url && entry.source_url === node.source_url)
+    || (node.registry_id && entry.registry_id === node.registry_id)
+    || entry.name === node.name) || null;
 }
 const dependencyActionLabels: Record<DependencyPlan["action"], MessageKey> = {
   keep: "depStatusInstalled",
-  newer: "depStatusInstalledNewer",
   install: "depStatusMissing",
+  newer: "depStatusNewer",
   upgrade: "depStatusUpgrade",
+  downgrade: "depStatusDowngrade",
   conflict: "depStatusConflict",
   manual: "depStatusManual",
   unknown: "depStatusUnknown",
 };
+function dependencyInstallerAvailable(entry: DependencyPlan) {
+  return entry.installer === "manager" ? !!status.value?.manager?.available : !!status.value?.git.available;
+}
+function dependencyActionAvailable(key: string, id: string) {
+  const plan = dependencyPlans[key] || [];
+  const index = plan.findIndex((entry, entryIndex) => dependencyActionKey(entry, entryIndex) === id);
+  return index >= 0 && dependencyInstallerAvailable(plan[index]);
+}
 function toggleDependencyAction(key: string, id: string, checked: boolean) {
   const values = selectedDependencyActions[key] || [];
   selectedDependencyActions[key] = checked ? [...new Set([...values, id])] : values.filter(value => value !== id);
 }
-async function executeDependencyPlan(item: Product, version: Version) {
+async function executeDependencyPlan(item: Product | null, version: Version | null) {
+  if (!item || !version) return;
   const key = dependencyKey(item, version);
   if (!dependencyConfirmed[key]) return;
   if (!confirm(t.value("confirmPluginChanges"))) return;
   const selectedIds = new Set(selectedDependencyActions[key] || []);
-  const align = dependencyAlign(key);
-  const actions = (dependencyPlans[key] || []).flatMap((entry, index) => {
-    if (!selectedIds.has(dependencyActionKey(entry, index))) return [];
-    if (entry.action === "newer") return align ? [{ ...entry, action: "downgrade" }] : [];
-    if (!align && (entry.action === "install" || entry.action === "upgrade")) return [{ ...entry, requested: null }];
-    return [{ ...entry }];
-  });
+  const actions = (dependencyPlans[key] || []).filter((entry, index) => selectedIds.has(dependencyActionKey(entry, index)));
   await withBusy("dependency-execute", async () => {
-    const clientId = `workflow-hub-${Math.random().toString(36).slice(2, 10)}`;
-    const result = await post<{ queued: DependencyPlan[] }>("/workflows/dependencies/execute", {
-      confirmed: true, actions, client_id: clientId,
+    if (actions.some((entry) => entry.installer === "manager")) ensureManagerSocket();
+    const result = await post<{ operation_id: string }>("/workflows/dependencies/execute", {
+      confirmed: true, actions,
     });
     dependencyConfirmed[key] = false;
-    if (!result.queued.length) {
-      notice.value = t.value("managerTasksQueued", { count: 0 });
-      return;
-    }
-    startDependencyExecution(key, result.queued, clientId);
+    dependencyOperationIds[key] = result.operation_id;
+    dependencyOperationSynced[key] = false;
+    void pollOperations();
   });
-}
-function startDependencyExecution(key: string, queued: DependencyPlan[], clientId: string) {
-  window.clearTimeout(dependencyTimers[key]);
-  dependencyExecutions[key] = {
-    clientId,
-    total: queued.length,
-    done: 0,
-    sawActivity: false,
-    idlePolls: 0,
-    finished: false,
-    tasks: queued.map((entry) => ({
-      registryId: String(entry.registry_id || entry.name),
-      name: entry.name,
-      version: entry.requested || "",
-      state: "queued",
-      message: "",
-    })),
-  };
-  ensureManagerSocket();
-  void pollDependencyExecution(key);
-}
-async function pollDependencyExecution(key: string) {
-  const execution = dependencyExecutions[key];
-  if (!execution || execution.finished) return;
-  try {
-    const queue = await api<{ api?: string; total: number; done: number; in_progress: number; processing: boolean }>(
-      `/manager/queue-status?client_id=${encodeURIComponent(execution.clientId)}`
-    );
-    if (queue.processing || queue.total > 0) {
-      execution.sawActivity = true;
-      execution.idlePolls = 0;
-    } else if (execution.sawActivity) {
-      // Legacy Manager broadcasts per-task results over the WebSocket right before
-      // draining the queue, so only wrap up after two consecutive idle polls.
-      execution.idlePolls += 1;
-    }
-    execution.done = Math.min(queue.done, execution.total);
-    execution.tasks.forEach((task, index) => {
-      if (task.state === "success" || task.state === "failed") return;
-      task.state = index < execution.done ? "unknown" : index === execution.done && queue.processing ? "installing" : "queued";
-    });
-    if (execution.sawActivity && execution.idlePolls >= 2) {
-      await finalizeDependencyExecution(key);
-      return;
-    }
-  } catch {
-    // A missed progress poll only drops one frame of feedback; the Manager queue keeps installing.
-  }
-  dependencyTimers[key] = window.setTimeout(() => void pollDependencyExecution(key), 1000);
-}
-async function finalizeDependencyExecution(key: string) {
-  const execution = dependencyExecutions[key];
-  if (!execution || execution.finished) return;
-  if (status.value?.manager.api === "v2") {
-    try {
-      const history = await api<{ items: Record<string, { outcome: string; message: string }> }>(
-        `/manager/queue-history?client_id=${encodeURIComponent(execution.clientId)}`
-      );
-      for (const task of execution.tasks) {
-        const item = history.items[task.registryId];
-        if (!item) continue;
-        task.state = item.outcome === "success" ? "success" : item.outcome === "failed" ? "failed" : "unknown";
-        task.message = item.outcome === "failed" ? item.message : "";
-      }
-    } catch {
-      // Without history the tasks stay "unknown" and the UI points the user at the console.
-    }
-  }
-  for (const task of execution.tasks) {
-    if (task.state === "installing" || task.state === "queued") task.state = "unknown";
-  }
-  execution.done = execution.total;
-  execution.finished = true;
-  maybeCloseManagerSocket();
-  // Installed states changed, so the cached plan (and its status badges) is stale.
-  if (selected.value && activeDetailVersion.value && key === dependencyKey(selected.value, activeDetailVersion.value)) {
-    try {
-      await fetchDependencyPlan(selected.value, activeDetailVersion.value);
-    } catch {
-      // The badges simply refresh on the next manual check.
-    }
-  }
 }
 function ensureManagerSocket() {
   if (managerSocket && managerSocket.readyState <= WebSocket.OPEN) return;
@@ -748,33 +699,38 @@ function ensureManagerSocket() {
   socket.addEventListener("message", (event) => {
     let payload: { type?: string; data?: Record<string, unknown> };
     try { payload = JSON.parse(String(event.data)); } catch { return; }
-    if (payload?.type !== "cm-queue-status" || !payload.data) return;
-    handleManagerQueueEvent(payload.data);
+    if (payload.type === "cm-queue-status" && payload.data) handleManagerQueueEvent(payload.data);
   });
   managerSocket = socket;
 }
 function handleManagerQueueEvent(data: Record<string, unknown>) {
-  // Legacy Manager only broadcasts per-task results via nodepack_result when the queue drains
-  // (ui_id is the registry_id we queued with).
   if (data.status !== "done" || typeof data.nodepack_result !== "object" || !data.nodepack_result) return;
   const results = data.nodepack_result as Record<string, unknown>;
-  for (const execution of Object.values(dependencyExecutions)) {
-    if (execution.finished) continue;
-    for (const task of execution.tasks) {
-      const message = results[task.registryId];
-      if (typeof message !== "string") continue;
-      task.state = message === "success" ? "success" : "failed";
-      task.message = message === "success" ? "" : message;
+  for (const operation of operations.value) {
+    if (operation.kind !== "dependencies" || !Array.isArray(operation.result?.tasks)) continue;
+    for (const task of operation.result.tasks as DependencyResult[]) {
+      const registryId = String(task.registry_id || "");
+      const message = results[registryId];
+      if (!registryId || typeof message !== "string") continue;
+      const override = {
+        state: message === "success" ? "success" : "failed",
+        message: message === "success" ? "" : message,
+      } as const;
+      pendingManagerTaskOverrides[registryId] = override;
+      managerTaskOverrides[`${operation.id}:${registryId}`] = override;
     }
   }
 }
-function maybeCloseManagerSocket() {
-  if (Object.values(dependencyExecutions).some((execution) => !execution.finished)) return;
-  managerSocket?.close();
-  managerSocket = null;
-}
 async function pollOperations() {
   operations.value = (await api<{ items: Operation[] }>("/operations")).items;
+  for (const [key, operationId] of Object.entries(dependencyOperationIds)) {
+    const operation = operations.value.find((item) => item.id === operationId);
+    if (!operation || operation.status === "running" || dependencyOperationSynced[key]) continue;
+    dependencyOperationSynced[key] = true;
+    if (selected.value && activeDetailVersion.value && key === dependencyKey(selected.value, activeDetailVersion.value)) {
+      try { await fetchDependencyPlan(selected.value, activeDetailVersion.value); } catch { /* manual check remains available */ }
+    }
+  }
   if (operations.value.some((item) => item.status === "running")) {
     window.clearTimeout(operationTimer);
     operationTimer = window.setTimeout(pollOperations, 1000);
@@ -1201,7 +1157,6 @@ onBeforeUnmount(() => {
   clearTimeout(operationTimer);
   clearTimeout(loginTimer);
   clearTimeout(copiedTimer);
-  Object.values(dependencyTimers).forEach((timer) => clearTimeout(timer));
   managerSocket?.close();
 });
 </script>
@@ -1257,8 +1212,8 @@ onBeforeUnmount(() => {
         <div v-if="notice" class="message success">
           <CheckCircle2 :size="18" /><span>{{ notice }}</span><button :title="t('close')" :aria-label="t('close')" @click="notice = ''"><X :size="17" /></button>
         </div>
-        <div v-if="status && !status.manager.available" class="message warning">
-          <TriangleAlert :size="18" /><span>{{ t("managerUnavailable") }}</span>
+        <div v-if="status && !status.git.available && tab === 'publish'" class="message warning">
+          <TriangleAlert :size="18" /><span>{{ t("gitUnavailable") }}</span>
         </div>
         <div v-if="status && !status.github.configured && tab === 'publish'" class="message warning">
           <TriangleAlert :size="18" /><span>{{ t("githubNotConfigured") }}</span>
@@ -1427,7 +1382,7 @@ onBeforeUnmount(() => {
                     <div v-if="resourceScanPending" class="resource-scan-pending"><RefreshCw :size="17" />{{ t("scanningCanvasResources") }}</div>
 
                     <div class="resource-review-group">
-                      <div class="resource-review-heading"><span><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong><em>{{ customNodeCount }}</em></span><small>{{ dependencyScanError || t("managerPluginSelectionHint") }}</small></div>
+                      <div class="resource-review-heading"><span><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong><em>{{ customNodeCount }}</em></span><small>{{ dependencyScanError || t("gitPluginSelectionHint") }}</small></div>
                       <div v-if="!resourceScanPending && !dependencyScanError" class="plugin-selection-hint">
                         <TriangleAlert :size="17" />
                         <span><strong>{{ t("pluginSelectionTitle") }}</strong><small>{{ t("pluginSelectionDescription") }}</small></span>
@@ -1703,19 +1658,20 @@ onBeforeUnmount(() => {
             <div v-if="activeDetailVersion.custom_nodes.length || activeDetailVersion.inputs?.length || loraAssets(activeDetailVersion).length" class="resource-groups">
               <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group">
                 <div class="resource-group-heading"><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong></div>
-                <div v-for="node in activeDetailVersion.custom_nodes" :key="node.registry_id || node.name" class="asset-row">
-                  <template v-for="entry in [dependencyPlanEntry(node)]" :key="`plan-${node.registry_id || node.name}`">
+                <div v-for="node in activeDetailVersion.custom_nodes" :key="node.source_url || node.registry_id || node.name" class="asset-row">
+                  <template v-for="entry in [dependencyPlanEntry(node)]" :key="`plan-${node.source_url || node.registry_id || node.name}`">
                     <span>
-                      <CheckCircle2 v-if="entry && (entry.action === 'keep' || entry.action === 'newer')" :size="15" class="dep-tone-ok" />
+                      <CheckCircle2 v-if="entry && entry.action === 'keep'" :size="15" class="dep-tone-ok" />
                       <CircleX v-else-if="entry && entry.action === 'install'" :size="15" class="dep-tone-missing" />
                       <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'conflict')" :size="15" class="dep-tone-warn" />
                       <PackageOpen v-else :size="15" />
-                      <strong>{{ node.name }}</strong><small>{{ node.registry_id || t("registryNotMatchedComfy") }}</small>
+                      <strong>{{ node.name }}</strong><small>{{ node.source_url || t("githubSourceUnavailable") }}</small>
                     </span>
-                    <em>{{ node.version || (node.manual ? t("manualInstall") : t("anyVersion")) }}<b
+                    <em>{{ node.commit ? t("gitCommitVersion", { version: node.commit.slice(0, 8) }) : t("gitRevisionUnavailable") }}<b
                       v-if="entry" class="dependency-status"
-                      :data-tone="entry.action === 'keep' || entry.action === 'newer' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
+                      :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
                     >{{ t(dependencyActionLabels[entry.action]) }}</b></em>
+                    <small v-if="entry && entry.warning_code" class="dependency-warning">{{ dependencyWarning(entry) }}</small>
                   </template>
                 </div>
               </section>
@@ -1743,25 +1699,18 @@ onBeforeUnmount(() => {
             </details>
 
           <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)]" class="dependency-plan">
-            <div v-if="!status?.manager.available || !status?.manager.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("managerUnavailable") }}</span></div>
+            <div v-if="!status?.git.available && !status?.manager?.available" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
             <label v-for="(entry, index) in dependencyPlans[dependencyKey(selected, activeDetailVersion)]" :key="dependencyActionKey(entry, index)" class="dependency-row">
-              <input v-if="['install','upgrade','newer'].includes(entry.action)" type="checkbox"
+              <input v-if="['install','upgrade'].includes(entry.action)" type="checkbox"
                 :checked="selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.includes(dependencyActionKey(entry, index))"
-                :disabled="!status?.manager.available || !status?.manager.compatible"
+                :disabled="!dependencyInstallerAvailable(entry)"
                 @change="toggleDependencyAction(dependencyKey(selected, activeDetailVersion), dependencyActionKey(entry, index), ($event.target as HTMLInputElement).checked)" />
-              <span><strong>{{ entry.name }}</strong><small>{{ entry.installed || "—" }} → {{ entry.requested || "latest" }} · {{ entry.action }}<template v-if="entry.warning"> · {{ entry.warning }}</template></small></span>
-            </label>
-            <label class="confirm-row">
-              <input type="checkbox"
-                :checked="dependencyAlign(dependencyKey(selected, activeDetailVersion))"
-                :disabled="!status?.manager.available || !status?.manager.compatible"
-                @change="toggleDependencyAlign(dependencyKey(selected, activeDetailVersion), ($event.target as HTMLInputElement).checked)" />
-              <span>{{ t("alignAuthorVersions") }}<small>{{ t("alignAuthorVersionsHint") }}</small></span>
+              <span><strong>{{ entry.name }}</strong><small>{{ entry.installed || "—" }} → {{ entry.requested || t("gitRevisionUnavailable") }} · {{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }} · {{ t(dependencyActionLabels[entry.action]) }}<template v-if="entry.warning_code"> · {{ dependencyWarning(entry) }}</template></small></span>
             </label>
             <div v-if="activeCoreMismatch" class="message warning"><TriangleAlert :size="16" /><span>{{ t("coreVersionMismatchDetail", { required: comfyuiCompatibilityLabel(activeDetailVersion), current: status?.comfyui_version || "—" }) }}</span></div>
             <label class="confirm-row"><input v-model="dependencyConfirmed[dependencyKey(selected, activeDetailVersion)]" type="checkbox" />{{ t("confirmEnvironment") }}</label>
             <button class="primary wide"
-              :disabled="!dependencyConfirmed[dependencyKey(selected, activeDetailVersion)] || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.length || !status?.manager.available || !status?.manager.compatible || !!busy"
+              :disabled="!dependencyConfirmed[dependencyKey(selected, activeDetailVersion)] || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.length || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning"
               @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("execute") }}</button>
 
             <div v-if="activeDependencyExecution" class="dependency-execution">
@@ -1780,10 +1729,13 @@ onBeforeUnmount(() => {
                   <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
                 </li>
               </ul>
+              <details v-if="activeDependencyExecution.logs.length" class="dependency-logs" open>
+                <summary>{{ t("installLogs", { count: activeDependencyExecution.logs.length }) }}</summary>
+                <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
+              </details>
               <div v-if="activeDependencyExecution.finished" class="dependency-result">
                 <span>{{ dependencyExecutionFailures ? t("installFinishedWithFailures", { count: dependencyExecutionFailures }) : t("installFinished") }}</span>
                 <span>{{ t("restartToApply") }}</span>
-                <span v-if="activeDependencyExecution.tasks.some((task) => task.state === 'unknown')">{{ t("installDetailConsoleHint") }}</span>
               </div>
             </div>
           </div>
@@ -1822,13 +1774,13 @@ onBeforeUnmount(() => {
       <div class="drawer-head"><div><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button></div>
       <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
       <article v-for="item in operations" :key="item.id" class="operation">
-        <div><strong>{{ item.kind }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
-        <template v-if="item.status === 'running' && item.progress?.total">
+        <div><strong>{{ item.kind === "dependencies" ? t("dependencyInstall") : item.kind }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
+        <template v-if="item.progress?.total">
           <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
             :aria-valuenow="Math.round(progressPercent(item.progress))">
             <i :style="{ width: `${progressPercent(item.progress)}%` }" />
           </div>
-          <small class="progress-copy">{{ humanBytes(item.progress.received) }} / {{ humanBytes(item.progress.total) }}</small>
+          <small class="progress-copy">{{ item.progress_mode === "tasks" ? t("installProgress", { done: item.progress.received, total: item.progress.total }) : `${humanBytes(item.progress.received)} / ${humanBytes(item.progress.total)}` }}</small>
         </template>
         <pre v-if="item.error_code || item.logs.length">{{ operationErrorMessage(item) }}</pre>
       </article>

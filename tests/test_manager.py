@@ -1,298 +1,74 @@
-import sys
-import types
-import unittest
+from pathlib import Path
+from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
 from workflow_hub import manager as manager_module
-from workflow_hub.manager import ManagerAdapter, local_manager_status
+from workflow_hub.manager import GitAdapter, GitRepository, _canonical_source, local_git_status
 
 
-class FakeResponse:
-    def __init__(self, status, text="", payload=None):
-        self.status = status
-        self._text = text
-        self._payload = payload
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return False
-
-    async def text(self):
-        return self._text
-
-    async def json(self):
-        return self._payload
+COMMIT_A = "a" * 40
+COMMIT_B = "b" * 40
+SOURCE = "https://github.com/example/pack"
 
 
-class FakeSession:
-    def __init__(self, responses, record):
-        self._responses = responses
-        self._record = record
+class GitSourceTests(IsolatedAsyncioTestCase):
+    def test_canonical_source_accepts_public_github_forms(self):
+        self.assertEqual(_canonical_source("https://github.com/example/pack.git"), SOURCE)
+        self.assertEqual(_canonical_source("example/pack"), SOURCE)
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return False
-
-    def get(self, url, **kwargs):
-        return self._respond("GET", url, None)
-
-    def post(self, url, json=None, **kwargs):
-        return self._respond("POST", url, json)
-
-    def _respond(self, method, url, payload):
-        self._record.append((method, url, payload))
-        key = (method, url)
-        if key not in self._responses:
-            raise AssertionError(f"unexpected request: {method} {url}")
-        return self._responses[key]
-
-
-def fake_session_factory(responses, record):
-    return lambda *args, **kwargs: FakeSession(responses, record)
-
-
-class ManagerInstalledDependencyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_installed_dependencies_returns_all_plugins_in_name_order(self):
-        adapter = ManagerAdapter("http://127.0.0.1:8188")
-        with patch.object(adapter, "installed", AsyncMock(return_value={
-            "pack-b": {
-                "key": "pack-b",
-                "registry_id": "pack-b",
-                "name": "Pack B",
-                "version": "2.0.0",
-                "enabled": False,
-            },
-            "pack-a": {
-                "key": "pack-a",
-                "registry_id": "pack-a",
-                "name": "Pack A",
-                "version": "1.0.0",
-                "enabled": True,
-            },
-        })):
-            dependencies = await adapter.installed_dependencies()
-
-        self.assertEqual([item["name"] for item in dependencies], ["Pack A", "Pack B"])
-        self.assertFalse(dependencies[1]["manual"])
-
-
-class ManagerVersionGateTests(unittest.TestCase):
-    def test_legacy_3x_versions_are_compatible(self):
-        self.assertTrue(manager_module._is_compatible_version((3, 0)))
-        self.assertTrue(manager_module._is_compatible_version((3, 39)))
-
-    def test_v2_requires_4_2_1(self):
-        self.assertFalse(manager_module._is_compatible_version((4, 2, 0)))
-        self.assertTrue(manager_module._is_compatible_version((4, 2, 1)))
-
-    def test_local_status_falls_back_to_top_level_manager_core(self):
-        fake = types.SimpleNamespace(version_str="V3.39")
-        missing = {"comfyui_manager": None, "comfyui_manager.glob": None, "comfyui_manager.legacy": None}
-        with patch.dict(sys.modules, missing):
-            with patch.dict(sys.modules, {"manager_core": fake}):
-                status = local_manager_status()
-        self.assertTrue(status["available"])
-        self.assertTrue(status["compatible"])
-        self.assertEqual(status["version"], "V3.39")
-
-    def test_local_status_unavailable_without_manager(self):
-        missing = {
-            "comfyui_manager": None,
-            "comfyui_manager.glob": None,
-            "comfyui_manager.legacy": None,
-            "manager_core": None,
+    def test_plan_keeps_matching_commit(self):
+        repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, False)
+        dependency = {
+            "name": "pack",
+            "source_url": SOURCE,
+            "commit": COMMIT_A,
+            "manual": True,
         }
-        with patch.dict(sys.modules, missing):
-            status = local_manager_status()
-        self.assertFalse(status["available"])
-        self.assertFalse(status["compatible"])
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[repository])):
+            result = self._run_plan([dependency])
+        self.assertEqual(result[0]["action"], "keep")
+        self.assertEqual(result[0]["installed"], COMMIT_A)
+        self.assertEqual(result[0]["requested"], COMMIT_A)
+
+    def test_plan_requests_switch_for_different_clean_commit(self):
+        repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, False)
+        dependency = {"name": "pack", "source_url": SOURCE, "commit": COMMIT_B, "manual": True}
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[repository])):
+            result = self._run_plan([dependency])
+        self.assertEqual(result[0]["action"], "upgrade")
+
+    def test_plan_blocks_dirty_repository(self):
+        repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, True)
+        dependency = {"name": "pack", "source_url": SOURCE, "commit": COMMIT_B, "manual": True}
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[repository])):
+            result = self._run_plan([dependency])
+        self.assertEqual(result[0]["action"], "manual")
+        self.assertEqual(result[0]["warning_code"], "dependencies.local_changes")
+
+    def test_plan_skips_legacy_registry_dependency(self):
+        dependency = {"registry_id": "old-pack", "name": "Old Pack", "version": "1.0.0", "manual": False}
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[])):
+            result = self._run_plan([dependency])
+        self.assertEqual(result, [])
+
+    async def _plan(self, dependencies):
+        return await GitAdapter().plan(dependencies)
+
+    def _run_plan(self, dependencies):
+        import asyncio
+
+        return asyncio.run(self._plan(dependencies))
 
 
-class ManagerLegacyApiTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        manager_module._flavor_cache.clear()
+class GitStatusTests(IsolatedAsyncioTestCase):
+    def test_status_reports_git_source(self):
+        with patch.object(manager_module, "_git_executable", return_value="git"):
+            self.assertEqual(local_git_status(), {"available": True, "source": "github"})
 
-    async def test_status_falls_back_to_legacy_version_endpoint(self):
-        origin = "http://127.0.0.1:8188"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(404),
-            ("GET", f"{origin}/manager/version"): FakeResponse(200, "V3.39"),
-        }
-        adapter = ManagerAdapter(origin)
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            status = await adapter.status()
-        self.assertTrue(status["available"])
-        self.assertEqual(status["api"], "legacy")
-        self.assertEqual(status["version"], "V3.39")
-
-    async def test_installed_parses_legacy_node_pack_dict(self):
-        origin = "http://127.0.0.1:8189"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(404),
-            ("GET", f"{origin}/manager/version"): FakeResponse(200, "V3.39"),
-            ("GET", f"{origin}/customnode/installed"): FakeResponse(200, payload={
-                "ComfyUI-Impact-Pack": {
-                    "ver": "8.22",
-                    "cnr_id": "comfyui-impact-pack",
-                    "aux_id": "ltdrdata/ComfyUI-Impact-Pack",
-                    "enabled": True,
-                },
-                "rgthree-comfy": {
-                    "ver": "abcdef1",
-                    "cnr_id": "",
-                    "aux_id": "rgthree/rgthree-comfy",
-                    "enabled": True,
-                },
-            }),
-        }
-        adapter = ManagerAdapter(origin)
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            installed = await adapter.installed()
-        registry_pack = installed["comfyui-impact-pack"]
-        self.assertEqual(registry_pack["version"], "8.22")
-        self.assertEqual(registry_pack["aux_id"], "ltdrdata/ComfyUI-Impact-Pack")
-        git_pack = installed["github:rgthree/rgthree-comfy"]
-        self.assertIsNone(git_pack["registry_id"])
-        self.assertEqual(git_pack["version"], "abcdef1")
-
-    async def test_installed_dependencies_does_not_query_workflow_mappings(self):
-        origin = "http://127.0.0.1:8189"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(404),
-            ("GET", f"{origin}/manager/version"): FakeResponse(200, "V3.39"),
-            ("GET", f"{origin}/customnode/installed"): FakeResponse(200, payload={
-                "Pack A": {"ver": "1.0.0", "cnr_id": "pack-a", "enabled": True},
-                "Pack B": {"ver": "2.0.0", "cnr_id": "pack-b", "enabled": False},
-            }),
-        }
-        adapter = ManagerAdapter(origin)
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            dependencies = await adapter.installed_dependencies()
-
-        self.assertEqual([item["name"] for item in dependencies], ["Pack A", "Pack B"])
-        self.assertFalse(any("getmappings" in url or url.endswith("/object_info") for _, url, _ in record))
-
-    async def test_execute_queues_legacy_installs_then_starts_queue(self):
-        origin = "http://127.0.0.1:8190"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(404),
-            ("GET", f"{origin}/manager/version"): FakeResponse(200, "V3.39"),
-            ("POST", f"{origin}/manager/queue/install"): FakeResponse(200),
-            ("GET", f"{origin}/manager/queue/start"): FakeResponse(201),
-        }
-        adapter = ManagerAdapter(origin)
-        actions = [{"action": "install", "registry_id": "pack-a", "name": "Pack A", "requested": "1.2.3"}]
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            queued = await adapter.execute(actions, "workflow-hub")
-        self.assertEqual(len(queued), 1)
-        install_calls = [entry for entry in record if entry[0] == "POST" and entry[1].endswith("/manager/queue/install")]
-        self.assertEqual(len(install_calls), 1)
-        payload = install_calls[0][2]
-        self.assertEqual(payload["id"], "pack-a")
-        self.assertEqual(payload["version"], "1.2.3")
-        self.assertEqual(payload["selected_version"], "1.2.3")
-        self.assertEqual(payload["ui_id"], "pack-a")
-        self.assertEqual(payload["channel"], "default")
-        self.assertEqual(payload["mode"], "cache")
-        self.assertFalse(payload["skip_post_install"])
-        self.assertIn(("GET", f"{origin}/manager/queue/start", None), record)
-
-
-    async def test_queue_status_normalizes_legacy_counts(self):
-        origin = "http://127.0.0.1:8191"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(404),
-            ("GET", f"{origin}/manager/version"): FakeResponse(200, "V3.39"),
-            ("GET", f"{origin}/manager/queue/status"): FakeResponse(200, payload={
-                "total_count": 3, "done_count": 1, "in_progress_count": 1, "is_processing": True,
-            }),
-        }
-        adapter = ManagerAdapter(origin)
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            status = await adapter.queue_status("workflow-hub-x")
-        self.assertEqual(status, {"api": "legacy", "total": 3, "done": 1, "in_progress": 1, "processing": True})
-        # legacy 队列状态不支持 client_id 过滤，URL 不应带查询参数。
-        self.assertIn(("GET", f"{origin}/manager/queue/status", None), record)
-
-    async def test_queue_status_v2_sums_history_and_pending(self):
-        origin = "http://127.0.0.1:8192"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(200, '"4.2.2"'),
-            ("GET", f"{origin}/v2/manager/queue/status?client_id=wf-1"): FakeResponse(200, payload={
-                "client_id": "wf-1", "total_count": 2, "done_count": 1,
-                "in_progress_count": 1, "pending_count": 1, "is_processing": True,
-            }),
-        }
-        adapter = ManagerAdapter(origin)
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            status = await adapter.queue_status("wf-1")
-        self.assertEqual(status, {"api": "v2", "total": 3, "done": 1, "in_progress": 1, "processing": True})
-
-    async def test_queue_history_v2_normalizes_task_results(self):
-        origin = "http://127.0.0.1:8193"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(200, '"4.2.2"'),
-            ("GET", f"{origin}/v2/manager/queue/history?client_id=wf-1"): FakeResponse(200, payload={
-                "history": {
-                    "task-1": {
-                        "ui_id": "pack-a", "client_id": "wf-1", "kind": "install",
-                        "result": "success",
-                        "status": {"status_str": "success", "completed": True, "messages": []},
-                    },
-                    "task-2": {
-                        "ui_id": "pack-b", "client_id": "wf-1", "kind": "install",
-                        "result": "pip install failed",
-                        "status": {"status_str": "failed", "completed": True, "messages": []},
-                    },
-                }
-            }),
-        }
-        adapter = ManagerAdapter(origin)
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            history = await adapter.queue_history("wf-1")
-        self.assertEqual(history["pack-a"], {"outcome": "success", "message": "success"})
-        self.assertEqual(history["pack-b"], {"outcome": "failed", "message": "pip install failed"})
-
-    async def test_queue_history_legacy_returns_empty(self):
-        origin = "http://127.0.0.1:8194"
-        record = []
-        responses = {
-            ("GET", f"{origin}/v2/manager/version"): FakeResponse(404),
-            ("GET", f"{origin}/manager/version"): FakeResponse(200, "V3.39"),
-        }
-        adapter = ManagerAdapter(origin)
-        with patch.object(manager_module.aiohttp, "ClientSession", fake_session_factory(responses, record)):
-            history = await adapter.queue_history("wf-1")
-        self.assertEqual(history, {})
-
-
-class ManagerPlanTests(unittest.IsolatedAsyncioTestCase):
-    async def test_plan_has_safe_newer_and_manual_states(self):
-        adapter = ManagerAdapter("http://127.0.0.1:8188")
-        with patch.object(adapter, "installed", AsyncMock(return_value={"pack": {"version": "2.0.0"}})):
-            result = await adapter.plan([
-                {"registry_id": "pack", "name": "Pack", "version": "1.0.0", "required": True, "manual": False},
-                {"registry_id": None, "name": "Unknown", "required": True, "manual": True},
-            ])
-        self.assertEqual(result[0]["action"], "newer")
-        self.assertEqual(result[1]["action"], "manual")
-
-    async def test_conflicting_workflow_versions_are_never_automatic(self):
-        adapter = ManagerAdapter("http://127.0.0.1:8188")
-        with patch.object(adapter, "installed", AsyncMock(return_value={})):
-            result = await adapter.plan([
-                {"registry_id": "pack", "name": "Pack", "version": "1.0.0", "required": True, "manual": False},
-                {"registry_id": "pack", "name": "Pack", "version": "2.0.0", "required": True, "manual": False},
-            ])
-        self.assertEqual([item["action"] for item in result], ["conflict", "conflict"])
+    async def test_installed_dependencies_are_locked_to_commits(self):
+        repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, False)
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[repository])):
+            result = await GitAdapter().installed_dependencies()
+        self.assertEqual(result[0]["source_url"], SOURCE)
+        self.assertEqual(result[0]["commit"], COMMIT_A)
+        self.assertTrue(result[0]["manual"])

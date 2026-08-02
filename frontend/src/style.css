@@ -3214,6 +3214,30 @@ code {
   flex-wrap: wrap;
 }
 
+.dependency-logs {
+  overflow: hidden;
+  border-radius: 10px;
+  background: rgb(0 0 0 / 18%);
+}
+
+.dependency-logs summary {
+  padding: 9px 11px;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.dependency-logs pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 11px;
+  color: var(--muted);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .dependency-task-spin {
   animation: dependency-spin 1s linear infinite;
 }

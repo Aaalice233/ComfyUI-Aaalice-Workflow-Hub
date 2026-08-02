@@ -20,9 +20,9 @@ describe("translations", () => {
 
   it("interpolates dynamic values through the dictionary", () => {
     locale.value = "zh";
-    expect(t.value("managerTasksQueued", { count: 3 })).toBe("已向 Manager 提交 3 个串行任务。");
+    expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("目标目录 custom_nodes/example 已存在，未覆盖本地文件。");
     locale.value = "en";
-    expect(t.value("managerTasksQueued", { count: 3 })).toBe("Queued 3 serial Manager tasks.");
+    expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("The target directory custom_nodes/example already exists; local files were not overwritten.");
   });
 
   it("keeps localized copy and locale branching out of application surfaces", () => {
