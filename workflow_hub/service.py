@@ -20,7 +20,6 @@ from .assets import package_input_assets, scan_workflow_assets
 from .catalog import (
     BundledInput,
     Catalog,
-    ModelDependency,
     Preview,
     Repository,
     WorkflowProduct,
@@ -441,51 +440,6 @@ async def download_version(
             operation.status = "success"
             operation.result = record
             return record
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-async def download_optional_lora(model: ModelDependency, operation: Operation) -> dict[str, Any]:
-    if model.type != "loras":
-        raise UserFacingError("lora.invalid_type")
-    require_github_https(str(model.source_url))
-    roots = _folder_paths().get_folder_paths("loras")
-    if not roots:
-        raise UserFacingError("lora.directory_unavailable")
-    root = Path(roots[0]).resolve()
-    target = ensure_within(root, root / model.filename.replace("\\", "/"))
-    if target.suffix.lower() not in {".safetensors", ".ckpt", ".pt", ".bin"}:
-        raise UserFacingError("lora.unsupported_extension")
-    directory = target.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        if model.sha256 and hashlib.sha256(target.read_bytes()).hexdigest() != model.sha256:
-            raise UserFacingError("lora.existing_content_mismatch")
-        operation.stage = "complete"
-        operation.status = "success"
-        operation.result = {"path": str(target), "already_exists": True}
-        return operation.result
-    descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-hub-lora-", suffix=".tmp", dir=directory)
-    os.close(descriptor)
-    temp_path = Path(temp_name)
-    try:
-        operation.stage = "downloading"
-        await GitHubClient().download(str(model.source_url), temp_path, operation)
-        operation.stage = "verifying"
-        downloaded_hash = hashlib.sha256(temp_path.read_bytes()).hexdigest()
-        if model.sha256 and downloaded_hash != model.sha256:
-            raise UserFacingError("lora.checksum_mismatch")
-        already_exists = False
-        try:
-            os.link(temp_path, target)
-        except FileExistsError:
-            if hashlib.sha256(target.read_bytes()).hexdigest() != downloaded_hash:
-                raise UserFacingError("lora.existing_content_mismatch")
-            already_exists = True
-        operation.stage = "complete"
-        operation.status = "success"
-        operation.result = {"path": str(target), "already_exists": already_exists}
-        return operation.result
     finally:
         temp_path.unlink(missing_ok=True)
 

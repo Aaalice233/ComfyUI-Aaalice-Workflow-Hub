@@ -38,6 +38,7 @@ import {
   X,
 } from "@lucide/vue";
 import { ApiError, api, post, remove } from "./api";
+import { renderMarkdown } from "./markdown";
 import { t, type MessageKey } from "./i18n";
 import {
   publishRepositoryUrl,
@@ -60,7 +61,7 @@ type BundledInput = {
 };
 type Version = {
   version: string; published_at: string; release_tag: string; changelog: string;
-  comfyui: { minimum?: string | null; maximum?: string | null };
+  comfyui?: { minimum?: string | null; maximum?: string | null };
   package: { url: string; size: number; sha256: string };
   preview?: { url: string; sha256: string } | null;
   custom_nodes: NodeDependencyInfo[]; inputs?: BundledInput[]; models: ModelAsset[];
@@ -84,6 +85,25 @@ type Operation = {
   error_code?: string; error_params?: Record<string, string | number>;
   progress?: { received: number; total: number }; progress_mode?: "bytes" | "tasks";
   result?: Record<string, unknown>;
+};
+type CoreVersionCheck = {
+  state: "aligned" | "mismatch" | "not_declared" | "unavailable";
+  tone: "ok" | "warn" | "muted";
+  label: MessageKey;
+  detail: MessageKey;
+  params?: Record<string, string | number>;
+};
+type DownloadPreflight = {
+  item: Product;
+  version: Version;
+  core: CoreVersionCheck;
+  currentCoreVersion: string;
+  environmentError: string;
+  dependencies: DependencyPlan[];
+  dependencyError: string;
+  syncing: boolean;
+  syncOperationId: string;
+  syncError: string;
 };
 type DependencyPlan = {
   task_id?: string; registry_id?: string | null; source_url?: string | null; name: string; requested?: string | null; installed?: string | null;
@@ -109,6 +129,14 @@ type PublishCatalogProduct = {
   id: string; name: string; category: string; summary: string; description: string; tags: string[]; versions: string[];
 };
 type DependencyTaskState = DependencyResult["state"];
+type ResourceDialog = "core" | "plugins" | "images";
+type PluginDependencyCheck = {
+  state: "aligned" | "missing" | "mismatch" | "checking" | "unavailable";
+  tone: "ok" | "warn" | "missing" | "muted";
+  label: MessageKey;
+  detail: MessageKey;
+  params?: Record<string, string | number>;
+};
 
 const LAST_PUBLISH_REPOSITORY_KEY = "aaalice-workflow-hub:last-publish-repository";
 const tab = ref<"subscribe" | "publish" | "manage">("subscribe");
@@ -117,6 +145,7 @@ const sources = ref<Source[]>([]);
 const products = ref<Product[]>([]);
 const selected = ref<Product | null>(null);
 const selectedDetailVersion = ref("");
+const resourceDialog = ref<ResourceDialog | null>(null);
 const sourceUrl = ref("");
 const sourceInput = ref<HTMLInputElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -163,12 +192,12 @@ const dependencyOperationSynced = reactive<Record<string, boolean>>({});
 const publisherManagementOperationIds = reactive<Record<string, boolean>>({});
 const publisherManagementOperationSynced = reactive<Record<string, boolean>>({});
 const downloadOperationIds = reactive<Record<string, string>>({});
-const loraOperationIds = reactive<Record<string, string>>({});
 const managerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 const pendingManagerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 const managerResultSyncing = new Set<string>();
 const dependencyPlanGeneration = reactive<Record<string, number>>({});
 const dependencyPlanLoading = reactive<Record<string, boolean>>({});
+const downloadPreflight = ref<DownloadPreflight | null>(null);
 const loading = ref(true);
 let operationPollInFlight = false;
 let managerSocket: WebSocket | null = null;
@@ -210,12 +239,6 @@ const managementProgressStages: Record<string, readonly string[]> = {
   delete_workflow: ["validating", "deleting_release", "updating_repository"],
 };
 const backendErrorMessages: Record<string, MessageKey> = {
-  "lora.download_confirmation_required": "loraDownloadConfirmationRequired",
-  "lora.invalid_type": "loraInvalidType",
-  "lora.directory_unavailable": "loraDirectoryUnavailable",
-  "lora.unsupported_extension": "loraUnsupportedExtension",
-  "lora.existing_content_mismatch": "loraExistingContentMismatch",
-  "lora.checksum_mismatch": "loraChecksumMismatch",
   "dependencies.network_unavailable": "dependenciesNetworkUnavailable",
   "dependencies.git_unavailable": "dependenciesGitUnavailable",
   "dependencies.github_source_invalid": "dependenciesGithubSourceInvalid",
@@ -262,7 +285,6 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.invalid_plan": "dependenciesInvalidPlan",
   "dependencies.confirmation_required": "dependenciesConfirmationRequired",
   "dependencies.plan_changed": "dependenciesPlanChanged",
-  "lora.not_found": "loraNotFound",
   "publisher.lora_forbidden": "loraPublishForbidden",
   "publisher.confirmation_required": "publisherConfirmationRequired",
   "publisher.product_invalid": "publisherProductInvalid",
@@ -311,6 +333,15 @@ const detailVersions = computed(() =>
 );
 const activeDetailVersion = computed(() =>
   detailVersions.value.find((version) => version.version === selectedDetailVersion.value) || detailVersions.value[0] || null
+);
+const renderedActiveChangelog = computed(() => renderMarkdown(activeDetailVersion.value?.changelog || ""));
+const preflightDependencyIssues = computed(() =>
+  downloadPreflight.value?.dependencies.filter((entry) => entry.action !== "keep") || []
+);
+const preflightSyncableDependencies = computed(() =>
+  preflightDependencyIssues.value.filter((entry) => !downloadPreflight.value?.environmentError
+    && dependencyActionRequiresSelection(entry.action)
+    && dependencyInstallerAvailable(entry))
 );
 const publishStepLabels = computed(() => [t.value("stepResources"), t.value("stepDetails"), t.value("stepReview")]);
 const activeDependencyOperation = computed(() => {
@@ -483,30 +514,122 @@ function compareVersions(a: Version, b: Version) {
   return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
 }
 function compareCoreVersions(leftValue: string, rightValue: string): number | null {
-  const left = leftValue.match(/^(\d+)\.(\d+)\.(\d+)/);
-  const right = rightValue.match(/^(\d+)\.(\d+)\.(\d+)/);
+  const parse = (value: string) => {
+    const match = value.trim().match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$/);
+    return match ? [Number(match[1]), Number(match[2] || 0), Number(match[3] || 0)] : null;
+  };
+  const left = parse(leftValue);
+  const right = parse(rightValue);
   if (!left || !right) return null;
-  return Number(left[1]) - Number(right[1])
-    || Number(left[2]) - Number(right[2])
-    || Number(left[3]) - Number(right[3]);
+  return left[0] - right[0] || left[1] - right[1] || left[2] - right[2];
 }
-const activeCoreMismatch = computed(() => {
-  const current = status.value?.comfyui_version;
-  const compatibility = activeDetailVersion.value?.comfyui;
-  if (!current || !compatibility) return false;
+function coreVersionState(current: string, version: Version | null): CoreVersionCheck["state"] {
+  const compatibility = version?.comfyui;
+  if (!compatibility?.minimum && !compatibility?.maximum) return "not_declared";
+  if (!current) return "unavailable";
   const minimum = compatibility.minimum;
   const maximum = compatibility.maximum;
-  if (minimum && maximum && minimum === maximum) return current !== minimum;
+  const rangeOrder = minimum && maximum ? compareCoreVersions(minimum, maximum) : null;
+  if (minimum && maximum && (rangeOrder === null || rangeOrder > 0)) return "unavailable";
   const belowMinimum = minimum ? compareCoreVersions(current, minimum) : null;
   const aboveMaximum = maximum ? compareCoreVersions(current, maximum) : null;
-  return (belowMinimum !== null && belowMinimum < 0) || (aboveMaximum !== null && aboveMaximum > 0);
-});
-function comfyuiCompatibilityLabel(version: Version) {
-  const minimum = version.comfyui.minimum;
-  const maximum = version.comfyui.maximum;
-  if (minimum && maximum && minimum === maximum) return `ComfyUI ${minimum}`;
-  return `ComfyUI ${minimum || "—"} – ${maximum || "∞"}`;
+  if ((minimum && belowMinimum === null) || (maximum && aboveMaximum === null)) return "unavailable";
+  return (belowMinimum !== null && belowMinimum < 0) || (aboveMaximum !== null && aboveMaximum > 0) ? "mismatch" : "aligned";
 }
+function comfyuiCompatibilityLabel(version: Version) {
+  const minimum = version.comfyui?.minimum;
+  const maximum = version.comfyui?.maximum;
+  if (minimum && maximum && minimum === maximum) return t.value("coreVersionExactRequirement", { version: minimum });
+  return t.value("coreVersionRangeRequirement", { minimum: minimum || "—", maximum: maximum || "∞" });
+}
+function coreVersionCheck(version: Version | null, currentValue = status.value?.comfyui_version): CoreVersionCheck {
+  const current = currentValue?.trim() || "";
+  const state = coreVersionState(current, version);
+  if (state === "aligned") {
+    return {
+      state,
+      tone: "ok",
+      label: "coreVersionAligned",
+      detail: "coreVersionAlignedDetail",
+      params: { current, required: version ? comfyuiCompatibilityLabel(version) : "—" },
+    };
+  }
+  if (state === "mismatch") {
+    return {
+      state,
+      tone: "warn",
+      label: "coreVersionMismatch",
+      detail: "coreVersionMismatchDetail",
+      params: { current, required: version ? comfyuiCompatibilityLabel(version) : "—" },
+    };
+  }
+  if (state === "not_declared") {
+    return { state, tone: "muted", label: "coreVersionNotDeclared", detail: "coreVersionNotDeclaredDetail" };
+  }
+  return { state, tone: "muted", label: "coreVersionUnavailable", detail: "coreVersionUnavailableDetail" };
+}
+function pluginDependencyCheck(version: Version | null): PluginDependencyCheck {
+  const total = version?.custom_nodes.length || 0;
+  if (!version || !total) {
+    return {
+      state: "aligned",
+      tone: "ok",
+      label: "pluginStatusNoDependencies",
+      detail: "pluginStatusNoDependenciesDetail",
+    };
+  }
+  const item = selected.value;
+  const key = item ? dependencyKey(item, version) : "";
+  if (!item || !status.value || dependencyPlanLoading[key] || activeDependencyOperation.value?.status === "running") {
+    return {
+      state: "checking",
+      tone: "muted",
+      label: "pluginStatusChecking",
+      detail: "pluginStatusCheckingDetail",
+      params: { count: total },
+    };
+  }
+  const plan = dependencyPlans[key];
+  if (!plan || plan.length < total) {
+    return {
+      state: "unavailable",
+      tone: "muted",
+      label: "pluginStatusUnavailable",
+      detail: "pluginStatusUnavailableDetail",
+      params: { count: total },
+    };
+  }
+  const missing = plan.filter((entry) => entry.action === "install").length;
+  const attention = plan.filter((entry) => entry.action !== "keep").length;
+  if (missing) {
+    return {
+      state: "missing",
+      tone: "missing",
+      label: "pluginStatusMissing",
+      detail: "pluginStatusMissingDetail",
+      params: { count: missing, total },
+    };
+  }
+  if (attention) {
+    return {
+      state: "mismatch",
+      tone: "warn",
+      label: "pluginStatusMismatch",
+      detail: "pluginStatusMismatchDetail",
+      params: { count: attention, total },
+    };
+  }
+  return {
+    state: "aligned",
+    tone: "ok",
+    label: "pluginStatusAligned",
+    detail: "pluginStatusAlignedDetail",
+    params: { count: total },
+  };
+}
+const activeCoreCheck = computed(() => coreVersionCheck(activeDetailVersion.value));
+const activePluginCheck = computed(() => pluginDependencyCheck(activeDetailVersion.value));
+const activeImageCount = computed(() => activeDetailVersion.value?.inputs?.length || 0);
 function latest(item: Product) {
   return [...item.versions].sort(compareVersions).at(-1);
 }
@@ -520,12 +643,24 @@ function productRepositoryUrl(item: Product) {
   const path = item.repository_path.split("/").map(encodeURIComponent).join("/");
   return `${repositoryUrl(item)}/tree/HEAD/${path}`;
 }
-function releaseUrl(item: Product, version: Version) {
-  return `${repositoryUrl(item)}/releases/tag/${encodeURIComponent(version.release_tag)}`;
-}
 function openDetails(item: Product) {
   selected.value = item;
   selectedDetailVersion.value = latest(item)?.version || "";
+  resourceDialog.value = null;
+}
+function selectDetailVersion(version: string) {
+  selectedDetailVersion.value = version;
+  resourceDialog.value = null;
+}
+function openResourceDialog(kind: ResourceDialog) {
+  resourceDialog.value = kind;
+}
+function closeResourceDialog() {
+  resourceDialog.value = null;
+}
+function closeDetails() {
+  resourceDialog.value = null;
+  selected.value = null;
 }
 function productKey(item: Product | null) {
   return item ? `${item.source.owner}/${item.source.repo}/${item.id}` : "";
@@ -546,22 +681,6 @@ function isVersionDownloading(item: Product, version: Version) {
     && String(operation.metadata?.repo || "").toLowerCase() === repo
     && operation.metadata?.workflow_id === item.id
     && operation.metadata?.version === version.version
-  );
-}
-function loraDownloadKey(item: Product, version: Version, model: ModelAsset) {
-  return `${downloadKey(item, version)}:${model.type}:${model.filename}`;
-}
-function isLoraDownloading(item: Product, version: Version, model: ModelAsset) {
-  const key = loraDownloadKey(item, version, model);
-  const owner = item.source.owner.toLowerCase();
-  const repo = item.source.repo.toLowerCase();
-  return Boolean(loraOperationIds[key]) || operations.value.some((operation) =>
-    operation.kind === "lora-download" && operation.status === "running"
-    && String(operation.metadata?.owner || "").toLowerCase() === owner
-    && String(operation.metadata?.repo || "").toLowerCase() === repo
-    && operation.metadata?.workflow_id === item.id
-    && operation.metadata?.version === version.version
-    && operation.metadata?.filename === model.filename
   );
 }
 function dependencyIdentity(item: { task_id?: string; source_url?: string | null; registry_id?: string | null; name?: string }) {
@@ -638,7 +757,6 @@ function operationKindLabel(kind: string, metadata?: Record<string, unknown>) {
   const labels: Record<string, MessageKey> = {
     dependencies: "dependencyInstall",
     download: "operationDownload",
-    "lora-download": "operationLoraDownload",
     publish: "operationPublish",
     "publish-resume": "operationPublish",
   };
@@ -675,9 +793,6 @@ function moveToPublishStep(step: 1 | 2 | 3) {
     publishStep.value = step;
   }
 }
-function loraAssets(version: Version) {
-  return version.models.filter((model) => model.type === "loras");
-}
 function otherModelAssets(version: Version) {
   return version.models.filter((model) => model.type !== "loras");
 }
@@ -695,6 +810,8 @@ function handleWorkspaceShortcut(event: KeyboardEvent) {
   if (event.key === "/" && !editing && tab.value === "subscribe") {
     event.preventDefault();
     searchInput.value?.focus();
+  } else if (event.key === "Escape" && resourceDialog.value) {
+    closeResourceDialog();
   } else if (event.key === "Escape" && document.activeElement === searchInput.value && search.value) {
     search.value = "";
   }
@@ -815,33 +932,119 @@ async function removeSource(item: Source) {
     await load();
   });
 }
+function downloadNeedsPreflight(check: DownloadPreflight) {
+  return check.core.state === "mismatch"
+    || check.core.state === "unavailable"
+    || !!check.environmentError
+    || !!check.dependencyError
+    || check.dependencies.some((entry) => entry.action !== "keep");
+}
+async function inspectDownloadReadiness(item: Product, version: Version): Promise<DownloadPreflight> {
+  const key = dependencyKey(item, version);
+  dependencyAlignment[key] = true;
+  let currentCoreVersion = "";
+  let environmentError = "";
+  try {
+    const latestStatus = await api<Status>("/status");
+    status.value = latestStatus;
+    currentCoreVersion = latestStatus.comfyui_version || "";
+  } catch (reason) {
+    environmentError = errorMessage(reason);
+  }
+  let dependencies: DependencyPlan[] = [];
+  let dependencyError = "";
+  if (version.custom_nodes.length) {
+    try {
+      dependencies = await fetchDependencyPlan(item, version);
+    } catch (reason) {
+      dependencyError = errorMessage(reason);
+    }
+  } else {
+    dependencyPlans[key] = [];
+    selectedDependencyActions[key] = [];
+  }
+  return {
+    item,
+    version,
+    core: coreVersionCheck(version, environmentError ? "" : currentCoreVersion),
+    currentCoreVersion,
+    environmentError,
+    dependencies,
+    dependencyError,
+    syncing: false,
+    syncOperationId: "",
+    syncError: "",
+  };
+}
+async function startDownload(item: Product, version: Version) {
+  const result = await post<{ operation_id: string }>("/workflows/download", {
+    owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
+  });
+  downloadOperationIds[downloadKey(item, version)] = result.operation_id;
+  notice.value = `${t.value("activities")}: ${result.operation_id}`;
+  drawer.value = true;
+  await pollOperations();
+}
 async function download(item: Product, version: Version) {
   if (isVersionDownloading(item, version)) return;
-  await withBusy("download", async () => {
-    const result = await post<{ operation_id: string }>("/workflows/download", {
-      owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
-    });
-    downloadOperationIds[downloadKey(item, version)] = result.operation_id;
-    notice.value = `${t.value("activities")}: ${result.operation_id}`;
-    drawer.value = true;
-    await pollOperations();
+  let check: DownloadPreflight | null = null;
+  await withBusy("download-check", async () => {
+    check = await inspectDownloadReadiness(item, version);
   });
+  if (!check) return;
+  if (downloadNeedsPreflight(check)) {
+    downloadPreflight.value = check;
+    return;
+  }
+  await withBusy("download", () => startDownload(item, version));
 }
-async function downloadLora(item: Product, version: Version, model: ModelAsset) {
-  if (isLoraDownloading(item, version, model)) return;
-  await withBusy(`lora-${model.filename}`, async () => {
-    const result = await post<{ operation_id: string }>("/workflows/models/download", {
-      owner: item.source.owner,
-      repo: item.source.repo,
-      workflow_id: item.id,
-      version: version.version,
-      filename: model.filename,
-      confirmed: true,
-    });
-    loraOperationIds[loraDownloadKey(item, version, model)] = result.operation_id;
-    notice.value = `${t.value("activities")}: ${result.operation_id}`;
-    drawer.value = true;
-    await pollOperations();
+function closeDownloadPreflight() {
+  if (downloadPreflight.value?.syncing) return;
+  downloadPreflight.value = null;
+}
+async function skipDownloadPreflight() {
+  const check = downloadPreflight.value;
+  if (!check || check.syncing) return;
+  downloadPreflight.value = null;
+  await withBusy("download", () => startDownload(check.item, check.version));
+}
+async function retryDownloadPreflight() {
+  const check = downloadPreflight.value;
+  if (!check || check.syncing) return;
+  downloadPreflight.value = null;
+  await download(check.item, check.version);
+}
+async function syncDownloadDependencies() {
+  const check = downloadPreflight.value;
+  if (!check || check.syncing || !preflightSyncableDependencies.value.length) return;
+  const key = dependencyKey(check.item, check.version);
+  const actions = preflightSyncableDependencies.value;
+  check.syncing = true;
+  check.syncError = "";
+  await withBusy("dependency-execute", async () => {
+    try {
+      if (actions.some((entry) => entry.installer === "manager")) ensureManagerSocket();
+      const result = await post<{ operation_id: string }>("/workflows/dependencies/execute", {
+        confirmed: true,
+        version_policy: "align",
+        metadata: { workflow_key: key },
+        actions,
+      });
+      dependencyOperationIds[key] = result.operation_id;
+      dependencyOperationSynced[key] = false;
+      check.syncOperationId = result.operation_id;
+      drawer.value = true;
+      try {
+        const operation = await api<Operation>(`/operations/${result.operation_id}`);
+        operations.value = [operation, ...operations.value.filter((item) => item.id !== operation.id)];
+      } catch {
+        // The operation poll remains the source of truth if the initial detail read races the start.
+      }
+      void pollOperations();
+    } catch (reason) {
+      check.syncing = false;
+      check.syncError = errorMessage(reason);
+    }
   });
 }
 async function deleteLocalVersion(item: Product, version: Version) {
@@ -874,9 +1077,9 @@ async function loadLocalVersion(item: Product, version: Version) {
   });
 }
 async function planDependencies(item: Product, version: Version) {
-  await withBusy("dependency-plan", () => fetchDependencyPlan(item, version));
+  await withBusy("dependency-plan", async () => { await fetchDependencyPlan(item, version); });
 }
-async function fetchDependencyPlan(item: Product, version: Version) {
+async function fetchDependencyPlan(item: Product, version: Version): Promise<DependencyPlan[]> {
   const key = dependencyKey(item, version);
   const generation = (dependencyPlanGeneration[key] || 0) + 1;
   dependencyPlanGeneration[key] = generation;
@@ -888,12 +1091,13 @@ async function fetchDependencyPlan(item: Product, version: Version) {
       dependencies: version.custom_nodes,
       version_policy: alignVersions ? "align" : "warn",
     });
-    if (dependencyPlanGeneration[key] !== generation) return;
+    if (dependencyPlanGeneration[key] !== generation) return dependencyPlans[key] || [];
     dependencyPlans[key] = result.items;
     selectedDependencyActions[key] = result.items
       .map((entry) => ({ entry, id: dependencyActionKey(entry) }))
       .filter(({ entry }) => dependencyActionRequiresSelection(entry.action))
       .map(({ id }) => id);
+    return result.items;
   } catch (reason) {
     if (dependencyPlanGeneration[key] === generation) {
       delete dependencyPlans[key];
@@ -907,12 +1111,13 @@ async function fetchDependencyPlan(item: Product, version: Version) {
 async function toggleDependencyAlignment(item: Product, version: Version, enabled: boolean) {
   const key = dependencyKey(item, version);
   dependencyAlignment[key] = enabled;
-  await withBusy("dependency-plan", () => fetchDependencyPlan(item, version));
+  await withBusy("dependency-plan", async () => { await fetchDependencyPlan(item, version); });
 }
 async function autoPlanDependencies(item: Product | null, version: Version | null) {
   if (!item || !version || !version.custom_nodes.length) return;
   if (!status.value?.git.available && !status.value?.manager?.compatible) return;
-  if (dependencyPlans[dependencyKey(item, version)]) return;
+  const key = dependencyKey(item, version);
+  if (dependencyPlans[key] || dependencyPlanLoading[key]) return;
   try {
     await fetchDependencyPlan(item, version);
   } catch {
@@ -922,6 +1127,20 @@ async function autoPlanDependencies(item: Product | null, version: Version | nul
 }
 watch([selected, activeDetailVersion, status], ([item, version]) => {
   void autoPlanDependencies(item, version);
+});
+watch(operations, (items) => {
+  const check = downloadPreflight.value;
+  if (!check?.syncing || !check.syncOperationId) return;
+  const operation = items.find((item) => item.id === check.syncOperationId);
+  if (!operation || operation.status === "running" || operation.error_code === "dependencies.manager_result_unknown") return;
+  if (operation.status !== "success") {
+    check.syncing = false;
+    check.syncOperationId = "";
+    check.syncError = operationErrorMessage(operation) || t.value("dependencySyncFailed");
+    return;
+  }
+  downloadPreflight.value = null;
+  void download(check.item, check.version);
 });
 function dependencyWarning(entry: DependencyPlan) {
   if (!entry.warning_code) return "";
@@ -946,6 +1165,11 @@ const dependencyActionLabels: Record<DependencyPlan["action"], MessageKey> = {
   manual: "depStatusManual",
   unknown: "depStatusUnknown",
 };
+function dependencyActionTone(action: DependencyPlan["action"]) {
+  if (action === "install") return "missing";
+  if (action === "upgrade" || action === "downgrade" || action === "conflict") return "warn";
+  return "muted";
+}
 function dependencyInstallerAvailable(entry: DependencyPlan) {
   return entry.installer === "manager" ? !!status.value?.manager?.compatible : !!status.value?.git.available;
 }
@@ -1061,10 +1285,6 @@ async function pollOperations() {
     for (const [key, operationId] of Object.entries(downloadOperationIds)) {
       const operation = operations.value.find((item) => item.id === operationId);
       if (!operation || operation.status !== "running") delete downloadOperationIds[key];
-    }
-    for (const [key, operationId] of Object.entries(loraOperationIds)) {
-      const operation = operations.value.find((item) => item.id === operationId);
-      if (!operation || operation.status !== "running") delete loraOperationIds[key];
     }
     for (const operation of operations.value) {
       if ((operation.status === "running" || operation.error_code === "dependencies.manager_result_unknown") && operation.kind === "dependencies" && Array.isArray(operation.result?.tasks)) {
@@ -1972,9 +2192,9 @@ onBeforeUnmount(() => {
       </main>
     </section>
 
-    <div v-if="selected" class="backdrop" @click.self="selected = null">
+    <div v-if="selected" class="backdrop" @click.self="closeDetails">
       <aside class="detail">
-        <button class="icon-button close" :title="t('close')" :aria-label="t('close')" @click="selected = null"><X :size="18" /></button>
+        <button class="icon-button close" :title="t('close')" :aria-label="t('close')" @click="closeDetails"><X :size="18" /></button>
         <header class="detail-hero">
           <div v-if="productCover(selected)" class="detail-cover">
             <img :src="productCover(selected)?.url" :alt="selected.name" />
@@ -1996,38 +2216,61 @@ onBeforeUnmount(() => {
             <div class="version-rail-heading"><span>{{ t("versions") }}</span><em>{{ selected.versions.length }}</em></div>
             <button v-for="version in detailVersions" :key="version.version"
               :class="{ active: activeDetailVersion?.version === version.version }"
-              @click="selectedDetailVersion = version.version">
+              @click="selectDetailVersion(version.version)">
               <span><strong>v{{ version.version }}</strong><small>{{ new Date(version.published_at).toLocaleDateString() }}</small></span>
               <CheckCircle2 v-if="selected.downloaded_versions.includes(version.version)" :size="15" />
-              <DownloadIcon v-else :size="15" />
             </button>
           </nav>
 
           <article v-if="activeDetailVersion" class="release release-focused">
             <div class="release-overview">
-              <div>
+              <div class="release-version-summary">
                 <span class="eyebrow">{{ t("selectedVersion") }}</span>
                 <div class="release-head"><strong>v{{ activeDetailVersion.version }}</strong><span>{{ humanBytes(activeDetailVersion.package.size) }}</span></div>
                 <p class="compatibility">{{ comfyuiCompatibilityLabel(activeDetailVersion) }}</p>
               </div>
-              <a class="release-link" :href="releaseUrl(selected, activeDetailVersion)" target="_blank" rel="noopener">
-                {{ t("releasePage") }}<ExternalLink :size="14" />
-              </a>
-            </div>
-
-            <div v-if="activeCoreMismatch" class="core-version-warning">
-              <TriangleAlert :size="19" />
-              <span>
-                <strong>{{ t("coreVersionMismatch") }}</strong>
-                <small>{{ t("coreVersionMismatchDetail", {
-                  required: comfyuiCompatibilityLabel(activeDetailVersion),
-                  current: status?.comfyui_version || "—",
-                }) }}</small>
-              </span>
+              <div class="resource-status-toolbar" role="group" :aria-label="t('resourceStatusSummary')">
+                <button
+                  class="resource-status-chip"
+                  :data-tone="activeCoreCheck.tone"
+                  :title="t(activeCoreCheck.detail, activeCoreCheck.params)"
+                  :aria-label="t('resourceStatusAria', { resource: t('comfyCoreVersion'), status: t(activeCoreCheck.label, activeCoreCheck.params) })"
+                  @click="openResourceDialog('core')"
+                >
+                  <CheckCircle2 v-if="activeCoreCheck.state === 'aligned'" :size="17" />
+                  <TriangleAlert v-else-if="activeCoreCheck.state === 'mismatch'" :size="17" />
+                  <Clock v-else :size="17" />
+                  <span><small>{{ t("comfyCoreVersion") }}</small><strong>{{ t(activeCoreCheck.label, activeCoreCheck.params) }}</strong></span>
+                </button>
+                <button
+                  class="resource-status-chip"
+                  :data-tone="activePluginCheck.tone"
+                  :title="t(activePluginCheck.detail, activePluginCheck.params)"
+                  :aria-label="t('resourceStatusAria', { resource: t('requiredPlugins'), status: t(activePluginCheck.label, activePluginCheck.params) })"
+                  @click="openResourceDialog('plugins')"
+                >
+                  <CheckCircle2 v-if="activePluginCheck.state === 'aligned'" :size="17" />
+                  <CircleX v-else-if="activePluginCheck.state === 'missing'" :size="17" />
+                  <TriangleAlert v-else-if="activePluginCheck.state === 'mismatch'" :size="17" />
+                  <LoaderCircle v-else-if="activePluginCheck.state === 'checking'" :size="17" class="dependency-task-spin" />
+                  <Clock v-else :size="17" />
+                  <span><small>{{ t("requiredPlugins") }}</small><strong>{{ t(activePluginCheck.label, activePluginCheck.params) }}</strong></span>
+                </button>
+                <button
+                  class="resource-status-chip"
+                  :data-tone="activeImageCount ? 'ok' : 'muted'"
+                  :title="t(activeImageCount ? 'includedImagesDetail' : 'noBundledImagesDetail', { count: activeImageCount })"
+                  :aria-label="t('resourceStatusAria', { resource: t('includedImages'), status: t('includedImageCount', { count: activeImageCount }) })"
+                  @click="openResourceDialog('images')"
+                >
+                  <FileUp :size="17" />
+                  <span><small>{{ t("includedImages") }}</small><strong>{{ t("includedImageCount", { count: activeImageCount }) }}</strong></span>
+                </button>
+              </div>
             </div>
 
             <div class="version-actions" :class="{ 'downloaded-actions': selected.downloaded_versions.includes(activeDetailVersion.version) }">
-              <button v-if="!selected.downloaded_versions.includes(activeDetailVersion.version)" class="primary wide" :disabled="!!busy || isVersionDownloading(selected, activeDetailVersion)" @click="download(selected, activeDetailVersion)"><LoaderCircle v-if="isVersionDownloading(selected, activeDetailVersion)" :size="17" class="dependency-task-spin" /><DownloadIcon v-else :size="17" />{{ isVersionDownloading(selected, activeDetailVersion) ? t("downloading") : t("download") }}</button>
+              <button v-if="!selected.downloaded_versions.includes(activeDetailVersion.version)" class="primary wide" :disabled="!!busy || isVersionDownloading(selected, activeDetailVersion)" @click="download(selected, activeDetailVersion)"><LoaderCircle v-if="busy === 'download-check' || busy === 'download' || isVersionDownloading(selected, activeDetailVersion)" :size="17" class="dependency-task-spin" /><DownloadIcon v-else :size="17" />{{ busy === "download-check" ? t("checkingDownload") : busy === "download" || isVersionDownloading(selected, activeDetailVersion) ? t("downloading") : t("download") }}</button>
               <template v-else>
                 <button class="primary wide" :disabled="!!busy" @click="loadLocalVersion(selected, activeDetailVersion)"><FileJson :size="17" />{{ t("loadToCanvas") }}</button>
                 <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, activeDetailVersion)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
@@ -2037,124 +2280,8 @@ onBeforeUnmount(() => {
 
             <section class="release-note">
               <span>{{ t("changelog") }}</span>
-              <p class="changelog">{{ activeDetailVersion.changelog }}</p>
+              <div class="changelog markdown-body" v-html="renderedActiveChangelog"></div>
             </section>
-
-            <div class="resource-metrics">
-              <div><PackageOpen :size="17" /><span><strong>{{ activeDetailVersion.custom_nodes.length }}</strong><small>{{ t("plugins") }}</small></span></div>
-              <div><FileUp :size="17" /><span><strong>{{ activeDetailVersion.inputs?.length || 0 }}</strong><small>{{ t("includedImages") }}</small></span></div>
-              <div><TriangleAlert :size="17" /><span><strong>{{ loraAssets(activeDetailVersion).length }}</strong><small>{{ t("lora") }}</small></span></div>
-            </div>
-
-            <div v-if="activeDetailVersion.custom_nodes.length || activeDetailVersion.inputs?.length || loraAssets(activeDetailVersion).length" class="resource-groups">
-              <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group plugin-resource-group">
-                <div class="resource-group-heading dependency-group-heading">
-                  <span><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong><em>{{ activeDetailVersion.custom_nodes.length }}</em></span>
-                  <div class="resource-heading-actions">
-                    <button
-                      class="ghost compact-action dependency-refresh-action"
-                      :disabled="!!busy || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
-                      :title="t('checkPluginDependencies')"
-                      @click="planDependencies(selected, activeDetailVersion)"
-                    ><ListFilter :size="14" />{{ t("checkPluginDependencies") }}</button>
-                  </div>
-                </div>
-                <div v-if="dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]" class="dependency-inline-state"><LoaderCircle :size="15" class="dependency-task-spin" /><span>{{ t("checkingDependencies") }}</span></div>
-                <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)]" class="dependency-plan-toolbar">
-                  <div class="dependency-plan-summary">
-                    <strong>{{ t("dependencyPlanSummary", { selected: dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)), total: dependencyChangeCount(dependencyKey(selected, activeDetailVersion)) }) }}</strong>
-                    <small v-if="!dependencyChangeCount(dependencyKey(selected, activeDetailVersion))">{{ t("dependencyNoChanges") }}</small>
-                  </div>
-                  <label class="version-alignment-row"><input
-                    :checked="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] !== false"
-                    type="checkbox"
-                    @change="toggleDependencyAlignment(selected, activeDetailVersion, ($event.target as HTMLInputElement).checked)" />{{ t("alignDependencyVersions") }}</label>
-                </div>
-                <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
-                <div v-if="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] === false" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlignmentDisabledWarning") }}</span></div>
-                <template v-for="node in activeDetailVersion.custom_nodes" :key="node.source_url || node.registry_id || node.name">
-                  <template v-for="entry in [dependencyPlanEntry(node)]" :key="`plan-${node.source_url || node.registry_id || node.name}`">
-                    <div class="asset-row plugin-asset-row" :class="{ 'has-selection': entry && dependencyActionRequiresSelection(entry.action), 'dependency-selected': entry && dependencyActionRequiresSelection(entry.action) && dependencyActionSelected(dependencyKey(selected, activeDetailVersion), entry) }" @click="toggleDependencyRow(dependencyKey(selected, activeDetailVersion), entry)">
-                      <input
-                        v-if="entry && dependencyActionRequiresSelection(entry.action)"
-                        class="asset-select"
-                        type="checkbox"
-                        :aria-label="`${t('selectPlugin')}: ${node.name}`"
-                        :checked="dependencyActionSelected(dependencyKey(selected, activeDetailVersion), entry)"
-                        :disabled="!dependencyInstallerAvailable(entry)"
-                        @click.stop
-                        @change="toggleDependencyAction(dependencyKey(selected, activeDetailVersion), dependencyActionKey(entry), ($event.target as HTMLInputElement).checked)"
-                      />
-                      <span class="asset-identity">
-                        <CheckCircle2 v-if="entry && entry.action === 'keep'" :size="16" class="dep-tone-ok" />
-                        <CircleX v-else-if="entry && entry.action === 'install'" :size="16" class="dep-tone-missing" />
-                        <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict')" :size="16" class="dep-tone-warn" />
-                        <PackageOpen v-else :size="16" />
-                        <strong>{{ node.name }}</strong>
-                        <small :title="node.source_url || node.registry_id || undefined">{{ node.source_url || node.registry_id || t("githubSourceUnavailable") }}</small>
-                        <small v-if="entry && entry.warning_code" class="dependency-warning">{{ dependencyWarning(entry) }}</small>
-                      </span>
-                      <span class="asset-meta">
-                        <span class="asset-meta-line"><b v-if="entry" class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b><small :title="dependencyVersionTitle(node, entry)">{{ dependencyVersionLabel(node, entry) }}</small></span>
-                        <b
-                          v-if="entry"
-                          class="dependency-status"
-                          :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
-                        >{{ t(dependencyActionLabels[entry.action]) }}</b>
-                      </span>
-                    </div>
-                  </template>
-                </template>
-                <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && dependencyChangeCount(dependencyKey(selected, activeDetailVersion))" class="dependency-plan-actions">
-                  <button class="primary wide"
-                    :disabled="!dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)) || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
-                    @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("oneClickInstall") }}</button>
-                </div>
-
-                <div v-if="!dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)] && !dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="dependency-inline-state dependency-inline-state-muted"><TriangleAlert :size="15" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
-                <div v-if="activeDependencyExecution" class="dependency-execution">
-                  <div class="dependency-progress-head">
-                    <span>{{ t("installProgress", { done: activeDependencyExecution.done, total: activeDependencyExecution.total }) }}</span>
-                    <div class="dependency-progress"><div class="dependency-progress-bar" :style="{ width: `${Math.round((activeDependencyExecution.done / Math.max(activeDependencyExecution.total, 1)) * 100)}%` }"></div></div>
-                  </div>
-                  <ul class="dependency-tasks">
-                    <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
-                      <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="15" class="dependency-task-spin" />
-                      <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
-                      <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
-                      <Clock v-else :size="15" />
-                      <span class="dependency-task-name"><strong>{{ task.name }}</strong><small v-if="task.version">{{ task.version }}</small></span>
-                      <span class="dependency-task-state">{{ t(dependencyTaskStateKeys[task.state]) }}</span>
-                      <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
-                    </li>
-                  </ul>
-                  <details v-if="activeDependencyExecution.logs.length" class="dependency-logs" open>
-                    <summary>{{ t("installLogs", { count: activeDependencyExecution.logs.length }) }}</summary>
-                    <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
-                  </details>
-                  <div v-if="activeDependencyExecution.finished" class="dependency-result">
-                    <span v-if="dependencyExecutionFailures">{{ t("installFinishedWithFailures", { count: dependencyExecutionFailures }) }}</span>
-                    <span v-else>{{ t("installFinished") }}</span>
-                    <span v-if="!dependencyExecutionFailures">{{ t("restartToApply") }}</span>
-                    <pre v-if="dependencyExecutionFailures && activeDependencyOperation?.error_code">{{ operationErrorMessage(activeDependencyOperation) }}</pre>
-                  </div>
-                </div>
-              </section>
-              <section v-if="activeDetailVersion.inputs?.length" class="resource-group supporting-resource-group" :class="{ 'resource-group-wide': !loraAssets(activeDetailVersion).length }">
-                <div class="resource-group-heading"><FileUp :size="16" /><strong>{{ t("includedImages") }}</strong></div>
-                <div v-for="input in activeDetailVersion.inputs" :key="input.archive" class="asset-row">
-                  <span><FileUp :size="15" /><strong>{{ input.source }}</strong><small>{{ t("referenceCount", { count: input.node_ids.length }) }}</small></span>
-                  <em>{{ humanBytes(input.size) }}</em>
-                </div>
-              </section>
-              <section v-if="loraAssets(activeDetailVersion).length" class="resource-group supporting-resource-group" :class="{ 'resource-group-wide': !activeDetailVersion.inputs?.length }">
-                <div class="resource-group-heading"><TriangleAlert :size="16" /><strong>{{ t("optionalLoras") }}</strong><small>{{ t("downloadIndividually") }}</small></div>
-                <div v-for="model in loraAssets(activeDetailVersion)" :key="`${model.type}:${model.filename}`" class="model-asset">
-                  <span><strong>{{ model.name }}</strong><small>{{ model.filename }}</small></span>
-                  <button class="secondary" :disabled="!!busy || isLoraDownloading(selected, activeDetailVersion, model)" @click="downloadLora(selected, activeDetailVersion, model)"><LoaderCircle v-if="isLoraDownloading(selected, activeDetailVersion, model)" :size="15" class="dependency-task-spin" /><DownloadIcon v-else :size="15" />{{ isLoraDownloading(selected, activeDetailVersion, model) ? t("downloading") : t("download") }}</button>
-                </div>
-              </section>
-            </div>
 
             <details v-if="otherModelAssets(activeDetailVersion).length" class="model-assets"><summary>{{ t("models") }} ({{ otherModelAssets(activeDetailVersion).length }})</summary>
               <div v-for="model in otherModelAssets(activeDetailVersion)" :key="`${model.type}:${model.filename}`" class="model-asset">
@@ -2166,6 +2293,225 @@ onBeforeUnmount(() => {
         </article>
         </div>
       </aside>
+    </div>
+
+    <div v-if="selected && activeDetailVersion && resourceDialog" class="backdrop resource-detail-backdrop" @click.self="closeResourceDialog">
+      <section v-if="resourceDialog === 'core'" class="resource-detail-dialog" role="dialog" aria-modal="true" :aria-label="t('comfyCoreVersion')">
+        <header class="resource-dialog-head">
+          <div class="resource-dialog-title">
+            <span class="section-icon"><ActivityIcon :size="19" /></span>
+            <div>
+              <h2>{{ t("comfyCoreVersion") }}</h2>
+              <p>{{ t(activeCoreCheck.label, activeCoreCheck.params) }}</p>
+            </div>
+          </div>
+          <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="closeResourceDialog"><X :size="18" /></button>
+        </header>
+        <div class="resource-dialog-content">
+          <div class="core-version-summary resource-dialog-core-summary" :data-state="activeCoreCheck.state">
+            <div class="core-version-value">
+              <small>{{ t("coreVersionCurrent") }}</small>
+              <strong>{{ status?.comfyui_version || t("detecting") }}</strong>
+            </div>
+            <ArrowRight :size="16" class="core-version-arrow" />
+            <div class="core-version-value">
+              <small>{{ t("coreVersionRequired") }}</small>
+              <strong>{{ comfyuiCompatibilityLabel(activeDetailVersion) }}</strong>
+            </div>
+          </div>
+          <div class="dependency-inline-state core-version-state" :data-tone="activeCoreCheck.tone">
+            <CheckCircle2 v-if="activeCoreCheck.state === 'aligned'" :size="15" />
+            <TriangleAlert v-else-if="activeCoreCheck.state === 'mismatch'" :size="15" />
+            <Clock v-else :size="15" />
+            <span>{{ t(activeCoreCheck.detail, activeCoreCheck.params) }}</span>
+          </div>
+          <p class="resource-dialog-note">{{ t("coreVersionManualAction") }}</p>
+        </div>
+      </section>
+
+      <section v-else-if="resourceDialog === 'plugins' && activeDetailVersion" class="resource-detail-dialog resource-detail-dialog-wide" role="dialog" aria-modal="true" :aria-label="t('requiredPlugins')">
+        <header class="resource-dialog-head">
+          <div class="resource-dialog-title">
+            <span class="section-icon"><PackageOpen :size="19" /></span>
+            <div>
+              <h2>{{ t("requiredPlugins") }} <em>{{ activeDetailVersion.custom_nodes.length }}</em></h2>
+              <p>{{ t(activePluginCheck.detail, activePluginCheck.params) }}</p>
+            </div>
+          </div>
+          <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="closeResourceDialog"><X :size="18" /></button>
+        </header>
+        <div class="resource-dialog-content">
+          <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group plugin-resource-group resource-dialog-resource-group">
+            <div class="resource-group-heading dependency-group-heading">
+              <span><ListFilter :size="16" /><strong>{{ t("dependencyDetails") }}</strong></span>
+              <div class="resource-heading-actions">
+                <button
+                  class="ghost compact-action dependency-refresh-action"
+                  :disabled="!!busy || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
+                  :title="t('checkPluginDependencies')"
+                  @click="planDependencies(selected, activeDetailVersion)">
+                  <ListFilter :size="14" />{{ t("checkPluginDependencies") }}
+                </button>
+              </div>
+            </div>
+            <div v-if="dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]" class="dependency-inline-state"><LoaderCircle :size="15" class="dependency-task-spin" /><span>{{ t("checkingDependencies") }}</span></div>
+            <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)]" class="dependency-plan-toolbar">
+              <div class="dependency-plan-summary">
+                <strong>{{ t("dependencyPlanSummary", { selected: dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)), total: dependencyChangeCount(dependencyKey(selected, activeDetailVersion)) }) }}</strong>
+                <small v-if="!dependencyChangeCount(dependencyKey(selected, activeDetailVersion))">{{ t("dependencyNoChanges") }}</small>
+              </div>
+              <label class="version-alignment-row"><input
+                :checked="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] !== false"
+                type="checkbox"
+                @change="toggleDependencyAlignment(selected, activeDetailVersion, ($event.target as HTMLInputElement).checked)" />{{ t("alignDependencyVersions") }}</label>
+            </div>
+            <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
+            <div v-if="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] === false" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlignmentDisabledWarning") }}</span></div>
+            <template v-for="node in activeDetailVersion.custom_nodes" :key="node.source_url || node.registry_id || node.name">
+              <template v-for="entry in [dependencyPlanEntry(node)]" :key="`plan-${node.source_url || node.registry_id || node.name}`">
+                <div class="asset-row plugin-asset-row" :class="{ 'has-selection': entry && dependencyActionRequiresSelection(entry.action), 'dependency-selected': entry && dependencyActionRequiresSelection(entry.action) && dependencyActionSelected(dependencyKey(selected, activeDetailVersion), entry) }" @click="toggleDependencyRow(dependencyKey(selected, activeDetailVersion), entry)">
+                  <input
+                    v-if="entry && dependencyActionRequiresSelection(entry.action)"
+                    class="asset-select"
+                    type="checkbox"
+                    :aria-label="`${t('selectPlugin')}: ${node.name}`"
+                    :checked="dependencyActionSelected(dependencyKey(selected, activeDetailVersion), entry)"
+                    :disabled="!dependencyInstallerAvailable(entry)"
+                    @click.stop
+                    @change="toggleDependencyAction(dependencyKey(selected, activeDetailVersion), dependencyActionKey(entry), ($event.target as HTMLInputElement).checked)"
+                  />
+                  <span class="asset-identity">
+                    <CheckCircle2 v-if="entry && entry.action === 'keep'" :size="16" class="dep-tone-ok" />
+                    <CircleX v-else-if="entry && entry.action === 'install'" :size="16" class="dep-tone-missing" />
+                    <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict')" :size="16" class="dep-tone-warn" />
+                    <PackageOpen v-else :size="16" />
+                    <strong>{{ node.name }}</strong>
+                    <small :title="node.source_url || node.registry_id || undefined">{{ node.source_url || node.registry_id || t("githubSourceUnavailable") }}</small>
+                    <small v-if="entry && entry.warning_code" class="dependency-warning">{{ dependencyWarning(entry) }}</small>
+                  </span>
+                  <span class="asset-meta">
+                    <span class="asset-meta-line"><b v-if="entry" class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b><small :title="dependencyVersionTitle(node, entry)">{{ dependencyVersionLabel(node, entry) }}</small></span>
+                    <b
+                      v-if="entry"
+                      class="dependency-status"
+                      :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
+                    >{{ t(dependencyActionLabels[entry.action]) }}</b>
+                  </span>
+                </div>
+              </template>
+            </template>
+            <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && dependencyChangeCount(dependencyKey(selected, activeDetailVersion))" class="dependency-plan-actions">
+              <button class="primary wide"
+                :disabled="!dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)) || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
+                @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("oneClickInstall") }}</button>
+            </div>
+            <div v-if="!dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)] && !dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="dependency-inline-state dependency-inline-state-muted"><TriangleAlert :size="15" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
+            <div v-if="activeDependencyExecution" class="dependency-execution">
+              <div class="dependency-progress-head">
+                <span>{{ t("installProgress", { done: activeDependencyExecution.done, total: activeDependencyExecution.total }) }}</span>
+                <div class="dependency-progress"><div class="dependency-progress-bar" :style="{ width: `${Math.round((activeDependencyExecution.done / Math.max(activeDependencyExecution.total, 1)) * 100)}%` }"></div></div>
+              </div>
+              <ul class="dependency-tasks">
+                <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
+                  <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="15" class="dependency-task-spin" />
+                  <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
+                  <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
+                  <Clock v-else :size="15" />
+                  <span class="dependency-task-name"><strong>{{ task.name }}</strong><small v-if="task.version">{{ task.version }}</small></span>
+                  <span class="dependency-task-state">{{ t(dependencyTaskStateKeys[task.state]) }}</span>
+                  <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
+                </li>
+              </ul>
+              <details v-if="activeDependencyExecution.logs.length" class="dependency-logs" open>
+                <summary>{{ t("installLogs", { count: activeDependencyExecution.logs.length }) }}</summary>
+                <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
+              </details>
+              <div v-if="activeDependencyExecution.finished" class="dependency-result">
+                <span v-if="dependencyExecutionFailures">{{ t("installFinishedWithFailures", { count: dependencyExecutionFailures }) }}</span>
+                <span v-else>{{ t("installFinished") }}</span>
+                <span v-if="!dependencyExecutionFailures">{{ t("restartToApply") }}</span>
+                <pre v-if="dependencyExecutionFailures && activeDependencyOperation?.error_code">{{ operationErrorMessage(activeDependencyOperation) }}</pre>
+              </div>
+            </div>
+          </section>
+          <div v-else class="dependency-empty"><CheckCircle2 :size="17" /><span>{{ t("pluginStatusNoDependenciesDetail") }}</span></div>
+        </div>
+      </section>
+
+      <section v-else class="resource-detail-dialog" role="dialog" aria-modal="true" :aria-label="t('includedImages')">
+        <header class="resource-dialog-head">
+          <div class="resource-dialog-title">
+            <span class="section-icon"><FileUp :size="19" /></span>
+            <div>
+              <h2>{{ t("includedImages") }}</h2>
+              <p>{{ t(activeImageCount ? "includedImagesDetail" : "noBundledImagesDetail", { count: activeImageCount }) }}</p>
+            </div>
+          </div>
+          <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="closeResourceDialog"><X :size="18" /></button>
+        </header>
+        <div class="resource-dialog-content">
+          <div v-if="activeImageCount" class="resource-dialog-list">
+            <div v-for="input in activeDetailVersion.inputs || []" :key="input.archive" class="asset-row">
+              <span><FileUp :size="15" /><strong>{{ input.source }}</strong><small>{{ t("referenceCount", { count: input.node_ids.length }) }}</small></span>
+              <em>{{ humanBytes(input.size) }}</em>
+            </div>
+          </div>
+          <div v-else class="dependency-empty"><CheckCircle2 :size="17" /><span>{{ t("noBundledImagesHint") }}</span></div>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="downloadPreflight" class="backdrop download-preflight-backdrop" @click.self="closeDownloadPreflight">
+      <section class="download-check-dialog" role="dialog" aria-modal="true" aria-labelledby="download-check-title">
+        <header class="download-check-head">
+          <div class="download-check-title">
+            <span class="section-icon"><ShieldCheck :size="19" /></span>
+            <div>
+              <h2 id="download-check-title">{{ t("downloadCheckTitle") }}</h2>
+              <p>{{ t("downloadCheckDescription", { name: downloadPreflight.item.name, version: downloadPreflight.version.version }) }}</p>
+            </div>
+          </div>
+          <button class="icon-button" :disabled="downloadPreflight.syncing" :title="t('close')" :aria-label="t('close')" @click="closeDownloadPreflight"><X :size="18" /></button>
+        </header>
+
+        <div v-if="downloadPreflight.syncing" class="download-check-syncing"><LoaderCircle :size="17" class="dependency-task-spin" /><span>{{ t("downloadCheckSyncing") }}</span></div>
+        <div v-if="downloadPreflight.syncError" class="message warning"><TriangleAlert :size="17" /><span>{{ downloadPreflight.syncError }}</span></div>
+        <div v-if="downloadPreflight.environmentError" class="message warning"><TriangleAlert :size="17" /><span>{{ downloadPreflight.environmentError }}</span></div>
+        <div v-if="downloadPreflight.core.state === 'mismatch' || downloadPreflight.core.state === 'unavailable'" class="download-check-section download-check-core">
+          <div class="download-check-section-head">
+            <span><ActivityIcon :size="16" /><strong>{{ t("comfyCoreVersion") }}</strong></span>
+            <b class="dependency-status" :data-tone="downloadPreflight.core.tone">{{ t(downloadPreflight.core.label) }}</b>
+          </div>
+          <div class="download-check-core-versions">
+            <span><small>{{ t("coreVersionCurrent") }}</small><strong>{{ downloadPreflight.currentCoreVersion || t("detecting") }}</strong></span>
+            <ArrowRight :size="16" />
+            <span><small>{{ t("coreVersionRequired") }}</small><strong>{{ comfyuiCompatibilityLabel(downloadPreflight.version) }}</strong></span>
+          </div>
+          <p>{{ t(downloadPreflight.core.detail, downloadPreflight.core.params) }}</p>
+          <small class="download-check-manual-hint">{{ t("coreVersionManualAction") }}</small>
+        </div>
+
+        <div v-if="preflightDependencyIssues.length" class="download-check-section">
+          <div class="download-check-section-head">
+            <span><PackageOpen :size="16" /><strong>{{ t("downloadCheckPlugins") }}</strong><em>{{ preflightDependencyIssues.length }}</em></span>
+            <b class="dependency-status" data-tone="warn">{{ t("downloadCheckAttention") }}</b>
+          </div>
+          <div v-for="entry in preflightDependencyIssues" :key="`download-check-${dependencyActionKey(entry)}`" class="download-check-dependency">
+            <span><PackageOpen :size="15" /><strong>{{ entry.name }}</strong><small>{{ entry.installed || t("notInstalled") }} → {{ entry.requested || t("gitRevisionUnavailable") }}</small></span>
+            <b class="dependency-status" :data-tone="dependencyActionTone(entry.action)">{{ t(dependencyActionLabels[entry.action]) }}</b>
+          </div>
+          <p v-if="preflightSyncableDependencies.length" class="download-check-hint">{{ t("downloadCheckSyncHint", { count: preflightSyncableDependencies.length }) }}</p>
+          <p v-else class="download-check-hint">{{ t("downloadCheckManualPluginHint") }}</p>
+        </div>
+        <div v-if="downloadPreflight.dependencyError" class="message warning"><TriangleAlert :size="17" /><span>{{ downloadPreflight.dependencyError }}</span></div>
+
+        <footer class="download-check-actions">
+          <button v-if="downloadPreflight.environmentError || downloadPreflight.dependencyError || downloadPreflight.syncError" class="ghost" :disabled="!!busy || downloadPreflight.syncing" @click="retryDownloadPreflight">{{ t("retryCheck") }}</button>
+          <button class="ghost" :disabled="downloadPreflight.syncing" @click="closeDownloadPreflight">{{ t("cancel") }}</button>
+          <button class="secondary" :disabled="downloadPreflight.syncing" @click="skipDownloadPreflight">{{ t("downloadAnyway") }}</button>
+          <button v-if="preflightSyncableDependencies.length" class="primary" :disabled="!!busy || downloadPreflight.syncing" @click="syncDownloadDependencies"><LoaderCircle v-if="downloadPreflight.syncing" :size="16" class="dependency-task-spin" />{{ t("syncPluginsThenDownload") }}</button>
+        </footer>
+      </section>
     </div>
 
     <div v-if="editingProduct" class="backdrop" @click.self="editingProduct = null">

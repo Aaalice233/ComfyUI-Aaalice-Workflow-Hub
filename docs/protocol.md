@@ -37,7 +37,7 @@ Release title: {类别} / {工作流名称} v{version}
 ZIP asset: {工作流名称}-v{version}.zip
 ```
 
-ZIP 与对应版本目录中的文件字节一致。历史 Release 可保存已发布的 LoRA 和预览资源；新的工作流版本不再上传 LoRA。Release 成功而仓库提交失败时，发布进入“待同步发布”，恢复操作直接读取已经生成并校验的 ZIP，不重新扫描作者的本地资源。
+ZIP 与对应版本目录中的文件字节一致。Release 只分发工作流包、预览和随包图片，不分发 LoRA；新的工作流版本也不得上传或声明 LoRA。Release 成功而仓库提交失败时，发布进入“待同步发布”，恢复操作直接读取已经生成并校验的 ZIP，不重新扫描作者的本地资源。
 
 ## 版本内容
 
@@ -56,7 +56,7 @@ inputs/*            可选，仅限画布、子图和侧边栏图像控件引用
 
 `custom_nodes` 声明插件仓库，而不是节点类型。Git 依赖使用 `manual: true`、`source_url` 和完整 40 位 `commit` 锁定 GitHub 工作副本；历史 Registry 依赖使用 `registry_id` 和语义版本。ComfyUI-Manager 与 ComfyUI-Aaalice-Workflow-Hub 属于宿主基础插件，不写入 `custom_nodes` 依赖声明，也不进入补全计划。发布扫描只读取 `custom_nodes` 下的 Git 工作副本；Git clone/fetch/checkout 可并行执行，随后使用 ComfyUI 环境的 Python 串行处理各插件 `requirements.txt`；历史 Registry 依赖由 Manager 队列负责 post-install。补全开始前会检查 GitHub/Comfy Registry 网络连通性。两种安装方式通过统一且持久化的异步操作报告插件级进度、安装日志、错误结果和重启提示。
 
-新版本发布不得在 ZIP、仓库历史或 `models` 中声明 LoRA。历史版本的 LoRA 由 Release asset 分发，并在 `models` 中以 `type: "loras"` 声明；订阅者只能主动逐项下载。
+新版本发布不得在 ZIP、仓库历史或 `models` 中声明 LoRA。历史清单中的 LoRA 声明仅为旧协议兼容数据，不会出现在下载页，也不会提供下载入口。
 
 ## API 错误与多语言
 

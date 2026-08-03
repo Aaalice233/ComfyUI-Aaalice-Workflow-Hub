@@ -26,7 +26,6 @@ from .service import (
     clear_subscription_cache,
     delete_version,
     delete_workflow,
-    download_optional_lora,
     download_version,
     find_catalog_updates,
     list_managed_products,
@@ -802,38 +801,6 @@ def register_routes() -> None:
             {"owner": data["owner"], "repo": data["repo"], "workflow_id": data["workflow_id"], "version": data["version"]},
         )
         asyncio.create_task(_run(operation, download_version(storage, data["owner"], data["repo"], product, version, operation)))
-        return web.json_response({"operation_id": operation.id}, status=202)
-
-    @routes.post(f"{BASE}/workflows/models/download")
-    @endpoint
-    async def workflow_model_download(request: web.Request) -> web.StreamResponse:
-        data = await _json(request)
-        if data.get("confirmed") is not True:
-            raise UserFacingError("lora.download_confirmation_required")
-        storage = UserStorage.from_request(request)
-        owner, repo = await _require_subscribed_source(storage, data.get("owner"), data.get("repo"))
-        data["owner"], data["repo"] = owner, repo
-        cache = subscription_cache_path(storage, owner, repo)
-        if not cache.is_file():
-            raise UserFacingError("subscription.catalog_missing")
-        catalog = Catalog.model_validate_json(cache.read_bytes())
-        product, version = _catalog_version(catalog, data.get("workflow_id"), data.get("version"))
-        model = next(
-            (
-                item
-                for item in version.models
-                if item.type == "loras" and item.filename == str(data.get("filename") or "")
-            ),
-            None,
-        )
-        if model is None:
-            raise UserFacingError("lora.not_found")
-        operation = await operations.create(
-            "lora-download",
-            storage,
-            {"owner": data["owner"], "repo": data["repo"], "workflow_id": data["workflow_id"], "version": data["version"], "filename": data["filename"]},
-        )
-        asyncio.create_task(_run(operation, download_optional_lora(model, operation)))
         return web.json_response({"operation_id": operation.id}, status=202)
 
     @routes.delete(f"{BASE}/workflows/local")

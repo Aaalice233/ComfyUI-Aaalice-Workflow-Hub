@@ -20,7 +20,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(catalog.workflows[0].category, "Portrait")
         self.assertIsNotNone(catalog.workflows[0].cover)
         self.assertEqual(catalog.workflows[0].versions[0].inputs[0].source, "portrait-reference.png")
-        self.assertEqual(catalog.workflows[0].versions[0].models[1].type, "loras")
+        self.assertEqual(catalog.workflows[0].versions[0].models[0].type, "checkpoints")
 
     def test_inputs_default_to_empty(self):
         payload = json.loads((ROOT / "examples/valid/workflow-catalog.json").read_text(encoding="utf-8"))

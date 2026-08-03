@@ -59,13 +59,6 @@
               "filename": "example.safetensors",
               "source_url": "https://github.com/Aaalice233/example",
               "sha256": null
-            },
-            {
-              "name": "Example style LoRA",
-              "type": "loras",
-              "filename": "styles/example.safetensors",
-              "source_url": "https://github.com/Aaalice233/example/releases/download/portrait-basic-v1.12/portrait-basic-v1.12-lora-example.safetensors",
-              "sha256": "23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01"
             }
           ]
         }

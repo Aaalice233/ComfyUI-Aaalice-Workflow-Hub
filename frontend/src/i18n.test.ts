@@ -21,9 +21,13 @@ describe("translations", () => {
   it("interpolates dynamic values through the dictionary", () => {
     locale.value = "zh";
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("目标目录 custom_nodes/example 已存在，未覆盖本地文件。");
+    expect(t.value("pluginStatusMissing", { count: 2 })).toBe("缺少 2 个");
+    expect(t.value("includedImagesDetail", { count: 1 })).toBe("包含 1 张随包图片，安装时会写入当前用户的隔离目录。");
     locale.value = "en";
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("The target directory custom_nodes/example already exists; local files were not overwritten.");
     expect(t.value("dependencyVersionTransition", { installed: "old", requested: "new" })).toBe("old → new");
+    expect(t.value("pluginStatusMissing", { count: 2 })).toBe("2 missing");
+    expect(t.value("includedImagesDetail", { count: 1 })).toBe("Includes 1 bundled image(s), installed into the current user's isolated directory.");
   });
 
   it("localizes publish and management stage progress in both languages", () => {
@@ -33,6 +37,20 @@ describe("translations", () => {
     locale.value = "en";
     expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("Publish stage 5 of 5 · Updating repository");
     expect(t.value("operationStageProgress", { current: 2, total: 3, stage: t.value("stageDeletingRelease") })).toBe("Operation stage 2 of 3 · Deleting Release");
+  });
+
+  it("interpolates core version alignment details in both languages", () => {
+    locale.value = "zh";
+    expect(t.value("coreVersionAlignedDetail", { current: "0.28.0", required: "ComfyUI 0.28.0" })).toBe("当前 ComfyUI 0.28.0 满足工作流要求 ComfyUI 0.28.0。");
+    locale.value = "en";
+    expect(t.value("coreVersionAlignedDetail", { current: "0.28.0", required: "ComfyUI 0.28.0" })).toBe("ComfyUI 0.28.0 satisfies the workflow requirement ComfyUI 0.28.0.");
+  });
+
+  it("interpolates download preflight copy in both languages", () => {
+    locale.value = "zh";
+    expect(t.value("downloadCheckDescription", { name: "Demo", version: "1.2.0" })).toBe("下载 Demo v1.2.0 前，先检查 ComfyUI 内核和插件依赖，避免下载后无法运行。");
+    locale.value = "en";
+    expect(t.value("downloadCheckDescription", { name: "Demo", version: "1.2.0" })).toBe("Before downloading Demo v1.2.0, we will check the ComfyUI core and plugin dependencies to avoid an unusable workflow.");
   });
 
   it("keeps localized copy and locale branching out of application surfaces", () => {
