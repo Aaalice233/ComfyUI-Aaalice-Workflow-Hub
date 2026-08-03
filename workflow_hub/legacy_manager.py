@@ -6,6 +6,7 @@ import asyncio
 import re
 from typing import Any
 
+from .dependency_policy import is_ignored_dependency
 from .security import parse_public_repository
 
 import aiohttp
@@ -171,31 +172,6 @@ class ManagerAdapter:
             if isinstance(item, dict) and item.get("id")
         }
 
-    async def installed_dependencies(self) -> list[dict[str, Any]]:
-        installed = await self.installed()
-        result: list[dict[str, Any]] = []
-        for item in installed.values():
-            registry_id = str(item.get("registry_id") or "").strip() or None
-            if not registry_id:
-                continue
-            source_url = _source_from_aux(item.get("aux_id"))
-            version = str(item.get("version") or "").strip() or None
-            git_worktree = bool(source_url and version and re.fullmatch(r"[0-9a-fA-F]{40}", version))
-            result.append(
-                {
-                    "registry_id": None if git_worktree else registry_id,
-                    "source_url": source_url if git_worktree else None,
-                    "name": str(item.get("name") or item.get("module_name") or registry_id),
-                    "version": None if git_worktree else version,
-                    "commit": version if git_worktree else None,
-                    "required": True,
-                    "manual": git_worktree,
-                    "installer": "git" if git_worktree else "manager",
-                    "dirty": False,
-                }
-            )
-        return result
-
     @staticmethod
     def _find_installed(installed: dict[str, dict[str, Any]], dependency: dict[str, Any]) -> dict[str, Any] | None:
         registry_id = str(dependency.get("registry_id") or "").strip()
@@ -228,7 +204,12 @@ class ManagerAdapter:
         return matches[0] if len(matches) == 1 else None
 
     async def plan(self, dependencies: list[dict[str, Any]], align_versions: bool = True) -> list[dict[str, Any]]:
-        registry_dependencies = [item for item in dependencies if item.get("registry_id") and not item.get("source_url")]
+        registry_dependencies = [
+            item for item in dependencies
+            if item.get("registry_id")
+            and not item.get("source_url")
+            and not is_ignored_dependency(item)
+        ]
         if not registry_dependencies:
             return []
         detected = await self._detect()
@@ -299,7 +280,12 @@ class ManagerAdapter:
         client_id: str,
         on_queued: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> list[dict[str, Any]]:
-        executable = [item for item in actions if item.get("registry_id") and item.get("action") in {"install", "upgrade", "downgrade"}]
+        executable = [
+            item for item in actions
+            if item.get("registry_id")
+            and item.get("action") in {"install", "upgrade", "downgrade"}
+            and not is_ignored_dependency(item)
+        ]
         if not executable:
             return []
         detected = await self._require_compatible()

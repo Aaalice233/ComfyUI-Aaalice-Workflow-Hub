@@ -3,12 +3,16 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
 from workflow_hub import manager as manager_module
+from workflow_hub.dependency_policy import is_ignored_dependency
+from workflow_hub.legacy_manager import ManagerAdapter
 from workflow_hub.manager import GitAdapter, GitRepository, _canonical_source, local_git_status
 
 
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
 SOURCE = "https://github.com/example/pack"
+MANAGER_SOURCE = "https://github.com/ltdrdata/ComfyUI-Manager"
+WORKFLOW_HUB_SOURCE = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub"
 
 
 class GitSourceTests(IsolatedAsyncioTestCase):
@@ -62,6 +66,23 @@ class GitSourceTests(IsolatedAsyncioTestCase):
             result = self._run_plan([dependency])
         self.assertEqual(result, [])
 
+    def test_plan_skips_ignored_system_plugins(self):
+        dependencies = [
+            {"name": "ComfyUI-Manager", "source_url": MANAGER_SOURCE, "commit": COMMIT_A, "manual": True},
+            {"name": "ComfyUI-Aaalice-Workflow-Hub", "source_url": WORKFLOW_HUB_SOURCE, "commit": COMMIT_A, "manual": True},
+        ]
+        with patch.object(manager_module, "_scan_repositories", AsyncMock()) as scan:
+            result = self._run_plan(dependencies)
+        self.assertEqual(result, [])
+        scan.assert_not_awaited()
+
+    def test_ignored_dependency_matches_source_and_identifier(self):
+        self.assertTrue(is_ignored_dependency({"source_url": MANAGER_SOURCE}))
+        self.assertTrue(is_ignored_dependency({"name": "ComfyUI Manager"}))
+        self.assertTrue(is_ignored_dependency({"registry_id": "comfyui-manager"}))
+        self.assertTrue(is_ignored_dependency({"source_url": WORKFLOW_HUB_SOURCE}))
+        self.assertFalse(is_ignored_dependency({"name": "ComfyUI-Manager-Plus"}))
+
     async def _plan(self, dependencies):
         return await GitAdapter().plan(dependencies)
 
@@ -69,6 +90,15 @@ class GitSourceTests(IsolatedAsyncioTestCase):
         import asyncio
 
         return asyncio.run(self._plan(dependencies))
+
+
+class ManagerDependencyTests(IsolatedAsyncioTestCase):
+    async def test_plan_skips_comfyui_manager(self):
+        adapter = ManagerAdapter("http://127.0.0.1:8188")
+        with patch.object(adapter, "_detect", AsyncMock()) as detect:
+            result = await adapter.plan([{"registry_id": "comfyui-manager", "name": "ComfyUI-Manager", "version": "4.2.1"}])
+        self.assertEqual(result, [])
+        detect.assert_not_awaited()
 
 
 class GitStatusTests(IsolatedAsyncioTestCase):
@@ -83,3 +113,12 @@ class GitStatusTests(IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["source_url"], SOURCE)
         self.assertEqual(result[0]["commit"], COMMIT_A)
         self.assertTrue(result[0]["manual"])
+
+    async def test_installed_dependencies_skip_ignored_system_plugins(self):
+        repositories = [
+            GitRepository("ComfyUI-Manager", Path("custom_nodes/ComfyUI-Manager"), MANAGER_SOURCE, COMMIT_A, False),
+            GitRepository("ComfyUI-Aaalice-Workflow-Hub", Path("custom_nodes/ComfyUI-Aaalice-Workflow-Hub"), WORKFLOW_HUB_SOURCE, COMMIT_A, False),
+        ]
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=repositories)):
+            result = await GitAdapter().installed_dependencies()
+        self.assertEqual(result, [])

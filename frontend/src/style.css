@@ -3653,6 +3653,7 @@ pre {
 }
 
 .operation-stage-progress {
+  display: flex;
   width: 100%;
   margin-top: 10px;
   gap: 4px;
@@ -3674,6 +3675,11 @@ pre {
 .operation-stage-progress > span.active {
   background: var(--accent);
   box-shadow: 0 0 10px rgb(var(--theme-rgb) / 30%);
+}
+
+.operation-stage-progress > span.failed {
+  background: var(--danger);
+  box-shadow: 0 0 10px rgb(226 121 126 / 24%);
 }
 
 .operation-stage-progress.complete > span {

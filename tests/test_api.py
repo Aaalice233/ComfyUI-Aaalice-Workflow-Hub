@@ -1,9 +1,10 @@
 import json
 import unittest
 
-from workflow_hub.api import _guarded_github_call, _json, _response_error
+from workflow_hub.api import _guarded_github_call, _json, _response_error, _run
 from workflow_hub.errors import UserFacingError
 from workflow_hub.github import GitHubError, tokens
+from workflow_hub.operations import Operation
 
 
 class RequestStub:
@@ -71,6 +72,30 @@ class GuardedGitHubCallTests(unittest.IsolatedAsyncioTestCase):
             return {"items": []}
 
         self.assertEqual(await _guarded_github_call(StorageStub(), ok()), {"items": []})
+
+
+class OperationRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_operation_is_completed_by_runner(self) -> None:
+        operation = Operation(id="operation", kind="publisher-manage", stage="updating_repository")
+
+        async def succeed() -> dict[str, str]:
+            return {"result": "ok"}
+
+        await _run(operation, succeed())
+        self.assertEqual(operation.status, "success")
+        self.assertEqual(operation.stage, "complete")
+        self.assertEqual(operation.result, {"result": "ok"})
+
+    async def test_failed_operation_retains_the_failed_stage(self) -> None:
+        operation = Operation(id="operation", kind="publisher-manage", stage="updating_repository")
+
+        async def fail() -> dict[str, str]:
+            raise ValueError("commit failed")
+
+        await _run(operation, fail())
+        self.assertEqual(operation.status, "failed")
+        self.assertEqual(operation.stage, "failed")
+        self.assertEqual(operation.metadata["failed_stage"], "updating_repository")
 
 
 class ResponseErrorTests(unittest.TestCase):

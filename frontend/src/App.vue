@@ -160,6 +160,8 @@ const selectedDependencyActions = reactive<Record<string, string[]>>({});
 const dependencyAlignment = reactive<Record<string, boolean>>({});
 const dependencyOperationIds = reactive<Record<string, string>>({});
 const dependencyOperationSynced = reactive<Record<string, boolean>>({});
+const publisherManagementOperationIds = reactive<Record<string, boolean>>({});
+const publisherManagementOperationSynced = reactive<Record<string, boolean>>({});
 const downloadOperationIds = reactive<Record<string, string>>({});
 const loraOperationIds = reactive<Record<string, string>>({});
 const managerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
@@ -185,6 +187,8 @@ const operationStageMessages: Record<string, MessageKey> = {
   creating_release: "stageCreatingRelease",
   uploading: "stageUploading",
   publishing_release: "stagePublishingRelease",
+  updating_release: "stageUpdatingRelease",
+  deleting_release: "stageDeletingRelease",
   updating_repository: "stageUpdatingRepository",
   complete: "stageComplete",
   failed: "stageFailed",
@@ -196,6 +200,15 @@ const publishProgressStages = [
   "publishing_release",
   "updating_repository",
 ] as const;
+const managementDefaultProgressStages = ["validating", "updating_repository"] as const;
+const managementProgressStages: Record<string, readonly string[]> = {
+  edit_metadata: managementDefaultProgressStages,
+  archive: managementDefaultProgressStages,
+  unarchive: managementDefaultProgressStages,
+  edit_changelog: ["validating", "updating_release", "updating_repository"],
+  delete_version: ["validating", "deleting_release", "updating_repository"],
+  delete_workflow: ["validating", "deleting_release", "updating_repository"],
+};
 const backendErrorMessages: Record<string, MessageKey> = {
   "lora.download_confirmation_required": "loraDownloadConfirmationRequired",
   "lora.invalid_type": "loraInvalidType",
@@ -345,6 +358,10 @@ const dependencyExecutionFailures = computed(() => {
   return taskFailures || (execution.failed ? 1 : 0);
 });
 const dependencyOperationRunning = computed(() => operations.value.some((item) => item.kind === "dependencies" && item.status === "running"));
+const publisherManagementOperationRunning = computed(() =>
+  Object.keys(publisherManagementOperationIds).length > 0
+  || operations.value.some((item) => item.kind === "publisher-manage" && item.status === "running"),
+);
 const dependencyTaskStateKeys: Record<DependencyTaskState, MessageKey> = {
   queued: "installTaskQueued",
   installing: "installTaskInstalling",
@@ -583,24 +600,41 @@ function operationStageLabel(stage: string) {
 function isPublishOperation(item: Operation) {
   return item.kind === "publish" || item.kind === "publish-resume";
 }
-function publishStageProgress(item: Operation) {
-  const total = publishProgressStages.length;
+function operationProgressStages(item: Operation) {
+  if (isPublishOperation(item)) return publishProgressStages;
+  if (item.kind === "publisher-manage") {
+    return managementProgressStages[String(item.metadata?.action || "")] || managementDefaultProgressStages;
+  }
+  return null;
+}
+function hasStageProgress(item: Operation) {
+  return operationProgressStages(item) !== null;
+}
+function stageProgress(item: Operation) {
+  const stages = operationProgressStages(item) || [];
+  const total = stages.length;
   if (item.status === "success" || item.stage === "complete") {
     return { current: total, completed: total, total, percent: 100 };
   }
-  const index = publishProgressStages.indexOf(item.stage as typeof publishProgressStages[number]);
+  const stage = item.status === "failed"
+    ? String(item.metadata?.failed_stage || item.stage)
+    : item.stage;
+  const index = stages.indexOf(stage);
   if (index < 0) return { current: 0, completed: 0, total, percent: 0 };
   return { current: index + 1, completed: index, total, percent: (index / total) * 100 };
 }
-function publishStageProgressLabel(item: Operation) {
-  const progress = publishStageProgress(item);
-  return t.value("publishStageProgress", {
+function stageProgressLabel(item: Operation) {
+  const progress = stageProgress(item);
+  const stage = item.status === "failed"
+    ? String(item.metadata?.failed_stage || item.stage)
+    : item.stage;
+  return t.value(isPublishOperation(item) ? "publishStageProgress" : "operationStageProgress", {
     current: progress.current,
     total: progress.total,
-    stage: operationStageLabel(item.stage),
+    stage: operationStageLabel(stage),
   });
 }
-function operationKindLabel(kind: string) {
+function operationKindLabel(kind: string, metadata?: Record<string, unknown>) {
   const labels: Record<string, MessageKey> = {
     dependencies: "dependencyInstall",
     download: "operationDownload",
@@ -608,6 +642,17 @@ function operationKindLabel(kind: string) {
     publish: "operationPublish",
     "publish-resume": "operationPublish",
   };
+  if (kind === "publisher-manage") {
+    const managementLabels: Record<string, MessageKey> = {
+      edit_metadata: "operationEditMetadata",
+      archive: "operationArchive",
+      unarchive: "operationUnarchive",
+      edit_changelog: "operationEditChangelog",
+      delete_version: "operationDeleteVersion",
+      delete_workflow: "operationDeleteWorkflow",
+    };
+    return t.value(managementLabels[String(metadata?.action || "")] || "operationManage");
+  }
   return t.value(labels[kind] || "operationUnknown", { kind });
 }
 function localizedBackendError(code: string, params?: Record<string, string | number>) {
@@ -680,6 +725,12 @@ async function load() {
     sources.value = sub.items;
     products.value = flows.items;
     operations.value = ops.items;
+    for (const operation of ops.items) {
+      if (operation.kind === "publisher-manage" && operation.status === "running") {
+        publisherManagementOperationIds[operation.id] = true;
+        publisherManagementOperationSynced[operation.id] = false;
+      }
+    }
     if (s.github.authenticated) {
       try {
         const [repos, pending] = await Promise.all([
@@ -987,6 +1038,26 @@ async function pollOperations() {
   operationPollInFlight = true;
   try {
     operations.value = (await api<{ items: Operation[] }>("/operations")).items;
+    for (const [operationId] of Object.entries(publisherManagementOperationIds)) {
+      const operation = operations.value.find((item) => item.id === operationId);
+      if (!operation || operation.status === "running" || publisherManagementOperationSynced[operationId]) continue;
+      publisherManagementOperationSynced[operationId] = true;
+      const target = managementOperationTarget(operation);
+      try {
+        if (operation.status === "success") {
+          await reloadAfterManage(target);
+          notice.value = t.value("operationCompleted", { operation: operationKindLabel(operation.kind, operation.metadata) });
+        } else {
+          if (target && manageRepositoryFullName().toLowerCase() === target.toLowerCase()) await loadManaged();
+          error.value = operationErrorMessage(operation) || t.value("operationFailed");
+        }
+      } catch (reason) {
+        error.value = errorMessage(reason);
+      } finally {
+        delete publisherManagementOperationIds[operationId];
+        delete publisherManagementOperationSynced[operationId];
+      }
+    }
     for (const [key, operationId] of Object.entries(downloadOperationIds)) {
       const operation = operations.value.find((item) => item.id === operationId);
       if (!operation || operation.status !== "running") delete downloadOperationIds[key];
@@ -1319,13 +1390,37 @@ async function enterManage() {
   }
   await withBusy("manage", loadManaged);
 }
-async function reloadAfterManage() {
-  await loadManaged();
-  const fullName = manageRepositoryFullName().toLowerCase();
-  const source = sources.value.find((item) => `${item.owner}/${item.repo}`.toLowerCase() === fullName);
-  if (source) {
-    await post(`/subscriptions/${source.owner}/${source.repo}/refresh`, {});
-  }
+function managedWorkflowPath(productId: string, version?: string) {
+  const [owner, repo] = manageRepositoryFullName().split("/");
+  if (!owner || !repo) throw new Error(t.value("publisherRepositoryInvalid"));
+  const path = `/publisher/workflows/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(productId)}`;
+  return version === undefined ? path : `${path}/versions/${encodeURIComponent(version)}`;
+}
+async function startPublisherManagementOperation(
+  action: string,
+  submit: () => Promise<{ operation_id: string }>,
+) {
+  let started = false;
+  await withBusy(`manage-${action}`, async () => {
+    const result = await submit();
+    publisherManagementOperationIds[result.operation_id] = true;
+    publisherManagementOperationSynced[result.operation_id] = false;
+    started = true;
+    drawer.value = true;
+    await pollOperations();
+  });
+  return started;
+}
+function managementOperationTarget(operation: Operation) {
+  const owner = String(operation.metadata?.owner || "");
+  const repo = String(operation.metadata?.repo || "");
+  return owner && repo ? `${owner}/${repo}` : "";
+}
+async function reloadAfterManage(targetFullName = manageRepositoryFullName()) {
+  const target = targetFullName.toLowerCase();
+  if (target && manageRepositoryFullName().toLowerCase() === target) await loadManaged();
+  const source = sources.value.find((item) => `${item.owner}/${item.repo}`.toLowerCase() === target);
+  if (source) await post(`/subscriptions/${source.owner}/${source.repo}/refresh`, {});
   await load();
 }
 function openProductEditor(product: ManagedProduct) {
@@ -1339,51 +1434,32 @@ function openProductEditor(product: ManagedProduct) {
 async function saveProductEditor() {
   const product = editingProduct.value;
   if (!product) return;
-  await withBusy("manage-edit", async () => {
-    const [owner, repo] = manageRepositoryFullName().split("/");
-    await api(`/publisher/workflows/${owner}/${repo}/${product.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        name: editForm.name.trim(),
-        category: editForm.category.trim(),
-        summary: editForm.summary,
-        description: editForm.description,
-        tags: editForm.tags.split(",").map((item) => item.trim()).filter(Boolean),
-      }),
-    });
-    editingProduct.value = null;
-    await reloadAfterManage();
-    notice.value = t.value("metadataSaved");
-  });
+  const started = await startPublisherManagementOperation("edit", () => api<{ operation_id: string }>(managedWorkflowPath(product.id), {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: editForm.name.trim(),
+      category: editForm.category.trim(),
+      summary: editForm.summary,
+      description: editForm.description,
+      tags: editForm.tags.split(",").map((item) => item.trim()).filter(Boolean),
+    }),
+  }));
+  if (started) editingProduct.value = null;
 }
 async function toggleManagedArchive(product: ManagedProduct) {
   const next = !product.archived;
   if (!confirm(t.value(next ? "confirmArchive" : "confirmUnarchive", { name: product.name }))) return;
-  await withBusy("manage-archive", async () => {
-    const [owner, repo] = manageRepositoryFullName().split("/");
-    await api(`/publisher/workflows/${owner}/${repo}/${product.id}`, {
-      method: "PATCH", body: JSON.stringify({ archived: next }),
-    });
-    await reloadAfterManage();
-  });
+  await startPublisherManagementOperation(next ? "archive" : "unarchive", () => api<{ operation_id: string }>(managedWorkflowPath(product.id), {
+    method: "PATCH", body: JSON.stringify({ archived: next }),
+  }));
 }
 async function deleteManagedWorkflow(product: ManagedProduct) {
   if (!confirm(t.value("confirmDeleteWorkflow", { name: product.name, count: product.versions.length }))) return;
-  await withBusy("manage-delete", async () => {
-    const [owner, repo] = manageRepositoryFullName().split("/");
-    await remove(`/publisher/workflows/${owner}/${repo}/${product.id}`, { confirmed: true });
-    await reloadAfterManage();
-    notice.value = t.value("workflowDeleted", { name: product.name });
-  });
+  await startPublisherManagementOperation("delete-workflow", () => remove<{ operation_id: string }>(managedWorkflowPath(product.id), { confirmed: true }));
 }
 async function deleteManagedVersion(product: ManagedProduct, version: ManagedVersion) {
   if (!confirm(t.value("confirmDeleteVersion", { name: product.name, version: version.version }))) return;
-  await withBusy("manage-delete", async () => {
-    const [owner, repo] = manageRepositoryFullName().split("/");
-    await remove(`/publisher/workflows/${owner}/${repo}/${product.id}/versions/${encodeURIComponent(version.version)}`, { confirmed: true });
-    await reloadAfterManage();
-    notice.value = t.value("versionDeleted", { version: version.version });
-  });
+  await startPublisherManagementOperation("delete-version", () => remove<{ operation_id: string }>(managedWorkflowPath(product.id, version.version), { confirmed: true }));
 }
 function openChangelogEditor(product: ManagedProduct, version: ManagedVersion) {
   editingChangelog.value = { product, version, text: version.changelog };
@@ -1391,16 +1467,11 @@ function openChangelogEditor(product: ManagedProduct, version: ManagedVersion) {
 async function saveChangelogEditor() {
   const editing = editingChangelog.value;
   if (!editing) return;
-  await withBusy("manage-changelog", async () => {
-    const [owner, repo] = manageRepositoryFullName().split("/");
-    await api(
-      `/publisher/workflows/${owner}/${repo}/${editing.product.id}/versions/${encodeURIComponent(editing.version.version)}`,
-      { method: "PATCH", body: JSON.stringify({ changelog: editing.text }) },
-    );
-    editingChangelog.value = null;
-    await reloadAfterManage();
-    notice.value = t.value("changelogSaved");
-  });
+  const started = await startPublisherManagementOperation("changelog", () => api<{ operation_id: string }>(
+    managedWorkflowPath(editing.product.id, editing.version.version),
+    { method: "PATCH", body: JSON.stringify({ changelog: editing.text }) },
+  ));
+  if (started) editingChangelog.value = null;
 }
 async function startLogin() {
   await withBusy("login", async () => {
@@ -1841,7 +1912,7 @@ onBeforeUnmount(() => {
                 <header class="manage-toolbar">
                   <label class="compact-field manage-repository">
                     <span class="select-control">
-                      <select v-model="manageRepositoryUrl" :disabled="!repositories.length || manageLoading" @change="withBusy('manage', loadManaged)">
+                      <select v-model="manageRepositoryUrl" :disabled="!repositories.length || manageLoading || publisherManagementOperationRunning" @change="withBusy('manage', loadManaged)">
                         <option v-if="!repositories.length" value="">{{ t("noAuthorizedRepositories") }}</option>
                         <option v-for="repo in repositories" :key="repo.full_name" :value="publishRepositoryUrl(repo)">{{ repo.full_name }}</option>
                       </select>
@@ -1859,7 +1930,7 @@ onBeforeUnmount(() => {
                   >
                     <ExternalLink :size="14" />{{ t("repositoryPage") }}
                   </a>
-                  <button class="ghost compact-action" :disabled="!!busy || manageLoading" @click="withBusy('manage', loadManaged)"><RefreshCw :size="15" />{{ t("refreshManaged") }}</button>
+                  <button class="ghost compact-action" :disabled="!!busy || manageLoading || publisherManagementOperationRunning" @click="withBusy('manage', loadManaged)"><RefreshCw :size="15" />{{ t("refreshManaged") }}</button>
                 </header>
                 <p class="manage-hint">{{ t("manageHint") }}</p>
 
@@ -1877,9 +1948,9 @@ onBeforeUnmount(() => {
                         <ChevronDown :size="16" class="manage-chevron" :class="{ expanded: manageExpanded.includes(product.id) }" />
                       </button>
                       <div class="manage-item-actions">
-                        <button class="secondary compact-action" :disabled="!!busy" @click="openProductEditor(product)">{{ t("edit") }}</button>
-                        <button class="ghost compact-action" :disabled="!!busy" @click="toggleManagedArchive(product)"><ArchiveIcon :size="14" />{{ product.archived ? t("unarchive") : t("archive") }}</button>
-                        <button class="ghost compact-action danger-action" :disabled="!!busy" @click="deleteManagedWorkflow(product)"><Trash2 :size="14" />{{ t("deleteWorkflow") }}</button>
+                        <button class="secondary compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="openProductEditor(product)">{{ t("edit") }}</button>
+                        <button class="ghost compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="toggleManagedArchive(product)"><ArchiveIcon :size="14" />{{ product.archived ? t("unarchive") : t("archive") }}</button>
+                        <button class="ghost compact-action danger-action" :disabled="!!busy || publisherManagementOperationRunning" @click="deleteManagedWorkflow(product)"><Trash2 :size="14" />{{ t("deleteWorkflow") }}</button>
                       </div>
                     </div>
                     <div v-if="manageExpanded.includes(product.id)" class="manage-versions">
@@ -1887,8 +1958,8 @@ onBeforeUnmount(() => {
                         <span class="manage-version-meta"><strong>v{{ version.version }}</strong><small>{{ new Date(version.published_at).toLocaleDateString() }} · {{ humanBytes(version.package.size) }}</small></span>
                         <p>{{ version.changelog }}</p>
                         <span class="manage-version-actions">
-                          <button class="ghost compact-action" :disabled="!!busy" @click="openChangelogEditor(product, version)">{{ t("editChangelog") }}</button>
-                          <button class="ghost compact-action danger-action" :disabled="!!busy" @click="deleteManagedVersion(product, version)"><Trash2 :size="13" />{{ t("deleteVersion") }}</button>
+                          <button class="ghost compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="openChangelogEditor(product, version)">{{ t("editChangelog") }}</button>
+                          <button class="ghost compact-action danger-action" :disabled="!!busy || publisherManagementOperationRunning" @click="deleteManagedVersion(product, version)"><Trash2 :size="13" />{{ t("deleteVersion") }}</button>
                         </span>
                       </div>
                     </div>
@@ -2107,7 +2178,7 @@ onBeforeUnmount(() => {
         <label class="compact-field"><span>{{ t("tags") }}</span><input v-model="editForm.tags" /></label>
         <div class="manage-dialog-actions">
           <button class="ghost" @click="editingProduct = null">{{ t("cancel") }}</button>
-          <button class="primary" :disabled="!!busy || !editForm.name.trim() || !editForm.category.trim()" @click="saveProductEditor">{{ t("save") }}</button>
+          <button class="primary" :disabled="!!busy || publisherManagementOperationRunning || !editForm.name.trim() || !editForm.category.trim()" @click="saveProductEditor">{{ t("save") }}</button>
         </div>
       </section>
     </div>
@@ -2118,7 +2189,7 @@ onBeforeUnmount(() => {
         <textarea v-model="editingChangelog.text" rows="8" class="manage-changelog-input"></textarea>
         <div class="manage-dialog-actions">
           <button class="ghost" @click="editingChangelog = null">{{ t("cancel") }}</button>
-          <button class="primary" :disabled="!!busy || !editingChangelog.text.trim()" @click="saveChangelogEditor">{{ t("save") }}</button>
+          <button class="primary" :disabled="!!busy || publisherManagementOperationRunning || !editingChangelog.text.trim()" @click="saveChangelogEditor">{{ t("save") }}</button>
         </div>
       </section>
     </div>
@@ -2127,27 +2198,28 @@ onBeforeUnmount(() => {
       <div class="drawer-head"><div><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button></div>
       <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
       <article v-for="item in operations" :key="item.id" class="operation">
-        <div><strong>{{ operationKindLabel(item.kind) }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
-        <template v-if="isPublishOperation(item)">
+        <div><strong>{{ operationKindLabel(item.kind, item.metadata) }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
+        <template v-if="hasStageProgress(item)">
           <div
             class="operation-stage-progress"
             :class="{ complete: item.status === 'success', failed: item.status === 'failed' }"
             role="progressbar"
-            :aria-label="publishStageProgressLabel(item)"
+            :aria-label="stageProgressLabel(item)"
             aria-valuemin="0"
-            :aria-valuemax="publishStageProgress(item).total"
-            :aria-valuenow="publishStageProgress(item).completed"
+            :aria-valuemax="stageProgress(item).total"
+            :aria-valuenow="stageProgress(item).completed"
           >
             <span
-              v-for="(_, index) in publishProgressStages"
+              v-for="(_, index) in operationProgressStages(item) || []"
               :key="index"
               :class="{
-                complete: index < publishStageProgress(item).completed,
-                active: item.status === 'running' && index === publishStageProgress(item).current - 1,
+                complete: index < stageProgress(item).completed,
+                active: item.status === 'running' && index === stageProgress(item).current - 1,
+                failed: item.status === 'failed' && index === stageProgress(item).current - 1,
               }"
             />
           </div>
-          <small class="progress-copy stage-progress-copy">{{ publishStageProgressLabel(item) }}</small>
+          <small class="progress-copy stage-progress-copy">{{ stageProgressLabel(item) }}</small>
         </template>
         <template v-else-if="item.progress?.total">
           <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"

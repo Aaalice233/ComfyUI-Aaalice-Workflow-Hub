@@ -10,6 +10,7 @@ import subprocess
 import sys
 from typing import Any
 
+from .dependency_policy import is_ignored_dependency
 from .errors import UserFacingError
 from .security import ensure_within, parse_public_repository
 
@@ -309,7 +310,11 @@ class GitAdapter:
         repositories = await _scan_repositories()
         result = []
         for repository in repositories:
-            if not repository.source_url or not repository.commit:
+            if (
+                not repository.source_url
+                or not repository.commit
+                or is_ignored_dependency({"name": repository.name, "source_url": repository.source_url})
+            ):
                 continue
             result.append(
                 {
@@ -329,7 +334,8 @@ class GitAdapter:
     async def plan(self, dependencies: list[dict[str, Any]], align_versions: bool = True) -> list[dict[str, Any]]:
         dependencies = [
             item for item in dependencies
-            if item.get("source_url") or not item.get("registry_id")
+            if (item.get("source_url") or not item.get("registry_id"))
+            and not is_ignored_dependency(item)
         ]
         if not dependencies:
             return []
@@ -407,7 +413,11 @@ class GitAdapter:
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         on_result: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> list[dict[str, Any]]:
-        executable = [item for item in actions if item.get("action") in {"install", "upgrade", "downgrade"}]
+        executable = [
+            item for item in actions
+            if item.get("action") in {"install", "upgrade", "downgrade"}
+            and not is_ignored_dependency(item)
+        ]
         if not executable:
             return []
         repositories = await _scan_repositories()

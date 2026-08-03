@@ -797,12 +797,17 @@ async def update_product(
     repo: str,
     workflow_id: str,
     changes: dict[str, Any],
+    operation: Operation | None = None,
 ) -> dict[str, Any]:
+    if operation is not None:
+        operation.stage = "validating"
     allowed = {"name", "category", "summary", "description", "tags", "archived"}
     if set(changes) - allowed:
         raise ValueError("只能修改名称、类别、简介、说明、标签和归档状态")
     client = GitHubClient(token)
     for attempt in range(2):
+        if operation is not None:
+            operation.stage = "validating"
         state = await client.get_branch_state(owner, repo)
         catalog = await _catalog_at_state(client, owner, repo, state, {})
         index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
@@ -822,6 +827,8 @@ async def update_product(
         writes = build_projection_files(updated, product)
         delete_paths, copies = _relocation_changes(state, existing.repository_path, product.repository_path, writes)
         try:
+            if operation is not None:
+                operation.stage = "updating_repository"
             await client.commit_files(
                 owner,
                 repo,
@@ -861,9 +868,18 @@ def _catalog_projection(catalog: Catalog) -> dict[str, bytes]:
     }
 
 
-async def delete_version(token: str, owner: str, repo: str, workflow_id: str, version_number: str) -> dict[str, Any]:
+async def delete_version(
+    token: str,
+    owner: str,
+    repo: str,
+    workflow_id: str,
+    version_number: str,
+    operation: Operation | None = None,
+) -> dict[str, Any]:
     client = GitHubClient(token)
     for attempt in range(2):
+        if operation is not None:
+            operation.stage = "validating"
         state = await client.get_branch_state(owner, repo)
         catalog = await _catalog_at_state(client, owner, repo, state, {})
         index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
@@ -873,6 +889,8 @@ async def delete_version(token: str, owner: str, repo: str, workflow_id: str, ve
         target = next((item for item in existing.versions if item.version == version_number), None)
         if target is None:
             raise ValueError("版本不存在")
+        if operation is not None:
+            operation.stage = "deleting_release"
         await _remove_release(client, owner, repo, target.release_tag)
         remaining = [item for item in existing.versions if item.version != version_number]
         delete_paths = {path for path in state.files if path.startswith(f"{target.repository_path}/")}
@@ -888,6 +906,8 @@ async def delete_version(token: str, owner: str, repo: str, workflow_id: str, ve
         updated = Catalog.model_validate(catalog.model_copy(update={"workflows": items}).model_dump(mode="json"))
         writes = build_projection_files(updated, product) if product else _catalog_projection(updated)
         try:
+            if operation is not None:
+                operation.stage = "updating_repository"
             await client.commit_files(
                 owner,
                 repo,
@@ -904,21 +924,33 @@ async def delete_version(token: str, owner: str, repo: str, workflow_id: str, ve
     raise RuntimeError("仓库并发更新失败")
 
 
-async def delete_workflow(token: str, owner: str, repo: str, workflow_id: str) -> dict[str, Any]:
+async def delete_workflow(
+    token: str,
+    owner: str,
+    repo: str,
+    workflow_id: str,
+    operation: Operation | None = None,
+) -> dict[str, Any]:
     client = GitHubClient(token)
     for attempt in range(2):
+        if operation is not None:
+            operation.stage = "validating"
         state = await client.get_branch_state(owner, repo)
         catalog = await _catalog_at_state(client, owner, repo, state, {})
         index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
         if index is None:
             raise ValueError("工作流产品不存在")
         existing = catalog.workflows[index]
+        if operation is not None:
+            operation.stage = "deleting_release"
         for version in existing.versions:
             await _remove_release(client, owner, repo, version.release_tag)
         items = [item for item in catalog.workflows if item.id != workflow_id]
         updated = Catalog.model_validate(catalog.model_copy(update={"workflows": items}).model_dump(mode="json"))
         delete_paths = {path for path in state.files if path.startswith(f"{existing.repository_path}/")}
         try:
+            if operation is not None:
+                operation.stage = "updating_repository"
             await client.commit_files(
                 owner,
                 repo,
@@ -942,13 +974,18 @@ async def update_version_changelog(
     workflow_id: str,
     version_number: str,
     changelog: str,
+    operation: Operation | None = None,
 ) -> dict[str, Any]:
+    if operation is not None:
+        operation.stage = "validating"
     if not changelog.strip():
         raise ValueError("更新日志不能为空")
     if len(changelog) > 20_000:
         raise ValueError("更新日志不能超过 20000 个字符")
     client = GitHubClient(token)
     for attempt in range(2):
+        if operation is not None:
+            operation.stage = "validating"
         state = await client.get_branch_state(owner, repo)
         catalog = await _catalog_at_state(client, owner, repo, state, {})
         index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
@@ -962,6 +999,8 @@ async def update_version_changelog(
         release = await client.get_release_by_tag(owner, repo, target.release_tag)
         if release is None:
             raise ValueError("版本对应的 Release 不存在")
+        if operation is not None:
+            operation.stage = "updating_release"
         await client.update_release_notes(owner, repo, int(release["id"]), changelog)
         versions = list(existing.versions)
         versions[position] = target.model_copy(update={"changelog": changelog})
@@ -970,6 +1009,8 @@ async def update_version_changelog(
         items[index] = product
         updated = Catalog.model_validate(catalog.model_copy(update={"workflows": items}).model_dump(mode="json"))
         try:
+            if operation is not None:
+                operation.stage = "updating_repository"
             await client.commit_files(
                 owner,
                 repo,

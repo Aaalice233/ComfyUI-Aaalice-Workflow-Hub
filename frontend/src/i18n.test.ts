@@ -26,11 +26,13 @@ describe("translations", () => {
     expect(t.value("dependencyVersionTransition", { installed: "old", requested: "new" })).toBe("old → new");
   });
 
-  it("localizes publish stage progress in both languages", () => {
+  it("localizes publish and management stage progress in both languages", () => {
     locale.value = "zh";
     expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("发布阶段 5/5 · 正在写入仓库");
+    expect(t.value("operationStageProgress", { current: 2, total: 3, stage: t.value("stageDeletingRelease") })).toBe("操作阶段 2/3 · 正在删除 Release");
     locale.value = "en";
     expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("Publish stage 5 of 5 · Updating repository");
+    expect(t.value("operationStageProgress", { current: 2, total: 3, stage: t.value("stageDeletingRelease") })).toBe("Operation stage 2 of 3 · Deleting Release");
   });
 
   it("keeps localized copy and locale branching out of application surfaces", () => {

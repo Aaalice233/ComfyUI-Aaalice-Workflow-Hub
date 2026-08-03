@@ -16,6 +16,7 @@ from .compatibility import current_comfyui_version, stamp_product_comfyui_versio
 from .errors import UserFacingError
 from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refresh_access_token, start_device_flow, tokens
 from .legacy_manager import ManagerAdapter, local_manager_status
+from .dependency_policy import is_ignored_dependency
 from .manager import GitAdapter, local_git_status
 from .operations import Operation, operations
 from .security import ensure_within, parse_public_repository
@@ -179,6 +180,8 @@ def _normalise_dependency_plan(items: list[dict[str, Any]]) -> list[dict[str, An
     by_key: dict[str, dict[str, Any]] = {}
     for raw in items:
         item = dict(raw)
+        if is_ignored_dependency(item):
+            continue
         key = _dependency_key(item)
         item["task_id"] = key
         existing = by_key.get(key)
@@ -204,6 +207,10 @@ async def _plan_dependencies(
     version_policy: str,
     manager_origin: str,
 ) -> list[dict[str, Any]]:
+    dependencies = [
+        item for item in dependencies
+        if not is_ignored_dependency(item)
+    ]
     align_versions = version_policy == "align"
     git_items = await GitAdapter().plan(dependencies, align_versions=align_versions)
     manager_items = await ManagerAdapter(manager_origin).plan(dependencies, align_versions=align_versions)
@@ -286,18 +293,48 @@ async def _guarded_github_call(storage: UserStorage, action: Awaitable[T]) -> T:
 
 async def _run(operation: Operation, action: Awaitable[dict[str, Any]]) -> None:
     try:
-        await action
+        result = await action
+        if operation.status == "running":
+            operation.stage = "complete"
+            operation.status = "success"
+            operation.result = result
     except UserFacingError as exc:
+        operation.metadata["failed_stage"] = operation.stage
         operation.status = "failed"
         operation.stage = "failed"
         operation.error_code = exc.code
         operation.error_params = exc.params
     except Exception as exc:
+        operation.metadata["failed_stage"] = operation.stage
         operation.status = "failed"
         operation.stage = "failed"
         operation.error_code = "operation.failed"
         operation.error_params = {"detail": str(exc)[-1000:]}
         operation.logs.append(str(exc))
+
+
+def _publisher_management_action(changes: dict[str, Any]) -> str:
+    if set(changes) == {"archived"} and changes.get("archived") is True:
+        return "archive"
+    if set(changes) == {"archived"} and changes.get("archived") is False:
+        return "unarchive"
+    return "edit_metadata"
+
+
+async def _start_publisher_management_operation(
+    request: web.Request,
+    metadata: dict[str, Any],
+    action: Callable[[str, Operation], Awaitable[dict[str, Any]]],
+) -> web.Response:
+    storage = UserStorage.from_request(request)
+    token = await _github_token(storage)
+    operation = await operations.create("publisher-manage", storage, metadata)
+
+    async def run() -> dict[str, Any]:
+        return await _guarded_github_call(storage, action(token, operation))
+
+    asyncio.create_task(_run(operation, run()))
+    return web.json_response({"operation_id": operation.id}, status=202)
 
 
 _dependency_lock = asyncio.Lock()
@@ -1081,25 +1118,12 @@ def register_routes() -> None:
     async def publisher_scan_dependencies(request: web.Request) -> web.StreamResponse:
         await _json(request)
         try:
-            items = await GitAdapter().installed_dependencies()
+            items = [
+                item for item in await GitAdapter().installed_dependencies()
+                if not is_ignored_dependency(item)
+            ]
         except UserFacingError:
             items = []
-        try:
-            manager_items = await ManagerAdapter(_manager_origin(request)).installed_dependencies()
-        except UserFacingError:
-            manager_items = []
-        seen_sources = {str(item.get("source_url") or "").casefold() for item in items if item.get("source_url")}
-        seen_registry_ids = {str(item.get("registry_id") or "") for item in items if item.get("registry_id")}
-        for item in manager_items:
-            source = str(item.get("source_url") or "").casefold()
-            registry_id = str(item.get("registry_id") or "")
-            if (source and source in seen_sources) or (registry_id and registry_id in seen_registry_ids):
-                continue
-            items.append(item)
-            if source:
-                seen_sources.add(source)
-            if registry_id:
-                seen_registry_ids.add(registry_id)
         return web.json_response({"items": items})
 
     @routes.post(f"{BASE}/publisher/scan-assets")
@@ -1183,19 +1207,27 @@ def register_routes() -> None:
     @endpoint
     async def publisher_update(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
-        storage = UserStorage.from_request(request)
-        token = await _github_token(storage)
-        result = await _guarded_github_call(
-            storage,
-            update_product(
+        owner = request.match_info["owner"]
+        repo = request.match_info["repo"]
+        workflow_id = request.match_info["workflow_id"]
+        action_name = _publisher_management_action(data)
+        return await _start_publisher_management_operation(
+            request,
+            {
+                "action": action_name,
+                "owner": owner,
+                "repo": repo,
+                "workflow_id": workflow_id,
+            },
+            lambda token, operation: update_product(
                 token,
-                request.match_info["owner"],
-                request.match_info["repo"],
-                request.match_info["workflow_id"],
+                owner,
+                repo,
+                workflow_id,
                 data,
+                operation=operation,
             ),
         )
-        return web.json_response(result)
 
     @routes.get(f"{BASE}/publisher/manage/{{owner}}/{{repo}}")
     @endpoint
@@ -1214,13 +1246,25 @@ def register_routes() -> None:
         data = await _json(request)
         if data.get("confirmed") is not True:
             raise UserFacingError("publisher.confirmation_required")
-        storage = UserStorage.from_request(request)
-        token = await _github_token(storage)
-        result = await _guarded_github_call(
-            storage,
-            delete_workflow(token, request.match_info["owner"], request.match_info["repo"], request.match_info["workflow_id"]),
+        owner = request.match_info["owner"]
+        repo = request.match_info["repo"]
+        workflow_id = request.match_info["workflow_id"]
+        return await _start_publisher_management_operation(
+            request,
+            {
+                "action": "delete_workflow",
+                "owner": owner,
+                "repo": repo,
+                "workflow_id": workflow_id,
+            },
+            lambda token, operation: delete_workflow(
+                token,
+                owner,
+                repo,
+                workflow_id,
+                operation=operation,
+            ),
         )
-        return web.json_response(result)
 
     @routes.delete(f"{BASE}/publisher/workflows/{{owner}}/{{repo}}/{{workflow_id}}/versions/{{version}}")
     @endpoint
@@ -1228,38 +1272,56 @@ def register_routes() -> None:
         data = await _json(request)
         if data.get("confirmed") is not True:
             raise UserFacingError("publisher.confirmation_required")
-        storage = UserStorage.from_request(request)
-        token = await _github_token(storage)
-        result = await _guarded_github_call(
-            storage,
-            delete_version(
+        owner = request.match_info["owner"]
+        repo = request.match_info["repo"]
+        workflow_id = request.match_info["workflow_id"]
+        version = request.match_info["version"]
+        return await _start_publisher_management_operation(
+            request,
+            {
+                "action": "delete_version",
+                "owner": owner,
+                "repo": repo,
+                "workflow_id": workflow_id,
+                "version": version,
+            },
+            lambda token, operation: delete_version(
                 token,
-                request.match_info["owner"],
-                request.match_info["repo"],
-                request.match_info["workflow_id"],
-                request.match_info["version"],
+                owner,
+                repo,
+                workflow_id,
+                version,
+                operation=operation,
             ),
         )
-        return web.json_response(result)
 
     @routes.patch(f"{BASE}/publisher/workflows/{{owner}}/{{repo}}/{{workflow_id}}/versions/{{version}}")
     @endpoint
     async def publisher_version_update(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
-        storage = UserStorage.from_request(request)
-        token = await _github_token(storage)
-        result = await _guarded_github_call(
-            storage,
-            update_version_changelog(
+        owner = request.match_info["owner"]
+        repo = request.match_info["repo"]
+        workflow_id = request.match_info["workflow_id"]
+        version = request.match_info["version"]
+        return await _start_publisher_management_operation(
+            request,
+            {
+                "action": "edit_changelog",
+                "owner": owner,
+                "repo": repo,
+                "workflow_id": workflow_id,
+                "version": version,
+            },
+            lambda token, operation: update_version_changelog(
                 token,
-                request.match_info["owner"],
-                request.match_info["repo"],
-                request.match_info["workflow_id"],
-                request.match_info["version"],
+                owner,
+                repo,
+                workflow_id,
+                version,
                 str(data.get("changelog", "")),
+                operation=operation,
             ),
         )
-        return web.json_response(result)
 
     @routes.post(f"{BASE}/operations/{{operation_id}}/manager-results")
     @endpoint
