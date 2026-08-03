@@ -25,6 +25,13 @@ describe("translations", () => {
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("The target directory custom_nodes/example already exists; local files were not overwritten.");
   });
 
+  it("localizes publish stage progress in both languages", () => {
+    locale.value = "zh";
+    expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("发布阶段 5/5 · 正在写入仓库");
+    locale.value = "en";
+    expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("Publish stage 5 of 5 · Updating repository");
+  });
+
   it("keeps localized copy and locale branching out of application surfaces", () => {
     const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
     const hostSource = readFileSync(resolve(process.cwd(), "../web/comfyui/workflow_hub.js"), "utf8");

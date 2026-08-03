@@ -3450,6 +3450,39 @@ pre {
   font-size: 12px;
 }
 
+.operation-stage-progress {
+  width: 100%;
+  margin-top: 10px;
+  gap: 4px;
+}
+
+.operation-stage-progress > span {
+  display: block;
+  height: 6px;
+  flex: 1 1 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 8%);
+  transition: background-color 0.28s ease, box-shadow 0.28s ease;
+}
+
+.operation-stage-progress > span.complete {
+  background: rgb(var(--theme-rgb) / 42%);
+}
+
+.operation-stage-progress > span.active {
+  background: var(--accent);
+  box-shadow: 0 0 10px rgb(var(--theme-rgb) / 30%);
+}
+
+.operation-stage-progress.complete > span {
+  background: var(--success);
+  box-shadow: 0 0 10px rgb(143 186 161 / 18%);
+}
+
+.stage-progress-copy {
+  text-align: left;
+}
+
 .operation-progress {
   position: relative;
   display: block !important;

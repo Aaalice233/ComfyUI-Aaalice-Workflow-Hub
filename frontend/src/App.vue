@@ -189,6 +189,13 @@ const operationStageMessages: Record<string, MessageKey> = {
   complete: "stageComplete",
   failed: "stageFailed",
 };
+const publishProgressStages = [
+  "validating",
+  "creating_release",
+  "uploading",
+  "publishing_release",
+  "updating_repository",
+] as const;
 const backendErrorMessages: Record<string, MessageKey> = {
   "lora.download_confirmation_required": "loraDownloadConfirmationRequired",
   "lora.invalid_type": "loraInvalidType",
@@ -541,12 +548,33 @@ function humanBytes(value: number) {
 function operationStageLabel(stage: string) {
   return t.value(operationStageMessages[stage] || "stageUnknown", { stage });
 }
+function isPublishOperation(item: Operation) {
+  return item.kind === "publish" || item.kind === "publish-resume";
+}
+function publishStageProgress(item: Operation) {
+  const total = publishProgressStages.length;
+  if (item.status === "success" || item.stage === "complete") {
+    return { current: total, completed: total, total, percent: 100 };
+  }
+  const index = publishProgressStages.indexOf(item.stage as typeof publishProgressStages[number]);
+  if (index < 0) return { current: 0, completed: 0, total, percent: 0 };
+  return { current: index + 1, completed: index, total, percent: (index / total) * 100 };
+}
+function publishStageProgressLabel(item: Operation) {
+  const progress = publishStageProgress(item);
+  return t.value("publishStageProgress", {
+    current: progress.current,
+    total: progress.total,
+    stage: operationStageLabel(item.stage),
+  });
+}
 function operationKindLabel(kind: string) {
   const labels: Record<string, MessageKey> = {
     dependencies: "dependencyInstall",
     download: "operationDownload",
     "lora-download": "operationLoraDownload",
     publish: "operationPublish",
+    "publish-resume": "operationPublish",
   };
   return t.value(labels[kind] || "operationUnknown", { kind });
 }
@@ -2039,7 +2067,28 @@ onBeforeUnmount(() => {
       <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
       <article v-for="item in operations" :key="item.id" class="operation">
         <div><strong>{{ operationKindLabel(item.kind) }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
-        <template v-if="item.progress?.total">
+        <template v-if="isPublishOperation(item)">
+          <div
+            class="operation-stage-progress"
+            :class="{ complete: item.status === 'success', failed: item.status === 'failed' }"
+            role="progressbar"
+            :aria-label="publishStageProgressLabel(item)"
+            aria-valuemin="0"
+            :aria-valuemax="publishStageProgress(item).total"
+            :aria-valuenow="publishStageProgress(item).completed"
+          >
+            <span
+              v-for="(_, index) in publishProgressStages"
+              :key="index"
+              :class="{
+                complete: index < publishStageProgress(item).completed,
+                active: item.status === 'running' && index === publishStageProgress(item).current - 1,
+              }"
+            />
+          </div>
+          <small class="progress-copy stage-progress-copy">{{ publishStageProgressLabel(item) }}</small>
+        </template>
+        <template v-else-if="item.progress?.total">
           <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
             :aria-valuenow="Math.round(progressPercent(item.progress))">
             <i :style="{ width: `${progressPercent(item.progress)}%` }" />
