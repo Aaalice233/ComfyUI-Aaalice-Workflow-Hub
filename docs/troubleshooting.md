@@ -22,7 +22,7 @@
 
 ## Manager 不可用
 
-工作流仍可下载。GitHub 依赖使用 ComfyUI 环境中的 Git；历史 Registry 依赖才需要 ComfyUI-Manager `3.0+`（legacy API）或 `4.2.1+`（v2 API）。安装详情会在依赖面板和活动详情中持续显示进度、日志和结果；安装或升级后重启 ComfyUI 即可。Manager 3.x 下如果队列任务被拒绝并返回 403，需把 Manager 的 `security_level` 调整为 `middle` 或更低（默认 `normal` 即可）。
+工作流仍可下载。GitHub 依赖使用 ComfyUI 环境中的 Git；历史 Registry 依赖才需要 ComfyUI-Manager `3.0+`（legacy API）或 `4.2.1+`（v2 API）。补全开始前会检查下载端点；如果提示无法连接，请检查网络、VPN 或 TUN 模式。Git 任务可并行，Python requirements 日志和 Manager post-install 结果都会进入同一安装详情；操作记录按用户持久化，安装或升级后重启 ComfyUI 即可。Manager 3.x 下如果队列任务被拒绝并返回 403，需把 Manager 的 `security_level` 调整为 `middle` 或更低（默认 `normal` 即可）。
 
 ## 同版本下载失败
 

@@ -16,8 +16,8 @@
 
 “管理工作流”页面向对仓库有写权限的作者：选择仓库后可以编辑工作流资料（改名或改类别会在一次原子提交中迁移仓库目录）、归档或取消归档、编辑任意版本的更新日志（同步改写 Release notes），以及删除单个版本或整个工作流。删除最后一个版本时整个工作流一并移除；订阅者已下载的本地副本不受影响。订阅页面的详情只提供下载与查看，不含任何仓库操作。
 
-插件依赖直接扫描当前 `custom_nodes` 下的 Git 工作副本，作者必须取消勾选与工作流无关的项。列表中的名称都是插件仓库，不会把节点类型冒充插件。
+插件依赖同时扫描当前 `custom_nodes` 下的 Git 工作副本和 ComfyUI-Manager 已安装插件，列表用不同颜色的 Git/Manager 徽章区分来源；作者仍需取消勾选与工作流无关的项。列表中的名称都是插件仓库，不会把节点类型冒充插件。
 
-发布的新依赖统一记录 GitHub 仓库地址和完整 40 位 commit。用户补全时由 ComfyUI 环境中的 Git 串行 clone、fetch 和 checkout 到该 commit；历史清单中仍存在的 `registry_id` 依赖则交给 ComfyUI-Manager 兼容队列处理。两种安装方式都在同一个依赖面板和活动详情面板中显示进度、插件状态、原始日志和错误结果。
+Git 依赖记录 GitHub 仓库地址和完整 40 位 commit，Manager 依赖记录 Registry ID 和版本。用户补全时先检查网络环境，再由 Git 并行 clone、fetch 和 checkout Git 依赖，并在同一安装详情中执行和记录 Python `requirements.txt`；Manager 依赖则交给兼容的 ComfyUI-Manager 队列及其 post-install 处理。两种安装方式都在同一个依赖面板和活动详情面板中显示进度、插件状态、原始日志和错误结果，历史记录会持久化保存。
 
 包和目录细节见[协议](protocol.md)，安全限制见[安全边界](security.md)。

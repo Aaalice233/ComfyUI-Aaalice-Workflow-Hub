@@ -1,10 +1,12 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest import IsolatedAsyncioTestCase
+from unittest.mock import AsyncMock, patch
 
 from workflow_hub.catalog import Catalog
-from workflow_hub.service import find_catalog_updates, reveal_in_file_manager
+from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager
+from workflow_hub.storage import UserStorage
 
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "valid" / "workflow-catalog.json"
@@ -71,3 +73,30 @@ class UpdateNotificationTests(unittest.TestCase):
     def test_rejects_a_missing_downloaded_file(self) -> None:
         with self.assertRaisesRegex(ValueError, "本地工作流文件不存在"):
             reveal_in_file_manager(Path("missing-workflow.json"))
+
+
+class SubscriptionStateTests(IsolatedAsyncioTestCase):
+    async def test_removed_catalog_clears_cache_and_hides_old_workflows(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": "etag",
+                "refreshed_at": "",
+                "error": None,
+            }])
+            cache = storage.cache_dir / "owner-repo.json"
+            cache.write_bytes(EXAMPLE.read_bytes())
+            client = patch("workflow_hub.service.GitHubClient").start()
+            client.return_value.get_catalog = AsyncMock(return_value=None)
+            try:
+                result = await refresh_subscription(storage, "owner", "repo")
+            finally:
+                client.stop()
+            self.assertTrue(result["catalog_missing"])
+            self.assertFalse(cache.exists())
+            self.assertEqual(await aggregate_catalog(storage), [])
+            subscriptions = await storage.read_json("subscriptions.json", [])
+            self.assertEqual(subscriptions[0]["error"], "subscription.catalog_missing")

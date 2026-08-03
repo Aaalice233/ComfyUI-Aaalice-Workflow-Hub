@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 import asyncio
 import re
@@ -24,9 +25,26 @@ def _github_url(value: str | None) -> str | None:
     return f"https://github.com/{text}" if text.count("/") == 1 else None
 
 
-def _version_tuple(value: str | None) -> tuple[int, ...] | None:
+def _version_tuple(value: str | None) -> tuple[int, int, int] | None:
     match = re.fullmatch(r"\d+(?:\.\d+){0,2}", str(value or "").strip().lstrip("vV"))
-    return tuple(int(part) for part in match.group(0).split(".")) if match else None
+    if not match:
+        return None
+    parts = [int(part) for part in match.group(0).split(".")]
+    return tuple((parts + [0, 0, 0])[:3])  # type: ignore[return-value]
+
+
+def _manager_compatible(flavor: str, version: str | None) -> bool:
+    numbers = _version_tuple(version)
+    if numbers is None:
+        return False
+    return numbers[0] == 3 if flavor == "legacy" else numbers >= (4, 2, 1)
+
+
+def _source_from_aux(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if text.startswith("https://github.com/"):
+        text = text.removeprefix("https://github.com/").strip("/")
+    return _github_url(text)
 
 
 @dataclass
@@ -73,12 +91,23 @@ class ManagerAdapter:
         detected = await self._detect()
         if detected is None:
             return {"available": False, "compatible": False}
-        return {"available": True, "compatible": True, "version": detected[1], "api": detected[0]}
+        return {
+            "available": True,
+            "compatible": _manager_compatible(detected[0], detected[1]),
+            "version": detected[1],
+            "api": detected[0],
+        }
 
-    async def installed(self) -> dict[str, dict[str, Any]]:
+    async def _require_compatible(self) -> tuple[str, str]:
         detected = await self._detect()
         if detected is None:
             raise UserFacingError("dependencies.manager_unavailable")
+        if not _manager_compatible(*detected):
+            raise UserFacingError("dependencies.manager_incompatible", {"version": detected[1]})
+        return detected
+
+    async def installed(self) -> dict[str, dict[str, Any]]:
+        detected = await self._require_compatible()
         path = "/v2/customnode/installed" if detected[0] == "v2" else "/customnode/installed"
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{self.origin}{path}", timeout=5) as response:
@@ -97,7 +126,8 @@ class ManagerAdapter:
                     **item,
                     "registry_id": registry_id,
                     "aux_id": aux_id,
-                    "name": module_name,
+                    "module_name": module_name,
+                    "name": str(item.get("name") or item.get("title") or module_name),
                     "version": item.get("version") or item.get("ver"),
                 }
             return result
@@ -106,6 +136,7 @@ class ManagerAdapter:
                 **item,
                 "registry_id": item.get("cnr_id") or item.get("id"),
                 "aux_id": item.get("aux_id"),
+                "module_name": item.get("module_name") or item.get("name") or item.get("id"),
                 "name": str(item.get("name") or item.get("title") or item.get("id")),
                 "version": item.get("version") or item.get("ver"),
             }
@@ -113,12 +144,56 @@ class ManagerAdapter:
             if isinstance(item, dict) and item.get("id")
         }
 
-    async def plan(self, dependencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def installed_dependencies(self) -> list[dict[str, Any]]:
+        installed = await self.installed()
+        result: list[dict[str, Any]] = []
+        for item in installed.values():
+            registry_id = str(item.get("registry_id") or "").strip() or None
+            if not registry_id:
+                continue
+            result.append(
+                {
+                    "registry_id": registry_id,
+                    "source_url": _source_from_aux(item.get("aux_id")),
+                    "name": str(item.get("name") or item.get("module_name") or registry_id),
+                    "version": str(item.get("version") or "").strip() or None,
+                    "commit": None,
+                    "required": True,
+                    "manual": False,
+                    "installer": "manager",
+                    "dirty": False,
+                }
+            )
+        return result
+
+    @staticmethod
+    def _find_installed(installed: dict[str, dict[str, Any]], dependency: dict[str, Any]) -> dict[str, Any] | None:
+        registry_id = str(dependency.get("registry_id") or "").strip()
+        source = _source_from_aux(dependency.get("source_url"))
+        names = {
+            str(dependency.get("name") or "").strip().casefold(),
+            str(dependency.get("module_name") or "").strip().casefold(),
+        } - {""}
+        for key in (registry_id, f"github:{source}" if source else ""):
+            if key and key in installed:
+                return installed[key]
+        for item in installed.values():
+            if str(item.get("registry_id") or "").strip() == registry_id:
+                return item
+            if source and _source_from_aux(item.get("aux_id")) == source:
+                return item
+            if str(item.get("module_name") or item.get("name") or "").strip().casefold() in names:
+                return item
+        return None
+
+    async def plan(self, dependencies: list[dict[str, Any]], align_versions: bool = True) -> list[dict[str, Any]]:
         registry_dependencies = [item for item in dependencies if item.get("registry_id") and not item.get("source_url")]
         if not registry_dependencies:
             return []
+        detected = await self._detect()
+        compatible = detected is not None and _manager_compatible(*detected)
         try:
-            installed = await self.installed()
+            installed = await self.installed() if compatible else {}
         except UserFacingError:
             installed = {}
         requested_by_id: dict[str, set[str]] = {}
@@ -130,21 +205,28 @@ class ManagerAdapter:
         for dependency in registry_dependencies:
             registry_id = str(dependency["registry_id"])
             requested = str(dependency.get("version") or "").strip() or None
-            current = installed.get(registry_id)
+            current = self._find_installed(installed, dependency)
             installed_version = str(current.get("version") or "").strip() or None if current else None
             if len(requested_by_id.get(registry_id, set())) > 1:
                 action, warning_code = "conflict", "dependencies.conflicting_registry_versions"
+            elif not compatible:
+                action = "manual"
+                warning_code = "dependencies.manager_incompatible" if detected else "dependencies.manager_unavailable"
             elif not current:
                 action, warning_code = "install", None
-            elif not requested or installed_version == requested:
+            elif not requested:
                 action, warning_code = "keep", None
             else:
                 current_numbers = _version_tuple(installed_version)
                 requested_numbers = _version_tuple(requested)
-                if current_numbers is None or requested_numbers is None:
+                if current_numbers is not None and requested_numbers is not None and current_numbers == requested_numbers:
+                    action, warning_code = "keep", None
+                elif current_numbers is None or requested_numbers is None:
                     action, warning_code = "unknown", "dependencies.manager_version_unknown"
+                elif not align_versions:
+                    action, warning_code = "manual", "dependencies.version_alignment_disabled"
                 else:
-                    action = "upgrade" if current_numbers < requested_numbers else "newer"
+                    action = "upgrade" if current_numbers < requested_numbers else "downgrade"
                     warning_code = None
             result.append(
                 ManagerAction(
@@ -157,18 +239,21 @@ class ManagerAdapter:
                     required=dependency.get("required", True),
                     manual=False,
                     warning_code=warning_code,
-                    warning_params={},
+                    warning_params={"version": detected[1]} if warning_code == "dependencies.manager_incompatible" and detected else {},
                 )
             )
         return [asdict(item) for item in result]
 
-    async def execute(self, actions: list[dict[str, Any]], client_id: str) -> list[dict[str, Any]]:
+    async def execute(
+        self,
+        actions: list[dict[str, Any]],
+        client_id: str,
+        on_queued: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> list[dict[str, Any]]:
         executable = [item for item in actions if item.get("registry_id") and item.get("action") in {"install", "upgrade", "downgrade"}]
         if not executable:
             return []
-        detected = await self._detect()
-        if detected is None:
-            raise UserFacingError("dependencies.manager_unavailable")
+        detected = await self._require_compatible()
         queued: list[dict[str, Any]] = []
         async with aiohttp.ClientSession() as session:
             for item in executable:
@@ -207,6 +292,8 @@ class ManagerAdapter:
                     if response.status not in (200, 201):
                         raise UserFacingError("dependencies.manager_request_failed", {"status": response.status})
                 queued.append(item)
+                if on_queued:
+                    await on_queued(item)
             if detected[0] == "legacy":
                 request = session.get(f"{self.origin}/manager/queue/start")
             else:
@@ -216,10 +303,34 @@ class ManagerAdapter:
                     raise UserFacingError("dependencies.manager_request_failed", {"status": response.status})
         return queued
 
+    async def verify_actions(self, actions: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+        installed = await self.installed()
+        result: dict[str, dict[str, str]] = {}
+        for action in actions:
+            registry_id = str(action.get("registry_id") or "")
+            current = self._find_installed(installed, action)
+            requested = str(action.get("requested") or "").strip()
+            if current is None:
+                result[registry_id] = {"state": "failed", "message": "plugin is not present after installation"}
+                continue
+            installed_version = str(current.get("version") or "").strip()
+            requested_numbers = _version_tuple(requested)
+            version_matches = (
+                _version_tuple(installed_version) == requested_numbers
+                if requested_numbers is not None
+                else installed_version.casefold() == requested.casefold()
+            )
+            if requested and not version_matches:
+                result[registry_id] = {
+                    "state": "failed",
+                    "message": f"installed version {installed_version or 'unknown'} does not match {requested}",
+                }
+                continue
+            result[registry_id] = {"state": "success", "message": installed_version}
+        return result
+
     async def queue_status(self, client_id: str | None = None) -> dict[str, Any]:
-        detected = await self._detect()
-        if detected is None:
-            raise UserFacingError("dependencies.manager_unavailable")
+        detected = await self._require_compatible()
         url = f"{self.origin}/v2/manager/queue/status" if detected[0] == "v2" else f"{self.origin}/manager/queue/status"
         if detected[0] == "v2" and client_id:
             url += f"?client_id={client_id}"
@@ -235,7 +346,7 @@ class ManagerAdapter:
 
     async def queue_history(self, client_id: str) -> dict[str, dict[str, Any]]:
         detected = await self._detect()
-        if detected is None or detected[0] != "v2":
+        if detected is None or not _manager_compatible(*detected) or detected[0] != "v2":
             return {}
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{self.origin}/v2/manager/queue/history?client_id={client_id}", timeout=5) as response:

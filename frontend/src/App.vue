@@ -23,6 +23,8 @@ import {
   GitBranch,
   ImagePlus,
   LibraryBig,
+  LoaderCircle,
+  Clock,
   ListFilter,
   LogOut,
   PackageOpen,
@@ -78,7 +80,7 @@ type Status = {
   github: { configured: boolean; authenticated: boolean; user?: { login: string; avatar_url: string }; persistent_credentials: boolean };
 };
 type Operation = {
-  id: string; kind: string; stage: string; status: string; logs: string[];
+  id: string; kind: string; stage: string; status: string; logs: string[]; metadata?: Record<string, unknown>;
   error_code?: string; error_params?: Record<string, string | number>;
   progress?: { received: number; total: number }; progress_mode?: "bytes" | "tasks";
   result?: Record<string, unknown>;
@@ -94,9 +96,11 @@ type NodeDependencyInfo = {
 };
 type ScannedNodeDependency = NodeDependencyInfo & {
   dirty?: boolean;
+  installer?: "git" | "manager";
 };
 type DependencyResult = {
   name: string; registry_id?: string | null; source_url?: string | null; requested?: string | null; action: string;
+  installer?: "git" | "manager";
   state: "queued" | "installing" | "success" | "failed" | "unknown";
   error_code?: string | null; error_params?: Record<string, string | number>;
 };
@@ -154,10 +158,12 @@ const deviceCodeCopied = ref(false);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
 const selectedDependencyActions = reactive<Record<string, string[]>>({});
 const dependencyConfirmed = reactive<Record<string, boolean>>({});
+const dependencyAlignment = reactive<Record<string, boolean>>({});
 const dependencyOperationIds = reactive<Record<string, string>>({});
 const dependencyOperationSynced = reactive<Record<string, boolean>>({});
 const managerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 const pendingManagerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
+const managerResultSyncing = new Set<string>();
 let managerSocket: WebSocket | null = null;
 let operationTimer = 0;
 let loginTimer = 0;
@@ -165,6 +171,7 @@ let copiedTimer = 0;
 
 const operationStageMessages: Record<string, MessageKey> = {
   queued: "stageQueued",
+  checking_network: "stageCheckingNetwork",
   installing: "stageInstalling",
   downloading: "stageDownloading",
   verifying: "stageVerifying",
@@ -183,6 +190,7 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "lora.unsupported_extension": "loraUnsupportedExtension",
   "lora.existing_content_mismatch": "loraExistingContentMismatch",
   "lora.checksum_mismatch": "loraChecksumMismatch",
+  "dependencies.network_unavailable": "dependenciesNetworkUnavailable",
   "dependencies.git_unavailable": "dependenciesGitUnavailable",
   "dependencies.github_source_invalid": "dependenciesGithubSourceInvalid",
   "dependencies.github_source_missing": "dependenciesGithubSourceMissing",
@@ -192,11 +200,19 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.target_exists": "dependenciesTargetExists",
   "dependencies.git_command_failed": "dependenciesGitCommandFailed",
   "dependencies.manager_unavailable": "dependenciesManagerUnavailable",
+  "dependencies.manager_incompatible": "dependenciesManagerIncompatible",
   "dependencies.manager_request_failed": "dependenciesManagerRequestFailed",
   "dependencies.manager_timeout": "dependenciesManagerTimeout",
   "dependencies.manager_task_failed": "dependenciesManagerTaskFailed",
   "dependencies.manager_version_unknown": "dependenciesManagerVersionUnknown",
   "dependencies.conflicting_registry_versions": "dependenciesConflictingRegistryVersions",
+  "dependencies.version_alignment_disabled": "dependenciesVersionAlignmentDisabled",
+  "dependencies.invalid_version_policy": "dependenciesInvalidVersionPolicy",
+  "dependencies.python_requirements_failed": "dependenciesPythonRequirementsFailed",
+  "dependencies.manager_result_unknown": "dependenciesManagerResultUnknown",
+  "operation.interrupted": "operationInterrupted",
+  "operation.invalid_manager_result": "operationInvalidManagerResult",
+  "subscription.catalog_missing": "subscriptionCatalogMissing",
 };
 
 const form = reactive({
@@ -241,11 +257,9 @@ const activeDependencyOperation = computed(() => {
   const operationId = dependencyOperationIds[dependencyKey(selected.value, activeDetailVersion.value)];
   return operations.value.find((item) => item.id === operationId) || null;
 });
-const activeDependencyExecution = computed(() => {
-  const operation = activeDependencyOperation.value;
-  if (!operation) return null;
+function operationTaskRows(operation: Operation): DependencyExecutionTask[] {
   const rawTasks = Array.isArray(operation.result?.tasks) ? operation.result.tasks as DependencyResult[] : [];
-  const tasks: DependencyExecutionTask[] = rawTasks.map((entry) => {
+  return rawTasks.map((entry) => {
     const registryId = String(entry.registry_id || entry.source_url || entry.name);
     const override = managerTaskOverrides[`${operation.id}:${registryId}`] || pendingManagerTaskOverrides[registryId];
     return {
@@ -256,6 +270,11 @@ const activeDependencyExecution = computed(() => {
       message: override?.message || (entry.error_code ? localizedBackendError(entry.error_code, entry.error_params) : ""),
     };
   });
+}
+const activeDependencyExecution = computed(() => {
+  const operation = activeDependencyOperation.value;
+  if (!operation) return null;
+  const tasks = operationTaskRows(operation);
   return {
     total: operation.progress?.total || tasks.length,
     done: operation.progress?.received || (operation.status === "running" ? 0 : tasks.length),
@@ -323,13 +342,13 @@ function pluginKey(item: NodeDependencyInfo) {
 }
 function catalogDependency(item: ScannedNodeDependency): NodeDependencyInfo {
   return {
-    registry_id: null,
+    registry_id: item.registry_id || null,
     name: item.name,
-    version: null,
-    commit: item.commit || null,
+    version: item.installer === "manager" ? item.version || null : null,
+    commit: item.installer === "git" ? item.commit || null : null,
     required: true,
-    manual: true,
-    source_url: item.source_url || null,
+    manual: item.installer !== "manager",
+    source_url: item.installer === "git" ? item.source_url || null : null,
   };
 }
 function syncSelectedPlugins() {
@@ -347,6 +366,7 @@ function togglePlugin(item: ScannedNodeDependency, checked: boolean) {
   syncSelectedPlugins();
 }
 function pluginVersionLabel(item: ScannedNodeDependency) {
+  if (item.installer === "manager") return item.version || t.value("managerVersionUnavailable");
   return item.commit
     ? t.value("gitCommitVersion", { version: item.commit.slice(0, 8) })
     : t.value("gitRevisionUnavailable");
@@ -439,6 +459,10 @@ function errorMessage(reason: unknown) {
 function operationErrorMessage(item: Operation) {
   const summary = item.error_code ? t.value(backendErrorMessages[item.error_code] || "operationFailed", item.error_params) : "";
   return [summary, ...item.logs].filter(Boolean).join("\n");
+}
+function sourceErrorMessage(item: Source) {
+  const key = item.error ? backendErrorMessages[item.error] : undefined;
+  return key ? t.value(key) : item.error || item.url;
 }
 function moveToPublishStep(step: 1 | 2 | 3) {
   if (step === 1 || (step === 2 && canConfirmPublishResources.value) || (step === 3 && canFinalizePublish.value)) {
@@ -610,22 +634,45 @@ async function revealLocalVersion(item: Product, version: Version) {
     });
   });
 }
+async function loadLocalVersion(item: Product, version: Version) {
+  await withBusy("load-local", async () => {
+    const result = await post<{ workflow: Record<string, unknown> }>("/workflows/local/load", {
+      owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
+    });
+    const message = { type: "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW", workflow: result.workflow };
+    const targets = new Set<Window>();
+    if (window.parent !== window) targets.add(window.parent);
+    if (window.opener && !window.opener.closed) targets.add(window.opener);
+    for (const target of targets) target.postMessage(message, window.location.origin);
+    notice.value = t.value("workflowLoaded");
+  });
+}
 async function planDependencies(item: Product, version: Version) {
   await withBusy("dependency-plan", () => fetchDependencyPlan(item, version));
 }
 async function fetchDependencyPlan(item: Product, version: Version) {
   const key = dependencyKey(item, version);
-  const result = await post<{ items: DependencyPlan[] }>("/workflows/dependencies/plan", { dependencies: version.custom_nodes });
+  const alignVersions = dependencyAlignment[key] ?? true;
+  dependencyAlignment[key] = alignVersions;
+  const result = await post<{ items: DependencyPlan[] }>("/workflows/dependencies/plan", {
+    dependencies: version.custom_nodes,
+    version_policy: alignVersions ? "align" : "warn",
+  });
   dependencyPlans[key] = result.items;
   selectedDependencyActions[key] = result.items
     .map((entry, index) => ({ entry, id: dependencyActionKey(entry, index) }))
-    .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade")
+    .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade" || entry.action === "downgrade")
     .map(({ id }) => id);
   dependencyConfirmed[key] = false;
 }
+async function toggleDependencyAlignment(item: Product, version: Version, enabled: boolean) {
+  const key = dependencyKey(item, version);
+  dependencyAlignment[key] = enabled;
+  await withBusy("dependency-plan", () => fetchDependencyPlan(item, version));
+}
 async function autoPlanDependencies(item: Product | null, version: Version | null) {
   if (!item || !version || !version.custom_nodes.length) return;
-  if (!status.value?.git.available && !status.value?.manager?.available) return;
+  if (!status.value?.git.available && !status.value?.manager?.compatible) return;
   if (dependencyPlans[dependencyKey(item, version)]) return;
   try {
     await fetchDependencyPlan(item, version);
@@ -663,7 +710,7 @@ const dependencyActionLabels: Record<DependencyPlan["action"], MessageKey> = {
   unknown: "depStatusUnknown",
 };
 function dependencyInstallerAvailable(entry: DependencyPlan) {
-  return entry.installer === "manager" ? !!status.value?.manager?.available : !!status.value?.git.available;
+  return entry.installer === "manager" ? !!status.value?.manager?.compatible : !!status.value?.git.available;
 }
 function dependencyActionAvailable(key: string, id: string) {
   const plan = dependencyPlans[key] || [];
@@ -684,11 +731,20 @@ async function executeDependencyPlan(item: Product | null, version: Version | nu
   await withBusy("dependency-execute", async () => {
     if (actions.some((entry) => entry.installer === "manager")) ensureManagerSocket();
     const result = await post<{ operation_id: string }>("/workflows/dependencies/execute", {
-      confirmed: true, actions,
+      confirmed: true,
+      version_policy: dependencyAlignment[key] === false ? "warn" : "align",
+      metadata: { workflow_key: key },
+      actions,
     });
     dependencyConfirmed[key] = false;
     dependencyOperationIds[key] = result.operation_id;
     dependencyOperationSynced[key] = false;
+    try {
+      const operation = await api<Operation>(`/operations/${result.operation_id}`);
+      operations.value = [operation, ...operations.value.filter((item) => item.id !== operation.id)];
+    } catch {
+      // Polling below remains the source of truth if the initial detail read races the operation.
+    }
     void pollOperations();
   });
 }
@@ -708,6 +764,7 @@ function handleManagerQueueEvent(data: Record<string, unknown>) {
   const results = data.nodepack_result as Record<string, unknown>;
   for (const operation of operations.value) {
     if (operation.kind !== "dependencies" || !Array.isArray(operation.result?.tasks)) continue;
+    const updates: Record<string, { state: "success" | "failed"; message: string }> = {};
     for (const task of operation.result.tasks as DependencyResult[]) {
       const registryId = String(task.registry_id || "");
       const message = results[registryId];
@@ -716,13 +773,42 @@ function handleManagerQueueEvent(data: Record<string, unknown>) {
         state: message === "success" ? "success" : "failed",
         message: message === "success" ? "" : message,
       } as const;
+      updates[registryId] = override;
       pendingManagerTaskOverrides[registryId] = override;
       managerTaskOverrides[`${operation.id}:${registryId}`] = override;
     }
+    syncManagerResults(operation, updates);
   }
+}
+function syncManagerResults(operation: Operation, updates: Record<string, { state: "success" | "failed"; message: string }>) {
+  if (!Object.keys(updates).length || managerResultSyncing.has(operation.id)) return;
+  managerResultSyncing.add(operation.id);
+  void post<Operation>(`/operations/${operation.id}/manager-results`, { results: updates })
+    .then((updated) => {
+      operations.value = operations.value.map((item) => item.id === updated.id ? updated : item);
+      for (const registryId of Object.keys(updates)) delete pendingManagerTaskOverrides[registryId];
+    })
+    .catch(() => undefined)
+    .finally(() => managerResultSyncing.delete(operation.id));
 }
 async function pollOperations() {
   operations.value = (await api<{ items: Operation[] }>("/operations")).items;
+  for (const operation of operations.value) {
+    if (operation.kind === "dependencies" && Array.isArray(operation.result?.tasks)) {
+      const updates: Record<string, { state: "success" | "failed"; message: string }> = {};
+      for (const task of operation.result.tasks as DependencyResult[]) {
+        const registryId = String(task.registry_id || "");
+        const override = registryId ? pendingManagerTaskOverrides[registryId] : undefined;
+        if (registryId && override) updates[registryId] = override;
+      }
+      syncManagerResults(operation, updates);
+    }
+    const workflowKey = typeof operation.metadata?.workflow_key === "string" ? operation.metadata.workflow_key : "";
+    if (operation.kind === "dependencies" && workflowKey && !dependencyOperationIds[workflowKey]) {
+      dependencyOperationIds[workflowKey] = operation.id;
+      dependencyOperationSynced[workflowKey] = operation.status !== "running";
+    }
+  }
   for (const [key, operationId] of Object.entries(dependencyOperationIds)) {
     const operation = operations.value.find((item) => item.id === operationId);
     if (!operation || operation.status === "running" || dependencyOperationSynced[key]) continue;
@@ -1252,7 +1338,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-if="sources.length" class="source-chips source-chips-persistent">
-              <div v-for="item in sources" :key="item.url" class="source-chip" :class="{ invalid: item.error }" :title="item.error || item.url">
+              <div v-for="item in sources" :key="item.url" class="source-chip" :class="{ invalid: item.error }" :title="sourceErrorMessage(item)">
                 <AlertCircle v-if="item.error" :size="17" /><FolderGit2 v-else :size="17" />
                 <span>{{ item.owner }}/{{ item.repo }}</span>
                 <button :title="t('refresh')" :aria-label="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="15" /></button>
@@ -1400,7 +1486,7 @@ onBeforeUnmount(() => {
                         />
                         <span class="resource-row-icon"><PackageOpen :size="15" /></span>
                         <span><strong>{{ item.name }}</strong><small :title="pluginSourceLabel(item)">{{ pluginSourceLabel(item) }}</small></span>
-                        <em>{{ pluginVersionLabel(item) }}</em>
+                        <em><b class="dependency-installer-badge" :data-installer="item.installer">{{ item.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ pluginVersionLabel(item) }}</em>
                       </label>
                       <div v-if="!resourceScanPending && !dependencyScanError && !scannedPluginDependencies.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ t("noExtraPlugins") }}</strong><small>{{ t("environmentReady") }}</small></span></div>
                     </div>
@@ -1638,6 +1724,7 @@ onBeforeUnmount(() => {
             <div class="version-actions" :class="{ 'downloaded-actions': selected.downloaded_versions.includes(activeDetailVersion.version) }">
               <button v-if="!selected.downloaded_versions.includes(activeDetailVersion.version)" class="primary wide" :disabled="!!busy" @click="download(selected, activeDetailVersion)"><DownloadIcon :size="17" />{{ t("download") }}</button>
               <template v-else>
+                <button class="primary wide" :disabled="!!busy" @click="loadLocalVersion(selected, activeDetailVersion)"><FileJson :size="17" />{{ t("loadToCanvas") }}</button>
                 <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, activeDetailVersion)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
                 <button class="ghost wide danger-action" :disabled="!!busy" @click="deleteLocalVersion(selected, activeDetailVersion)"><Trash2 :size="16" />{{ t("deleteLocal") }}</button>
               </template>
@@ -1663,13 +1750,13 @@ onBeforeUnmount(() => {
                     <span>
                       <CheckCircle2 v-if="entry && entry.action === 'keep'" :size="15" class="dep-tone-ok" />
                       <CircleX v-else-if="entry && entry.action === 'install'" :size="15" class="dep-tone-missing" />
-                      <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'conflict')" :size="15" class="dep-tone-warn" />
+                      <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict')" :size="15" class="dep-tone-warn" />
                       <PackageOpen v-else :size="15" />
                       <strong>{{ node.name }}</strong><small>{{ node.source_url || t("githubSourceUnavailable") }}</small>
                     </span>
-                    <em>{{ node.commit ? t("gitCommitVersion", { version: node.commit.slice(0, 8) }) : t("gitRevisionUnavailable") }}<b
+                    <em><b v-if="entry" class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ entry?.installer === "manager" && node.version ? t("managerVersion", { version: node.version }) : node.commit ? t("gitCommitVersion", { version: node.commit.slice(0, 8) }) : t("gitRevisionUnavailable") }}<b
                       v-if="entry" class="dependency-status"
-                      :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
+                      :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
                     >{{ t(dependencyActionLabels[entry.action]) }}</b></em>
                     <small v-if="entry && entry.warning_code" class="dependency-warning">{{ dependencyWarning(entry) }}</small>
                   </template>
@@ -1699,13 +1786,18 @@ onBeforeUnmount(() => {
             </details>
 
           <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)]" class="dependency-plan">
-            <div v-if="!status?.git.available && !status?.manager?.available" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
+            <div v-if="!status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
+            <label class="version-alignment-row"><input
+              :checked="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] !== false"
+              type="checkbox"
+              @change="toggleDependencyAlignment(selected, activeDetailVersion, ($event.target as HTMLInputElement).checked)" />{{ t("alignDependencyVersions") }}</label>
+            <div v-if="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] === false" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlignmentDisabledWarning") }}</span></div>
             <label v-for="(entry, index) in dependencyPlans[dependencyKey(selected, activeDetailVersion)]" :key="dependencyActionKey(entry, index)" class="dependency-row">
-              <input v-if="['install','upgrade'].includes(entry.action)" type="checkbox"
+              <input v-if="['install','upgrade','downgrade'].includes(entry.action)" type="checkbox"
                 :checked="selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.includes(dependencyActionKey(entry, index))"
                 :disabled="!dependencyInstallerAvailable(entry)"
                 @change="toggleDependencyAction(dependencyKey(selected, activeDetailVersion), dependencyActionKey(entry, index), ($event.target as HTMLInputElement).checked)" />
-              <span><strong>{{ entry.name }}</strong><small>{{ entry.installed || "—" }} → {{ entry.requested || t("gitRevisionUnavailable") }} · {{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }} · {{ t(dependencyActionLabels[entry.action]) }}<template v-if="entry.warning_code"> · {{ dependencyWarning(entry) }}</template></small></span>
+              <span><strong>{{ entry.name }}</strong><small><b class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ entry.installed || "—" }} → {{ entry.requested || t("gitRevisionUnavailable") }} · {{ t(dependencyActionLabels[entry.action]) }}<template v-if="entry.warning_code"> · {{ dependencyWarning(entry) }}</template></small></span>
             </label>
             <div v-if="activeCoreMismatch" class="message warning"><TriangleAlert :size="16" /><span>{{ t("coreVersionMismatchDetail", { required: comfyuiCompatibilityLabel(activeDetailVersion), current: status?.comfyui_version || "—" }) }}</span></div>
             <label class="confirm-row"><input v-model="dependencyConfirmed[dependencyKey(selected, activeDetailVersion)]" type="checkbox" />{{ t("confirmEnvironment") }}</label>
@@ -1782,6 +1874,15 @@ onBeforeUnmount(() => {
           </div>
           <small class="progress-copy">{{ item.progress_mode === "tasks" ? t("installProgress", { done: item.progress.received, total: item.progress.total }) : `${humanBytes(item.progress.received)} / ${humanBytes(item.progress.total)}` }}</small>
         </template>
+        <ul v-if="item.kind === 'dependencies' && operationTaskRows(item).length" class="operation-tasks">
+          <li v-for="task in operationTaskRows(item)" :key="task.registryId" :data-state="task.state">
+            <LoaderCircle v-if="task.state === 'installing'" :size="14" class="dependency-task-spin" />
+            <CheckCircle2 v-else-if="task.state === 'success'" :size="14" />
+            <AlertCircle v-else-if="task.state === 'failed'" :size="14" />
+            <Clock v-else :size="14" />
+            <span>{{ task.name }}</span><small>{{ task.version || task.installer || "" }}</small>
+          </li>
+        </ul>
         <pre v-if="item.error_code || item.logs.length">{{ operationErrorMessage(item) }}</pre>
       </article>
     </aside>

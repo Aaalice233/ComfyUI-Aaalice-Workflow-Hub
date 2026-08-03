@@ -51,11 +51,6 @@ def _workflow_filename_separator(filename: str | None, version: str) -> str:
     match = _WORKFLOW_FILENAME_RE.fullmatch(basename)
     if not match:
         return "-"
-    try:
-        if normalize_version(match.group("version")) != normalize_version(version):
-            return "-"
-    except ValueError:
-        return "-"
     return match.group("separator")
 
 
@@ -118,21 +113,25 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
         raise ValueError("订阅源不存在")
     client = GitHubClient()
     remote = await client.get_catalog(owner, repo, current.get("etag"))
-    if remote:
+    cache = storage.cache_dir / f"{owner}-{repo}.json"
+    if remote and not remote.not_modified:
         validate_catalog_assets(Catalog.model_validate_json(remote.content))
-        (storage.cache_dir / f"{owner}-{repo}.json").write_bytes(remote.content)
+        cache.write_bytes(remote.content)
+    elif remote is None:
+        cache.unlink(missing_ok=True)
     refreshed_at = datetime.now(timezone.utc).isoformat()
+    catalog_missing = remote is None
 
     def mutate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in items:
             if item["owner"].casefold() == owner.casefold() and item["repo"].casefold() == repo.casefold():
-                item["etag"] = remote.etag if remote else item.get("etag")
+                item["etag"] = remote.etag if remote and not remote.not_modified else item.get("etag")
                 item["refreshed_at"] = refreshed_at
-                item["error"] = None
+                item["error"] = "subscription.catalog_missing" if catalog_missing else None
         return items
 
     await storage.update_json("subscriptions.json", [], mutate)
-    return {"changed": remote is not None, "refreshed_at": refreshed_at}
+    return {"changed": bool(remote and not remote.not_modified), "catalog_missing": catalog_missing, "refreshed_at": refreshed_at}
 
 
 def find_catalog_updates(previous: Catalog, current: Catalog, owner: str, repo: str) -> list[dict[str, str]]:

@@ -18,6 +18,6 @@ The **Manage** tab is for authors with write access to a repository: after selec
 
 Plugin dependencies are scanned from Git worktrees under the current `custom_nodes` directories. The author must deselect entries unrelated to the workflow. Raw node types are never published as plugin names.
 
-New dependencies record the GitHub repository URL and full 40-character commit. Subscribers use the Git executable from the ComfyUI environment to clone, fetch, and checkout that commit serially. Legacy catalog entries with a `registry_id` continue through the compatible ComfyUI-Manager queue. Both installation paths show plugin-level progress, raw logs, and errors in the same dependency panel and activity details.
+The publisher scans both Git worktrees under `custom_nodes` and plugins reported by ComfyUI-Manager; Git and Manager dependencies use distinct source badges, and the author can deselect unrelated plugins. Git dependencies record the GitHub URL and full 40-character commit. Manager dependencies record the Registry ID and version. Subscribers first receive a network check, then Git clone/fetch/checkout tasks may run in parallel while each plugin's Python `requirements.txt` step is logged and counted; Manager dependencies use the compatible ComfyUI-Manager queue and its post-install handling. Both paths share one persistent dependency operation with plugin-level progress, raw logs, errors, and final results.
 
 See the [protocol](protocol.md) and [security boundaries](security.md).

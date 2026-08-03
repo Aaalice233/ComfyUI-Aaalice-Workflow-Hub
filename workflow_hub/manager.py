@@ -23,6 +23,12 @@ class GitCommandError(RuntimeError):
         super().__init__(self.detail)
 
 
+class PythonDependencyError(RuntimeError):
+    def __init__(self, detail: str):
+        self.detail = detail.strip() or "python dependency installation failed"
+        super().__init__(self.detail)
+
+
 @dataclass
 class GitRepository:
     name: str
@@ -119,14 +125,17 @@ async def _run_git(
     executable = _git_executable()
     if executable is None:
         raise UserFacingError("dependencies.git_unavailable")
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        *args,
-        cwd=str(cwd) if cwd else None,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            *args,
+            cwd=str(cwd) if cwd else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise GitCommandError(str(exc)) from exc
     async def read_stream(stream: asyncio.StreamReader) -> bytes:
         chunks: list[bytes] = []
         while True:
@@ -154,6 +163,66 @@ async def _run_git(
         detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
         raise GitCommandError(detail)
     return stdout.decode(errors="replace").strip()
+
+
+async def _install_python_requirements(
+    repository: Path,
+    on_log: Callable[[str], Awaitable[None]] | None = None,
+) -> bool:
+    requirements = repository / "requirements.txt"
+    if not requirements.is_file():
+        if on_log:
+            await on_log(f"{repository.name}: no requirements.txt")
+        return False
+    if on_log:
+        await on_log(f"{repository.name}: installing Python requirements.txt")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "-r",
+            str(requirements),
+            cwd=str(repository),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise PythonDependencyError(str(exc)) from exc
+
+    async def read_stream(stream: asyncio.StreamReader) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            chunk = await stream.read(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if on_log:
+                for line in chunk.decode(errors="replace").replace("\r", "\n").splitlines():
+                    line = line.strip()
+                    if line:
+                        await on_log(line)
+        return b"".join(chunks)
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.gather(read_stream(process.stdout), read_stream(process.stderr)),
+            timeout=1800,
+        )
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise PythonDependencyError("pip install timed out") from exc
+    if process.returncode:
+        detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+        raise PythonDependencyError(detail)
+    if on_log:
+        await on_log(f"{repository.name}: Python requirements installed")
+    return True
 
 
 async def _inspect_repository(path: Path) -> GitRepository | None:
@@ -200,6 +269,7 @@ def _failure(item: dict[str, Any], code: str, params: dict[str, str | int] | Non
         "source_url": _canonical_source(item.get("source_url")),
         "requested": _requested_commit(item),
         "action": str(item.get("action") or ""),
+        "installer": "git",
         "state": "failed",
         "error_code": code,
         "error_params": params or {},
@@ -222,12 +292,13 @@ class GitAdapter:
                     "commit": repository.commit,
                     "required": True,
                     "manual": True,
+                    "installer": "git",
                     "dirty": repository.dirty,
                 }
             )
         return result
 
-    async def plan(self, dependencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def plan(self, dependencies: list[dict[str, Any]], align_versions: bool = True) -> list[dict[str, Any]]:
         dependencies = [
             item for item in dependencies
             if item.get("source_url") or not item.get("registry_id")
@@ -271,6 +342,10 @@ class GitAdapter:
                 warning_code = "dependencies.local_changes"
             elif installed_commit == requested:
                 action = "keep"
+            elif not align_versions:
+                action = "manual"
+                warning_code = "dependencies.version_alignment_disabled"
+                warning_params = {"installed": installed_commit, "requested": requested}
             else:
                 action = "upgrade"
 
@@ -298,69 +373,130 @@ class GitAdapter:
         on_result: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> list[dict[str, Any]]:
         executable = [item for item in actions if item.get("action") in {"install", "upgrade", "downgrade"}]
+        if not executable:
+            return []
+        repositories = await _scan_repositories()
+        unique: dict[str, dict[str, Any]] = {}
+        for item in executable:
+            source = _canonical_source(item.get("source_url"))
+            unique.setdefault(source or str(item.get("name") or ""), item)
+        executable = list(unique.values())
+        total = len(executable) * 2
+        git_done = 0
+        source_locks: dict[str, asyncio.Lock] = {}
+        semaphore = asyncio.Semaphore(min(4, len(executable)))
+
+        async def run_git(item: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
+            source = _canonical_source(item.get("source_url")) or str(item.get("name") or "")
+            lock = source_locks.setdefault(source, asyncio.Lock())
+            async with semaphore, lock:
+                return await self._execute_git_one(item, repositories, on_log=on_log)
+
+        git_results = await asyncio.gather(*(run_git(item) for item in executable))
         results: list[dict[str, Any]] = []
-        total = len(executable)
-        for index, item in enumerate(executable, start=1):
-            if on_log:
-                await on_log(f"{item.get('name') or item.get('source_url')}: starting Git operation")
-            result = await self._execute_one(item, on_log=on_log)
-            results.append(result)
+        for result, _path in git_results:
+            installing = dict(result)
+            if installing.get("state") == "success":
+                installing["state"] = "installing"
+            results.append(installing)
             if on_result:
-                await on_result(result)
+                await on_result(installing)
+            git_done += 1
             if on_progress:
-                await on_progress(index, total)
+                await on_progress(git_done, total)
+
+        python_done = 0
+        for index, (result, path) in enumerate(git_results):
+            final = dict(result)
+            if final.get("state") == "success" and path is not None:
+                name = str(final.get("name") or path.name)
+
+                async def requirements_log(line: str) -> None:
+                    if on_log:
+                        await on_log(f"{name}: {line}")
+
+                try:
+                    installed = await _install_python_requirements(path, on_log=requirements_log)
+                    final["python_requirements"] = "installed" if installed else "not_required"
+                except PythonDependencyError as exc:
+                    final = _failure(
+                        executable[index],
+                        "dependencies.python_requirements_failed",
+                        {"name": name, "detail": exc.detail[-1000:]},
+                    )
+            results[index] = final
+            if on_result:
+                await on_result(final)
+            python_done += 1
+            if on_progress:
+                await on_progress(len(executable) + python_done, total)
         return results
 
-    async def _execute_one(
+    async def _execute_git_one(
         self,
         item: dict[str, Any],
+        repositories: list[GitRepository],
         on_log: Callable[[str], Awaitable[None]] | None = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], Path | None]:
         source = _canonical_source(item.get("source_url"))
         requested = _requested_commit(item)
         if not source:
-            return _failure(item, "dependencies.github_source_invalid")
+            return _failure(item, "dependencies.github_source_invalid"), None
         if not requested:
-            return _failure(item, "dependencies.commit_missing")
+            return _failure(item, "dependencies.commit_missing"), None
 
-        repositories = await _scan_repositories()
+        name = str(item.get("name") or source)
+
+        async def git_log(line: str) -> None:
+            if on_log:
+                await on_log(f"{name}: {line}")
+
         current = next((repository for repository in repositories if repository.source_url == source), None)
         try:
             if current is not None:
                 if current.dirty:
-                    return _failure(item, "dependencies.local_changes")
-                if on_log:
-                    await on_log(f"{current.name}: fetching commit {requested}")
-                await _run_git("fetch", "--no-tags", "origin", cwd=current.path, on_log=on_log)
-                await _run_git("checkout", "--detach", requested, cwd=current.path, on_log=on_log)
-            else:
-                _owner, repo = parse_public_repository(source)
-                root = _custom_node_roots()[0]
-                root.mkdir(parents=True, exist_ok=True)
-                target = ensure_within(root, root / repo)
-                if target.exists():
-                    return _failure(item, "dependencies.target_exists", {"path": target.name})
-                if on_log:
-                    await on_log(f"{repo}: cloning {source}")
-                await _run_git("clone", "--progress", source, str(target), on_log=on_log)
-                try:
-                    await _run_git("checkout", "--detach", requested, cwd=target, on_log=on_log)
-                except (GitCommandError, UserFacingError):
-                    shutil.rmtree(target, ignore_errors=True)
-                    raise
+                    return _failure(item, "dependencies.local_changes"), None
+                await git_log(f"fetching commit {requested}")
+                await _run_git("fetch", "--no-tags", "origin", cwd=current.path, on_log=git_log)
+                await _run_git("checkout", "--detach", requested, cwd=current.path, on_log=git_log)
+                return {
+                    "name": name,
+                    "source_url": source,
+                    "requested": requested,
+                    "action": str(item.get("action") or ""),
+                    "installer": "git",
+                    "state": "success",
+                    "error_code": None,
+                    "error_params": {},
+                }, current.path
+
+            _owner, repo = parse_public_repository(source)
+            root = _custom_node_roots()[0]
+            root.mkdir(parents=True, exist_ok=True)
+            target = ensure_within(root, root / repo)
+            if target.exists():
+                return _failure(item, "dependencies.target_exists", {"path": target.name}), None
+            await git_log(f"cloning {source}")
+            await _run_git("clone", "--progress", source, str(target), on_log=git_log)
+            try:
+                await _run_git("checkout", "--detach", requested, cwd=target, on_log=git_log)
+            except (GitCommandError, UserFacingError):
+                shutil.rmtree(target, ignore_errors=True)
+                raise
+            return {
+                "name": name,
+                "source_url": source,
+                "requested": requested,
+                "action": str(item.get("action") or ""),
+                "installer": "git",
+                "state": "success",
+                "error_code": None,
+                "error_params": {},
+            }, target
         except UserFacingError as exc:
-            return _failure(item, exc.code, exc.params)
+            return _failure(item, exc.code, exc.params), None
         except GitCommandError as exc:
-            return _failure(item, "dependencies.git_command_failed", {"name": str(item.get("name") or source), "detail": exc.detail[-1000:]})
-        return {
-            "name": str(item.get("name") or source),
-            "source_url": source,
-            "requested": requested,
-            "action": str(item.get("action") or ""),
-            "state": "success",
-            "error_code": None,
-            "error_params": {},
-        }
+            return _failure(item, "dependencies.git_command_failed", {"name": name, "detail": exc.detail[-1000:]}), None
 
 
 def local_git_status() -> dict[str, Any]:

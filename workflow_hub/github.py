@@ -91,6 +91,7 @@ class ContentFile:
     content: bytes
     sha: str
     etag: str | None
+    not_modified: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,7 +186,7 @@ class GitHubClient:
                 return None
             raise
         if not data:
-            return None
+            return ContentFile(content=b"", sha="", etag=response_headers.get("ETag"), not_modified=True) if etag and response_headers.get("ETag") == etag else None
         content = base64.b64decode(data["content"])
         return ContentFile(content=content, sha=data["sha"], etag=response_headers.get("ETag"))
 

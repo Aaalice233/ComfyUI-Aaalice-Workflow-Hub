@@ -3098,6 +3098,40 @@ code {
   background: var(--field);
 }
 
+.version-alignment-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.version-alignment-row input {
+  width: auto;
+  min-height: auto;
+  box-shadow: none;
+}
+
+.dependency-installer-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.dependency-installer-badge[data-installer="git"] {
+  color: #b8d7ff;
+  background: rgb(57 126 255 / 18%);
+}
+
+.dependency-installer-badge[data-installer="manager"] {
+  color: #d7c2ff;
+  background: rgb(145 86 255 / 18%);
+}
+
 .dependency-row,
 .confirm-row {
   display: flex;
@@ -3367,6 +3401,50 @@ pre {
 
 .status.failed {
   color: var(--danger);
+}
+
+.operation-tasks {
+  display: grid;
+  margin: 10px 0 0;
+  padding: 0;
+  gap: 6px;
+  list-style: none;
+}
+
+.operation-tasks li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  color: var(--text-soft);
+  font-size: 13px;
+  gap: 6px;
+}
+
+.operation-tasks li svg {
+  color: var(--muted);
+}
+
+.operation-tasks li[data-state="installing"] svg {
+  color: var(--accent);
+}
+
+.operation-tasks li[data-state="success"] svg {
+  color: var(--success);
+}
+
+.operation-tasks li[data-state="failed"] svg {
+  color: var(--danger);
+}
+
+.operation-tasks li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operation-tasks li > small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .operation-progress {

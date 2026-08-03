@@ -147,6 +147,16 @@ function handleHubMessage(event) {
     closeHub();
     return;
   }
+  if (event.data?.type === "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW") {
+    try {
+      if (!event.data.workflow || typeof event.data.workflow !== "object") throw new Error("Invalid workflow payload");
+      app.loadGraphData(event.data.workflow);
+      closeHub();
+    } catch (error) {
+      console.error("[Aaalice Workflow Hub] Failed to load workflow.", error);
+    }
+    return;
+  }
   if (event.data?.type !== "AAALICE_WORKFLOW_HUB_REQUEST_CURRENT_WORKFLOW") return;
 
   try {
