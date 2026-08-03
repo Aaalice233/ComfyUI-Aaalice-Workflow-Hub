@@ -23,6 +23,7 @@ describe("translations", () => {
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("目标目录 custom_nodes/example 已存在，未覆盖本地文件。");
     locale.value = "en";
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("The target directory custom_nodes/example already exists; local files were not overwritten.");
+    expect(t.value("dependencyVersionTransition", { installed: "old", requested: "new" })).toBe("old → new");
   });
 
   it("localizes publish stage progress in both languages", () => {

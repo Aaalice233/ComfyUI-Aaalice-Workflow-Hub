@@ -16,6 +16,10 @@
 
 已存储的 token 过期或被撤销（例如在 GitHub 设置中取消了授权）。插件在 GitHub 返回 401 时会自动清除失效凭据并按未登录处理，重新登录即可。订阅与下载不使用该凭据，不受登录态影响。
 
+## 订阅源刷新失败
+
+订阅清单通过 GitHub Raw 读取；已有订阅会继续使用本地缓存。GitHub Raw 对默认分支内容可能有短暂 CDN 缓存，作者刚发布后请稍等几分钟再刷新。新订阅或刷新失败时，请确认仓库公开、根目录存在 `workflow-catalog.json`，并检查网络、VPN 或 TUN 模式。GitHub Raw 与发布管理使用不同的访问路径，订阅无需 GitHub 登录。
+
 ## 新仓库无法发布
 
 仓库必须公开，并且 GitHub App installation 必须包含该仓库。授权后刷新仓库列表。插件不支持 Personal Access Token 或私有仓库绕过此限制。

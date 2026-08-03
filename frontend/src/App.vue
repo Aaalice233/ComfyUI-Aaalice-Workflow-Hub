@@ -432,6 +432,25 @@ function pluginSourceLabel(item: ScannedNodeDependency) {
   const source = item.source_url || t.value("githubSourceUnavailable");
   return item.dirty ? t.value("gitSourceDirty", { source }) : source;
 }
+function shortDependencyVersion(value: string) {
+  return value.length > 12 ? `${value.slice(0, 8)}…` : value;
+}
+function dependencyVersionLabel(node: NodeDependencyInfo, entry: DependencyPlan | null) {
+  if (entry?.installed) {
+    return t.value("dependencyVersionTransition", {
+      installed: shortDependencyVersion(entry.installed),
+      requested: shortDependencyVersion(entry.requested || t.value("gitRevisionUnavailable")),
+    });
+  }
+  if (entry?.installer === "manager" && node.version) return t.value("managerVersion", { version: node.version });
+  if (node.commit) return t.value("gitCommitVersion", { version: node.commit.slice(0, 8) });
+  if (node.version) return t.value("managerVersion", { version: node.version });
+  return t.value("gitRevisionUnavailable");
+}
+function dependencyVersionTitle(node: NodeDependencyInfo, entry: DependencyPlan | null) {
+  if (entry?.installed || entry?.requested) return [entry.installed, entry.requested].filter(Boolean).join(" → ");
+  return node.commit || node.version || undefined;
+}
 function normalizeVersion(value: string): number[] {
   const parts = value.split(".").map(Number);
   return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
@@ -534,8 +553,21 @@ function dependencyIdentity(item: { task_id?: string; source_url?: string | null
   if (item.registry_id) return `manager:${item.registry_id.trim().toLowerCase()}`;
   return `name:${String(item.name || "").trim().toLowerCase()}`;
 }
-function dependencyActionKey(item: DependencyPlan, _index: number) {
+const dependencyChangeActions = new Set<DependencyPlan["action"]>(["install", "upgrade", "downgrade"]);
+function dependencyActionRequiresSelection(action: DependencyPlan["action"]) {
+  return dependencyChangeActions.has(action);
+}
+function dependencyActionKey(item: DependencyPlan) {
   return `${dependencyIdentity(item)}:${item.requested || ""}:${item.action}`;
+}
+function dependencyActionSelected(key: string, item: DependencyPlan) {
+  return (selectedDependencyActions[key] || []).includes(dependencyActionKey(item));
+}
+function dependencyChangeCount(key: string) {
+  return (dependencyPlans[key] || []).filter((item) => dependencyActionRequiresSelection(item.action)).length;
+}
+function dependencySelectedChangeCount(key: string) {
+  return (dependencyPlans[key] || []).filter((item) => dependencyActionRequiresSelection(item.action) && dependencyActionSelected(key, item)).length;
 }
 function dependencyNodeKey(item: NodeDependencyInfo) {
   return dependencyIdentity(item);
@@ -808,8 +840,8 @@ async function fetchDependencyPlan(item: Product, version: Version) {
     if (dependencyPlanGeneration[key] !== generation) return;
     dependencyPlans[key] = result.items;
     selectedDependencyActions[key] = result.items
-      .map((entry, index) => ({ entry, id: dependencyActionKey(entry, index) }))
-      .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade" || entry.action === "downgrade")
+      .map((entry) => ({ entry, id: dependencyActionKey(entry) }))
+      .filter(({ entry }) => dependencyActionRequiresSelection(entry.action))
       .map(({ id }) => id);
   } catch (reason) {
     if (dependencyPlanGeneration[key] === generation) {
@@ -868,18 +900,22 @@ function dependencyInstallerAvailable(entry: DependencyPlan) {
 }
 function dependencyActionAvailable(key: string, id: string) {
   const plan = dependencyPlans[key] || [];
-  const index = plan.findIndex((entry, entryIndex) => dependencyActionKey(entry, entryIndex) === id);
+  const index = plan.findIndex((entry) => dependencyActionKey(entry) === id);
   return index >= 0 && dependencyInstallerAvailable(plan[index]);
 }
 function toggleDependencyAction(key: string, id: string, checked: boolean) {
   const values = selectedDependencyActions[key] || [];
   selectedDependencyActions[key] = checked ? [...new Set([...values, id])] : values.filter(value => value !== id);
 }
+function toggleDependencyRow(key: string, entry: DependencyPlan | null) {
+  if (!entry || !dependencyActionRequiresSelection(entry.action) || !dependencyInstallerAvailable(entry)) return;
+  toggleDependencyAction(key, dependencyActionKey(entry), !dependencyActionSelected(key, entry));
+}
 async function executeDependencyPlan(item: Product | null, version: Version | null) {
   if (!item || !version) return;
   const key = dependencyKey(item, version);
   const selectedIds = new Set(selectedDependencyActions[key] || []);
-  const actions = (dependencyPlans[key] || []).filter((entry, index) => selectedIds.has(dependencyActionKey(entry, index)));
+  const actions = (dependencyPlans[key] || []).filter((entry) => selectedIds.has(dependencyActionKey(entry)));
   await withBusy("dependency-execute", async () => {
     if (actions.some((entry) => entry.installer === "manager")) ensureManagerSocket();
     const result = await post<{ operation_id: string }>("/workflows/dependencies/execute", {
@@ -1926,7 +1962,6 @@ onBeforeUnmount(() => {
                 <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, activeDetailVersion)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
                 <button class="ghost wide danger-action" :disabled="!!busy" @click="deleteLocalVersion(selected, activeDetailVersion)"><Trash2 :size="16" />{{ t("deleteLocal") }}</button>
               </template>
-              <button v-if="activeDetailVersion.custom_nodes.length" class="secondary wide dependency-action" :disabled="!!busy" @click="planDependencies(selected, activeDetailVersion)"><ListFilter :size="17" />{{ t("checkPluginDependencies") }}</button>
             </div>
 
             <section class="release-note">
@@ -1941,33 +1976,107 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-if="activeDetailVersion.custom_nodes.length || activeDetailVersion.inputs?.length || loraAssets(activeDetailVersion).length" class="resource-groups">
-              <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group">
-                <div class="resource-group-heading"><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong></div>
-                <div v-for="node in activeDetailVersion.custom_nodes" :key="node.source_url || node.registry_id || node.name" class="asset-row">
+              <section v-if="activeDetailVersion.custom_nodes.length" class="resource-group plugin-resource-group">
+                <div class="resource-group-heading dependency-group-heading">
+                  <span><PackageOpen :size="16" /><strong>{{ t("requiredPlugins") }}</strong><em>{{ activeDetailVersion.custom_nodes.length }}</em></span>
+                  <div class="resource-heading-actions">
+                    <button
+                      class="ghost compact-action dependency-refresh-action"
+                      :disabled="!!busy || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
+                      :title="t('checkPluginDependencies')"
+                      @click="planDependencies(selected, activeDetailVersion)"
+                    ><ListFilter :size="14" />{{ t("checkPluginDependencies") }}</button>
+                  </div>
+                </div>
+                <div v-if="dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]" class="dependency-inline-state"><LoaderCircle :size="15" class="dependency-task-spin" /><span>{{ t("checkingDependencies") }}</span></div>
+                <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)]" class="dependency-plan-toolbar">
+                  <div class="dependency-plan-summary">
+                    <strong>{{ t("dependencyPlanSummary", { selected: dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)), total: dependencyChangeCount(dependencyKey(selected, activeDetailVersion)) }) }}</strong>
+                    <small v-if="!dependencyChangeCount(dependencyKey(selected, activeDetailVersion))">{{ t("dependencyNoChanges") }}</small>
+                  </div>
+                  <label class="version-alignment-row"><input
+                    :checked="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] !== false"
+                    type="checkbox"
+                    @change="toggleDependencyAlignment(selected, activeDetailVersion, ($event.target as HTMLInputElement).checked)" />{{ t("alignDependencyVersions") }}</label>
+                </div>
+                <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
+                <div v-if="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] === false" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlignmentDisabledWarning") }}</span></div>
+                <template v-for="node in activeDetailVersion.custom_nodes" :key="node.source_url || node.registry_id || node.name">
                   <template v-for="entry in [dependencyPlanEntry(node)]" :key="`plan-${node.source_url || node.registry_id || node.name}`">
-                    <span>
-                      <CheckCircle2 v-if="entry && entry.action === 'keep'" :size="15" class="dep-tone-ok" />
-                      <CircleX v-else-if="entry && entry.action === 'install'" :size="15" class="dep-tone-missing" />
-                      <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict')" :size="15" class="dep-tone-warn" />
-                      <PackageOpen v-else :size="15" />
-                      <strong>{{ node.name }}</strong><small>{{ node.source_url || t("githubSourceUnavailable") }}</small>
-                    </span>
-                    <em><b v-if="entry" class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ entry?.installer === "manager" && node.version ? t("managerVersion", { version: node.version }) : node.commit ? t("gitCommitVersion", { version: node.commit.slice(0, 8) }) : t("gitRevisionUnavailable") }}<b
-                      v-if="entry" class="dependency-status"
-                      :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
-                    >{{ t(dependencyActionLabels[entry.action]) }}</b></em>
-                    <small v-if="entry && entry.warning_code" class="dependency-warning">{{ dependencyWarning(entry) }}</small>
+                    <div class="asset-row plugin-asset-row" :class="{ 'has-selection': entry && dependencyActionRequiresSelection(entry.action), 'dependency-selected': entry && dependencyActionRequiresSelection(entry.action) && dependencyActionSelected(dependencyKey(selected, activeDetailVersion), entry) }" @click="toggleDependencyRow(dependencyKey(selected, activeDetailVersion), entry)">
+                      <input
+                        v-if="entry && dependencyActionRequiresSelection(entry.action)"
+                        class="asset-select"
+                        type="checkbox"
+                        :aria-label="`${t('selectPlugin')}: ${node.name}`"
+                        :checked="dependencyActionSelected(dependencyKey(selected, activeDetailVersion), entry)"
+                        :disabled="!dependencyInstallerAvailable(entry)"
+                        @click.stop
+                        @change="toggleDependencyAction(dependencyKey(selected, activeDetailVersion), dependencyActionKey(entry), ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span class="asset-identity">
+                        <CheckCircle2 v-if="entry && entry.action === 'keep'" :size="16" class="dep-tone-ok" />
+                        <CircleX v-else-if="entry && entry.action === 'install'" :size="16" class="dep-tone-missing" />
+                        <TriangleAlert v-else-if="entry && (entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict')" :size="16" class="dep-tone-warn" />
+                        <PackageOpen v-else :size="16" />
+                        <strong>{{ node.name }}</strong>
+                        <small :title="node.source_url || node.registry_id || undefined">{{ node.source_url || node.registry_id || t("githubSourceUnavailable") }}</small>
+                        <small v-if="entry && entry.warning_code" class="dependency-warning">{{ dependencyWarning(entry) }}</small>
+                      </span>
+                      <span class="asset-meta">
+                        <span class="asset-meta-line"><b v-if="entry" class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b><small :title="dependencyVersionTitle(node, entry)">{{ dependencyVersionLabel(node, entry) }}</small></span>
+                        <b
+                          v-if="entry"
+                          class="dependency-status"
+                          :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
+                        >{{ t(dependencyActionLabels[entry.action]) }}</b>
+                      </span>
+                    </div>
                   </template>
+                </template>
+                <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && dependencyChangeCount(dependencyKey(selected, activeDetailVersion))" class="dependency-plan-actions">
+                  <button class="primary wide"
+                    :disabled="!dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)) || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
+                    @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("oneClickInstall") }}</button>
+                </div>
+
+                <div v-if="!dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)] && !dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="dependency-inline-state dependency-inline-state-muted"><TriangleAlert :size="15" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
+                <div v-if="activeDependencyExecution" class="dependency-execution">
+                  <div class="dependency-progress-head">
+                    <span>{{ t("installProgress", { done: activeDependencyExecution.done, total: activeDependencyExecution.total }) }}</span>
+                    <div class="dependency-progress"><div class="dependency-progress-bar" :style="{ width: `${Math.round((activeDependencyExecution.done / Math.max(activeDependencyExecution.total, 1)) * 100)}%` }"></div></div>
+                  </div>
+                  <ul class="dependency-tasks">
+                    <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
+                      <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="15" class="dependency-task-spin" />
+                      <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
+                      <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
+                      <Clock v-else :size="15" />
+                      <span class="dependency-task-name"><strong>{{ task.name }}</strong><small v-if="task.version">{{ task.version }}</small></span>
+                      <span class="dependency-task-state">{{ t(dependencyTaskStateKeys[task.state]) }}</span>
+                      <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
+                    </li>
+                  </ul>
+                  <details v-if="activeDependencyExecution.logs.length" class="dependency-logs" open>
+                    <summary>{{ t("installLogs", { count: activeDependencyExecution.logs.length }) }}</summary>
+                    <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
+                  </details>
+                  <div v-if="activeDependencyExecution.finished" class="dependency-result">
+                    <span v-if="dependencyExecutionFailures">{{ t("installFinishedWithFailures", { count: dependencyExecutionFailures }) }}</span>
+                    <span v-else>{{ t("installFinished") }}</span>
+                    <span v-if="!dependencyExecutionFailures">{{ t("restartToApply") }}</span>
+                    <pre v-if="dependencyExecutionFailures && activeDependencyOperation?.error_code">{{ operationErrorMessage(activeDependencyOperation) }}</pre>
+                  </div>
                 </div>
               </section>
-              <section v-if="activeDetailVersion.inputs?.length" class="resource-group">
+              <section v-if="activeDetailVersion.inputs?.length" class="resource-group supporting-resource-group" :class="{ 'resource-group-wide': !loraAssets(activeDetailVersion).length }">
                 <div class="resource-group-heading"><FileUp :size="16" /><strong>{{ t("includedImages") }}</strong></div>
                 <div v-for="input in activeDetailVersion.inputs" :key="input.archive" class="asset-row">
                   <span><FileUp :size="15" /><strong>{{ input.source }}</strong><small>{{ t("referenceCount", { count: input.node_ids.length }) }}</small></span>
                   <em>{{ humanBytes(input.size) }}</em>
                 </div>
               </section>
-              <section v-if="loraAssets(activeDetailVersion).length" class="resource-group">
+              <section v-if="loraAssets(activeDetailVersion).length" class="resource-group supporting-resource-group" :class="{ 'resource-group-wide': !activeDetailVersion.inputs?.length }">
                 <div class="resource-group-heading"><TriangleAlert :size="16" /><strong>{{ t("optionalLoras") }}</strong><small>{{ t("downloadIndividually") }}</small></div>
                 <div v-for="model in loraAssets(activeDetailVersion)" :key="`${model.type}:${model.filename}`" class="model-asset">
                   <span><strong>{{ model.name }}</strong><small>{{ model.filename }}</small></span>
@@ -1983,54 +2092,6 @@ onBeforeUnmount(() => {
               </div>
             </details>
 
-          <div v-if="dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]" class="message info"><LoaderCircle :size="17" class="dependency-task-spin" /><span>{{ t("checkingDependencies") }}</span></div>
-          <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)]" class="dependency-plan">
-            <div v-if="!status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
-            <label class="version-alignment-row"><input
-              :checked="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] !== false"
-              type="checkbox"
-              @change="toggleDependencyAlignment(selected, activeDetailVersion, ($event.target as HTMLInputElement).checked)" />{{ t("alignDependencyVersions") }}</label>
-            <div v-if="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] === false" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlignmentDisabledWarning") }}</span></div>
-            <label v-for="(entry, index) in dependencyPlans[dependencyKey(selected, activeDetailVersion)]" :key="dependencyActionKey(entry, index)" class="dependency-row">
-              <input v-if="['install','upgrade','downgrade'].includes(entry.action)" type="checkbox"
-                :checked="selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.includes(dependencyActionKey(entry, index))"
-                :disabled="!dependencyInstallerAvailable(entry)"
-                @change="toggleDependencyAction(dependencyKey(selected, activeDetailVersion), dependencyActionKey(entry, index), ($event.target as HTMLInputElement).checked)" />
-              <span><strong>{{ entry.name }}</strong><small><b class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ entry.installed || "—" }} → {{ entry.requested || t("gitRevisionUnavailable") }} · {{ t(dependencyActionLabels[entry.action]) }}<template v-if="entry.warning_code"> · {{ dependencyWarning(entry) }}</template></small></span>
-            </label>
-            <div v-if="activeCoreMismatch" class="message warning"><TriangleAlert :size="16" /><span>{{ t("coreVersionMismatchDetail", { required: comfyuiCompatibilityLabel(activeDetailVersion), current: status?.comfyui_version || "—" }) }}</span></div>
-            <button class="primary wide"
-              :disabled="!selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.length || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
-              @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("oneClickInstall") }}</button>
-
-            <div v-if="activeDependencyExecution" class="dependency-execution">
-              <div class="dependency-progress-head">
-                <span>{{ t("installProgress", { done: activeDependencyExecution.done, total: activeDependencyExecution.total }) }}</span>
-                <div class="dependency-progress"><div class="dependency-progress-bar" :style="{ width: `${Math.round((activeDependencyExecution.done / Math.max(activeDependencyExecution.total, 1)) * 100)}%` }"></div></div>
-              </div>
-              <ul class="dependency-tasks">
-                <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
-                  <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="15" class="dependency-task-spin" />
-                  <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
-                  <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
-                  <Clock v-else :size="15" />
-                  <span class="dependency-task-name"><strong>{{ task.name }}</strong><small v-if="task.version">{{ task.version }}</small></span>
-                  <span class="dependency-task-state">{{ t(dependencyTaskStateKeys[task.state]) }}</span>
-                  <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
-                </li>
-              </ul>
-              <details v-if="activeDependencyExecution.logs.length" class="dependency-logs" open>
-                <summary>{{ t("installLogs", { count: activeDependencyExecution.logs.length }) }}</summary>
-                <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
-              </details>
-              <div v-if="activeDependencyExecution.finished" class="dependency-result">
-                <span v-if="dependencyExecutionFailures">{{ t("installFinishedWithFailures", { count: dependencyExecutionFailures }) }}</span>
-                <span v-else>{{ t("installFinished") }}</span>
-                <span v-if="!dependencyExecutionFailures">{{ t("restartToApply") }}</span>
-                <pre v-if="dependencyExecutionFailures && activeDependencyOperation?.error_code">{{ operationErrorMessage(activeDependencyOperation) }}</pre>
-              </div>
-            </div>
-          </div>
         </article>
         </div>
       </aside>

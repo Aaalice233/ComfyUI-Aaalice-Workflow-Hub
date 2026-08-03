@@ -15,6 +15,7 @@ class SecurityTests(unittest.TestCase):
     def test_url_allowlist(self):
         self.assertEqual(require_github_https("https://api.github.com/repos/a/b"), "https://api.github.com/repos/a/b")
         self.assertEqual(require_github_https("https://uploads.github.com/repos/a/b/releases/1/assets"), "https://uploads.github.com/repos/a/b/releases/1/assets")
+        self.assertEqual(require_github_https("https://raw.githubusercontent.com/owner/repo/HEAD/workflow-catalog.json"), "https://raw.githubusercontent.com/owner/repo/HEAD/workflow-catalog.json")
         for value in ("http://github.com/a/b", "https://evil.example/a.zip", "https://token@github.com/a/b"):
             with self.assertRaises(ValueError):
                 require_github_https(value)

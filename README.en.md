@@ -14,7 +14,7 @@ A public workflow subscription, publishing, and version-management extension for
 
 ### Subscribe and download
 
-- Subscribe to public GitHub repositories containing `workflow-catalog.json`, then search, filter, and browse version history and release notes in one aggregated catalog.
+- Subscribe to public GitHub repositories containing `workflow-catalog.json`, then search, filter, and browse version history and release notes in one aggregated catalog. Catalog reads use GitHub Raw and a local cache, so they do not depend on the anonymous GitHub REST API quota.
 - Every workflow version lives on the default branch under a readable category/name/version path, so repository visitors can browse, back up, or download source files without searching through Releases.
 - Download and verify Release ZIPs by version. Each local version is stored as a separate workflow file, and its folder can be opened directly from the detail page.
 - The detail page retains each published version's plugin dependencies, bundled images, and LoRA list. Historical LoRAs are downloaded one at a time and only on explicit request — never automatically.

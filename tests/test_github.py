@@ -62,6 +62,16 @@ class GitDataClient(GitHubClient):
         raise AssertionError((method, url))
 
 
+class RawCatalogClient(GitHubClient):
+    def __init__(self):
+        super().__init__()
+        self.call = None
+
+    async def request(self, method: str, url: str, **kwargs):
+        self.call = (method, url, kwargs)
+        return b"{}", {"ETag": '"raw-etag"'}
+
+
 class WriteOnlyKeyring:
     def set_password(self, *_args):
         return None
@@ -85,6 +95,20 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["full_name"] for item in items], ["owner/alpha", "owner/Zeta"])
         self.assertEqual(items[0]["default_branch"], "trunk")
         self.assertEqual(items[1]["description"], "Catalog")
+
+    async def test_reads_public_catalog_from_raw_default_branch(self):
+        client = RawCatalogClient()
+
+        result = await client.get_raw_catalog("owner", "repo", '"old-etag"')
+
+        self.assertEqual(result.content, b"{}")
+        self.assertEqual(result.etag, '"raw-etag"')
+        self.assertEqual(client.call[0], "GET")
+        self.assertEqual(
+            client.call[1],
+            "https://raw.githubusercontent.com/owner/repo/HEAD/workflow-catalog.json",
+        )
+        self.assertEqual(client.call[2]["headers"], {"Accept": "text/plain", "If-None-Match": '"old-etag"'})
 
     async def test_token_remains_in_session_when_keyring_read_fails(self):
         store = TokenStore()

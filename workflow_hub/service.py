@@ -166,7 +166,7 @@ def _valid_cached_catalog(path: Path) -> Catalog | None:
 async def add_subscription(storage: UserStorage, repository_url: str) -> dict[str, Any]:
     owner, repo = parse_public_repository(repository_url)
     client = GitHubClient()
-    remote = await client.get_catalog(owner, repo)
+    remote = await client.get_raw_catalog(owner, repo)
     if remote is None:
         raise ValueError("仓库根目录没有 workflow-catalog.json")
     catalog = validate_catalog_assets(Catalog.model_validate_json(remote.content))
@@ -175,6 +175,7 @@ async def add_subscription(storage: UserStorage, repository_url: str) -> dict[st
         "repo": repo,
         "url": f"https://github.com/{owner}/{repo}",
         "etag": remote.etag,
+        "catalog_hash": hashlib.sha256(remote.content).hexdigest(),
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "error": None,
     }
@@ -205,7 +206,7 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
     if current is None:
         raise UserFacingError("subscription.not_found")
     client = GitHubClient()
-    remote = await client.get_catalog(owner, repo, current.get("etag"))
+    remote = await client.get_raw_catalog(owner, repo, current.get("etag"))
     cache = subscription_cache_path(storage, owner, repo)
     canonical_cache, legacy_cache = _cache_paths(storage, owner, repo)
     try:
@@ -214,10 +215,11 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
         raise UserFacingError("subscription.cache_unavailable") from exc
     unchanged = bool(remote and remote.not_modified and cached_catalog is not None)
     if remote and remote.not_modified and cached_catalog is None:
-        remote = await client.get_catalog(owner, repo)
+        remote = await client.get_raw_catalog(owner, repo)
         unchanged = bool(remote and remote.not_modified and cached_catalog is not None)
         if remote and remote.not_modified:
             remote = None
+    catalog_hash = hashlib.sha256(remote.content).hexdigest() if remote and not remote.not_modified else None
     if remote and not remote.not_modified:
         try:
             validate_catalog_assets(Catalog.model_validate_json(remote.content))
@@ -234,7 +236,9 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
                 ],
             )
             raise UserFacingError("subscription.catalog_invalid") from exc
-        _write_cache(canonical_cache, remote.content)
+        unchanged = cached_catalog is not None and current.get("catalog_hash") == catalog_hash
+        if not unchanged:
+            _write_cache(canonical_cache, remote.content)
         if legacy_cache != canonical_cache:
             legacy_cache.unlink(missing_ok=True)
         cache = canonical_cache
@@ -247,13 +251,15 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
     def mutate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in items:
             if item["owner"].casefold() == owner.casefold() and item["repo"].casefold() == repo.casefold():
-                item["etag"] = remote.etag if remote and not remote.not_modified else item.get("etag")
+                if remote and not remote.not_modified:
+                    item["etag"] = remote.etag
+                    item["catalog_hash"] = catalog_hash
                 item["refreshed_at"] = refreshed_at
                 item["error"] = "subscription.catalog_missing" if catalog_missing else None
         return items
 
     await storage.update_json("subscriptions.json", [], mutate)
-    return {"changed": bool(remote and not remote.not_modified), "catalog_missing": catalog_missing, "refreshed_at": refreshed_at}
+    return {"changed": bool(remote and not remote.not_modified and not unchanged), "catalog_missing": catalog_missing, "refreshed_at": refreshed_at}
 
 
 def find_catalog_updates(previous: Catalog, current: Catalog, owner: str, repo: str) -> list[dict[str, str]]:

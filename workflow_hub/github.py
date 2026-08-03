@@ -14,6 +14,7 @@ import aiohttp
 from .security import require_github_https
 
 API = "https://api.github.com"
+RAW = "https://raw.githubusercontent.com"
 DEVICE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 CLIENT_ID = os.getenv("WORKFLOW_HUB_GITHUB_CLIENT_ID", "Iv23likAV8HgkxJ6f6Rz")
@@ -189,6 +190,23 @@ class GitHubClient:
             return ContentFile(content=b"", sha="", etag=response_headers.get("ETag"), not_modified=True) if etag and response_headers.get("ETag") == etag else None
         content = base64.b64decode(data["content"])
         return ContentFile(content=content, sha=data["sha"], etag=response_headers.get("ETag"))
+
+    async def get_raw_catalog(self, owner: str, repo: str, etag: str | None = None) -> ContentFile | None:
+        headers = {"Accept": "text/plain"}
+        if etag:
+            headers["If-None-Match"] = etag
+        url = f"{RAW}/{quote(owner, safe='')}/{quote(repo, safe='')}/HEAD/workflow-catalog.json"
+        try:
+            data, response_headers = await self.request("GET", url, expected=(200, 304), headers=headers)
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if data is None:
+            return ContentFile(content=b"", sha="", etag=response_headers.get("ETag"), not_modified=True)
+        if not isinstance(data, bytes):
+            raise GitHubError("Raw 工作流清单响应不是文件内容", 502)
+        return ContentFile(content=data, sha="", etag=response_headers.get("ETag"))
 
     async def put_catalog(self, owner: str, repo: str, catalog: bytes, sha: str | None, message: str) -> str:
         payload: dict[str, Any] = {"message": message, "content": base64.b64encode(catalog).decode("ascii")}
