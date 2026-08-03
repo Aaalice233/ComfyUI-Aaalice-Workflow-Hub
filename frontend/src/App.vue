@@ -1217,6 +1217,10 @@ function manageRepositoryFullName() {
   const match = manageRepositoryUrl.value.match(/github\.com\/([^/]+\/[^/]+)/i);
   return match ? match[1].replace(/\/+$/, "") : "";
 }
+const manageRepositoryPageUrl = computed(() => {
+  const fullName = manageRepositoryFullName();
+  return fullName ? `https://github.com/${fullName.split("/").map(encodeURIComponent).join("/")}` : "";
+});
 function managedVersions(product: ManagedProduct) {
   return [...product.versions].sort((a, b) => {
     const left = normalizeVersion(a.version), right = normalizeVersion(b.version);
@@ -1780,6 +1784,17 @@ onBeforeUnmount(() => {
                       <span class="select-chevron" aria-hidden="true"><ChevronDown :size="15" :stroke-width="2.4" /></span>
                     </span>
                   </label>
+                  <a
+                    class="secondary compact-action manage-repository-link"
+                    :href="manageRepositoryPageUrl || undefined"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    :aria-disabled="!manageRepositoryPageUrl"
+                    :aria-label="manageRepositoryPageUrl ? `${t('repositoryPage')}: ${manageRepositoryFullName()}` : t('repositoryPage')"
+                    :title="t('repositoryPage')"
+                  >
+                    <ExternalLink :size="14" />{{ t("repositoryPage") }}
+                  </a>
                   <button class="ghost compact-action" :disabled="!!busy || manageLoading" @click="withBusy('manage', loadManaged)"><RefreshCw :size="15" />{{ t("refreshManaged") }}</button>
                 </header>
                 <p class="manage-hint">{{ t("manageHint") }}</p>

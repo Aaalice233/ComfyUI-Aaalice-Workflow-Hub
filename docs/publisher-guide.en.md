@@ -14,7 +14,7 @@ Published versions cannot be overwritten. Deleting a version or an entire workfl
 
 ## Managing published content
 
-The **Manage** tab is for authors with write access to a repository: after selecting a repository you can edit workflow metadata (renaming or re-categorizing migrates the repository directory in one atomic commit), archive or unarchive, edit any version's changelog (which also rewrites the Release notes), and delete a single version or an entire workflow. Deleting the last version removes the workflow entirely; subscribers' downloaded local copies are not affected. The subscription detail only offers downloading and viewing, with no repository operations.
+The **Manage** tab is for authors with write access to a repository: after selecting a repository you can open its original GitHub page, edit workflow metadata (renaming or re-categorizing migrates the repository directory in one atomic commit), archive or unarchive, edit any version's changelog (which also rewrites the Release notes), and delete a single version or an entire workflow. Deleting the last version removes the workflow entirely; subscribers' downloaded local copies are not affected. The subscription detail only offers downloading and viewing, with no repository operations.
 
 Plugin dependencies are scanned from Git worktrees under the current `custom_nodes` directories. The author must deselect entries unrelated to the workflow. Raw node types are never published as plugin names.
 
