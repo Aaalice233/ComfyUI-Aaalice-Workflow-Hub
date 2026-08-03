@@ -47,3 +47,29 @@ class OperationStoreTests(IsolatedAsyncioTestCase):
             self.assertEqual(items[0]["status"], "failed")
             self.assertEqual(items[0]["stage"], "failed")
             self.assertEqual(items[0]["error_code"], "operation.interrupted")
+
+    async def test_corrupt_operation_state_is_quarantined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = UserStorage(Path(directory))
+            state = storage.state_dir / "operations.json"
+            state.write_text("{", encoding="utf-8")
+
+            restored = OperationStore()
+            self.assertEqual(await restored.list(storage), [])
+            self.assertEqual(state.read_text(encoding="utf-8").strip(), "[]")
+            self.assertEqual(len(list(storage.state_dir.glob("operations.corrupt-*.json"))), 1)
+
+    async def test_public_operation_redacts_sensitive_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = UserStorage(Path(directory))
+            store = OperationStore()
+            operation = await store.create(
+                "download",
+                storage,
+                {"access_token": "secret", "nested": {"password": "pw"}, "url": "https://example.test"},
+            )
+
+            public = operation.public()
+            self.assertEqual(public["metadata"]["access_token"], "[REDACTED]")
+            self.assertEqual(public["metadata"]["nested"]["password"], "[REDACTED]")
+            self.assertEqual(public["metadata"]["url"], "https://example.test")

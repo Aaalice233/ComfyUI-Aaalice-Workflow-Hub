@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import tempfile
 import zipfile
@@ -10,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .assets import IMAGE_LOADER_TYPES, _image_widget_indexes, _ui_nodes
-from .security import ensure_within, safe_filename, validate_zip_name
+from .security import ensure_within, repository_storage_key, safe_filename, validate_zip_name
 
 MAX_PACKAGE = 256 * 1024 * 1024
 MAX_ENTRY = 64 * 1024 * 1024
@@ -78,21 +79,35 @@ def inspect_package(path: Path, expected_sha256: str | None = None) -> dict[str,
             raise ValueError(f"工作流包缺少必需文件: {', '.join(sorted(REQUIRED - names))}")
         if {"preview.png", "preview.webp"}.issubset(names):
             raise ValueError("预览图最多一个")
-        manifest = json.loads(archive.read("manifest.json"))
-        workflow = json.loads(archive.read("workflow.json"))
+        try:
+            manifest = json.loads(archive.read("manifest.json"))
+            workflow = json.loads(archive.read("workflow.json"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("工作流包中的 JSON 无效") from exc
+        if not isinstance(manifest, dict) or not isinstance(workflow, dict):
+            raise ValueError("工作流包的 manifest.json 和 workflow.json 必须是对象")
         declared = manifest.get("inputs", [])
         if not isinstance(declared, list):
             raise ValueError("manifest.inputs 必须是数组")
-        declared_names = {str(item.get("archive", "")) for item in declared if isinstance(item, dict)}
+        declared_names = {
+            item.get("archive")
+            for item in declared
+            if isinstance(item, dict) and isinstance(item.get("archive"), str)
+        }
         bundled_names = {name for name in names if name.startswith("inputs/")}
         if declared_names != bundled_names:
             raise ValueError("manifest.inputs 与包内图像不一致")
         for item in declared:
             if (
                 not isinstance(item, dict)
+                or not isinstance(item.get("archive"), str)
+                or item.get("archive") not in bundled_names
                 or not isinstance(item.get("source"), str)
                 or not isinstance(item.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
                 or not isinstance(item.get("size"), int)
+                or item["size"] <= 0
+                or item["size"] > MAX_ENTRY
             ):
                 raise ValueError("manifest.inputs 条目无效")
             content = archive.read(item["archive"])
@@ -173,9 +188,15 @@ def install_workflow(
     version: str,
     expected_sha256: str,
     input_root: Path | None = None,
+    input_namespace: str = "Workflow Hub",
 ) -> tuple[Path, str]:
     inspected = inspect_package(package_path, expected_sha256)
-    directory = ensure_within(workflows_root, workflows_root / safe_filename(f"{owner}-{repo}") / workflow_id)
+    source_label = safe_filename(f"{owner}-{repo}")
+    source_name = f"{source_label[:98].rstrip(' .')}-{repository_storage_key(owner, repo)}"
+    workflow_directory = safe_filename(str(workflow_id))
+    if workflow_directory != str(workflow_id):
+        workflow_directory = f"{workflow_directory}-{hashlib.sha256(str(workflow_id).encode('utf-8')).hexdigest()[:8]}"
+    directory = ensure_within(workflows_root, workflows_root / source_name / workflow_directory)
     directory.mkdir(parents=True, exist_ok=True)
     separator = inspected["manifest"].get("filename_separator", "-")
     if separator not in FILENAME_SEPARATORS:
@@ -183,13 +204,17 @@ def install_workflow(
     target = ensure_within(directory, directory / f"{safe_filename(display_name)}{separator}v{version}.json")
     workflow = inspected["workflow"]
     inputs = inspected["manifest"].get("inputs", [])
+    pending_inputs: list[tuple[Path, bytes]] = []
     if inputs:
         if input_root is None:
             raise ValueError("工作流包包含输入图像，但 ComfyUI input 目录不可用")
         input_root = input_root.resolve()
+        namespace = Path(input_namespace.replace("\\", "/"))
+        if namespace.is_absolute() or ".." in namespace.parts:
+            raise ValueError("输入图像目录无效")
         input_directory = ensure_within(
             input_root,
-            input_root / "Workflow Hub" / safe_filename(f"{owner}-{repo}") / safe_filename(workflow_id),
+            input_root / namespace / source_name / workflow_directory,
         )
         input_directory.mkdir(parents=True, exist_ok=True)
         replacements: dict[str, str] = {}
@@ -201,23 +226,60 @@ def install_workflow(
                 if image_target.exists() and hashlib.sha256(image_target.read_bytes()).hexdigest() != item["sha256"]:
                     raise ValueError(f"同名输入图像内容不一致，已拒绝覆盖: {filename}")
                 if not image_target.exists():
-                    image_target.write_bytes(content_bytes)
+                    pending_inputs.append((image_target, content_bytes))
                 relative = image_target.relative_to(input_root).as_posix()
                 replacements[str(item["source"])] = relative
         _replace_load_image_references(workflow, replacements)
     content = json.dumps(workflow, ensure_ascii=False, indent=2) + "\n"
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def write_pending_inputs() -> list[Path]:
+        created: list[Path] = []
+        try:
+            for image_target, content_bytes in pending_inputs:
+                descriptor, temp_name = tempfile.mkstemp(prefix=".input-", suffix=".tmp", dir=image_target.parent)
+                try:
+                    with os.fdopen(descriptor, "wb") as stream:
+                        stream.write(content_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    try:
+                        os.link(temp_name, image_target)
+                        created.append(image_target)
+                    except FileExistsError:
+                        if hashlib.sha256(image_target.read_bytes()).digest() != hashlib.sha256(content_bytes).digest():
+                            raise ValueError(f"同名输入图像内容不一致，已拒绝覆盖: {image_target.name}")
+                finally:
+                    if os.path.exists(temp_name):
+                        os.unlink(temp_name)
+        except BaseException:
+            for image_target in created:
+                image_target.unlink(missing_ok=True)
+            raise
+        return created
+
     if target.exists():
         if hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
             raise ValueError("同版本本地文件内容不一致，已拒绝覆盖")
+        write_pending_inputs()
         return target, content_hash
-    descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-", suffix=".tmp", dir=directory)
+    created_inputs = write_pending_inputs()
+    temp_name = ""
     try:
+        descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-", suffix=".tmp", dir=directory)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp_name, target)
+        try:
+            os.link(temp_name, target)
+        except FileExistsError:
+            if hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
+                raise ValueError("同版本本地文件内容不一致，已拒绝覆盖")
+    except BaseException:
+        for image_target in created_inputs:
+            image_target.unlink(missing_ok=True)
+        raise
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)

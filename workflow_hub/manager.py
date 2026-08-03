@@ -64,6 +64,14 @@ def _canonical_source(value: str | None) -> str | None:
     return f"https://github.com/{owner}/{repo}"
 
 
+def _source_key(value: str | None) -> str | None:
+    source = _canonical_source(value)
+    if not source:
+        return None
+    owner, repo = parse_public_repository(source)
+    return f"https://github.com/{owner.casefold()}/{repo.casefold()}"
+
+
 def _remote_source(value: str | None) -> str | None:
     text = str(value or "").strip()
     if text.startswith("git@github.com:"):
@@ -106,10 +114,6 @@ def _git_executable() -> str | None:
     candidates.extend((executable_dir / "git.exe", executable_dir / "Scripts" / "git.exe"))
     for root in (_comfyui_root(), _comfyui_root().parent):
         candidates.extend((root / "git" / "cmd" / "git.exe", root / "git" / "bin" / "git"))
-    path_git = shutil.which("git")
-    if path_git:
-        candidates.append(Path(path_git))
-
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
@@ -225,6 +229,25 @@ async def _install_python_requirements(
     return True
 
 
+async def _rollback_git_state(
+    result: dict[str, Any],
+    path: Path,
+    on_log: Callable[[str], Awaitable[None]] | None = None,
+) -> str | None:
+    try:
+        if result.get("_cloned"):
+            shutil.rmtree(path, ignore_errors=False)
+            if on_log:
+                await on_log(f"{path.name}: removed incomplete clone")
+        elif result.get("_previous_commit"):
+            await _run_git("checkout", "--detach", str(result["_previous_commit"]), cwd=path, on_log=on_log)
+            if on_log:
+                await on_log(f"{path.name}: restored previous commit")
+    except (GitCommandError, OSError) as exc:
+        return str(exc)
+    return None
+
+
 async def _inspect_repository(path: Path) -> GitRepository | None:
     if not (path / ".git").exists():
         return None
@@ -263,8 +286,13 @@ def _requested_commit(item: dict[str, Any]) -> str | None:
     return legacy_version if _is_commit(legacy_version) else None
 
 
+def _public_git_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in result.items() if not key.startswith("_")}
+
+
 def _failure(item: dict[str, Any], code: str, params: dict[str, str | int] | None = None) -> dict[str, Any]:
     return {
+        "task_id": str(item.get("task_id") or ""),
         "name": str(item.get("name") or ""),
         "source_url": _canonical_source(item.get("source_url")),
         "requested": _requested_commit(item),
@@ -305,28 +333,35 @@ class GitAdapter:
         ]
         if not dependencies:
             return []
-        installed = (
-            {item.source_url: item for item in await _scan_repositories() if item.source_url}
-            if any(item.get("source_url") for item in dependencies)
-            else {}
-        )
+        installed: dict[str, list[GitRepository]] = {}
+        if any(item.get("source_url") for item in dependencies):
+            for repository in await _scan_repositories():
+                key = _source_key(repository.source_url)
+                if key:
+                    installed.setdefault(key, []).append(repository)
         requested_by_source: dict[str, set[str]] = {}
         for dependency in dependencies:
             source = _canonical_source(dependency.get("source_url"))
             requested = _requested_commit(dependency)
             if source and requested:
-                requested_by_source.setdefault(source, set()).add(requested)
+                requested_by_source.setdefault(_source_key(source) or source, set()).add(requested)
 
         result: list[DependencyAction] = []
         for dependency in dependencies:
             source = _canonical_source(dependency.get("source_url"))
+            source_key = _source_key(source)
             requested = _requested_commit(dependency)
-            current = installed.get(source or "")
+            matches = installed.get(source_key or "", [])
+            duplicate_source = len(matches) > 1
+            current = matches[0] if len(matches) == 1 else None
             installed_commit = current.commit if current else None
             warning_code = None
             warning_params: dict[str, str | int] = {}
 
-            if source and len(requested_by_source.get(source, set())) > 1:
+            if source and duplicate_source:
+                action = "manual"
+                warning_code = "dependencies.duplicate_git_source"
+            elif source and len(requested_by_source.get(_source_key(source) or source, set())) > 1:
                 action = "conflict"
                 warning_code = "dependencies.conflicting_commits"
             elif not source:
@@ -378,35 +413,58 @@ class GitAdapter:
         repositories = await _scan_repositories()
         unique: dict[str, dict[str, Any]] = {}
         for item in executable:
-            source = _canonical_source(item.get("source_url"))
-            unique.setdefault(source or str(item.get("name") or ""), item)
+            source = _source_key(item.get("source_url"))
+            unique.setdefault(source or str(item.get("name") or "").casefold(), item)
         executable = list(unique.values())
         total = len(executable) * 2
         git_done = 0
         source_locks: dict[str, asyncio.Lock] = {}
+        target_locks: dict[str, asyncio.Lock] = {}
         semaphore = asyncio.Semaphore(min(4, len(executable)))
+        root = _custom_node_roots()[0]
 
-        async def run_git(item: dict[str, Any]) -> tuple[dict[str, Any], Path | None]:
-            source = _canonical_source(item.get("source_url")) or str(item.get("name") or "")
-            lock = source_locks.setdefault(source, asyncio.Lock())
-            async with semaphore, lock:
-                return await self._execute_git_one(item, repositories, on_log=on_log)
+        def target_key(item: dict[str, Any]) -> str:
+            source = _canonical_source(item.get("source_url"))
+            if source:
+                _owner, repo = parse_public_repository(source)
+                return str(ensure_within(root, root / repo)).casefold()
+            return str(item.get("name") or "").casefold()
 
-        git_results = await asyncio.gather(*(run_git(item) for item in executable))
-        results: list[dict[str, Any]] = []
-        for result, _path in git_results:
-            installing = dict(result)
-            if installing.get("state") == "success":
-                installing["state"] = "installing"
-            results.append(installing)
-            if on_result:
-                await on_result(installing)
-            git_done += 1
-            if on_progress:
-                await on_progress(git_done, total)
+        async def run_git(index: int, item: dict[str, Any]) -> tuple[int, dict[str, Any], Path | None]:
+            source = _source_key(item.get("source_url")) or str(item.get("name") or "").casefold()
+            source_lock = source_locks.setdefault(source, asyncio.Lock())
+            path_lock = target_locks.setdefault(target_key(item), asyncio.Lock())
+            async with semaphore, source_lock, path_lock:
+                result, path = await self._execute_git_one(item, repositories, on_log=on_log)
+                return index, result, path
+
+        git_results: list[tuple[dict[str, Any], Path | None] | None] = [None] * len(executable)
+        results: list[dict[str, Any]] = [{} for _ in executable]
+        git_tasks = [asyncio.create_task(run_git(index, item)) for index, item in enumerate(executable)]
+        try:
+            for completed_task in asyncio.as_completed(git_tasks):
+                index, result, path = await completed_task
+                git_results[index] = (result, path)
+                installing = _public_git_result(result)
+                if installing.get("state") == "success":
+                    installing["state"] = "installing"
+                results[index] = installing
+                if on_result:
+                    await on_result(installing)
+                git_done += 1
+                if on_progress:
+                    await on_progress(git_done, total)
+        except BaseException:
+            for task in git_tasks:
+                task.cancel()
+            await asyncio.gather(*git_tasks, return_exceptions=True)
+            raise
 
         python_done = 0
-        for index, (result, path) in enumerate(git_results):
+        for index, item_result in enumerate(git_results):
+            if item_result is None:
+                continue
+            result, path = item_result
             final = dict(result)
             if final.get("state") == "success" and path is not None:
                 name = str(final.get("name") or path.name)
@@ -416,17 +474,24 @@ class GitAdapter:
                         await on_log(f"{name}: {line}")
 
                 try:
+                    python_state = {**_public_git_result(final), "state": "python_installing"}
+                    if on_result:
+                        await on_result(python_state)
                     installed = await _install_python_requirements(path, on_log=requirements_log)
                     final["python_requirements"] = "installed" if installed else "not_required"
                 except PythonDependencyError as exc:
+                    rollback_detail = await _rollback_git_state(final, path, on_log)
+                    detail = exc.detail[-1000:]
+                    if rollback_detail:
+                        detail = f"{detail}; rollback failed: {rollback_detail}"
                     final = _failure(
                         executable[index],
                         "dependencies.python_requirements_failed",
-                        {"name": name, "detail": exc.detail[-1000:]},
+                        {"name": name, "detail": detail},
                     )
-            results[index] = final
+            results[index] = _public_git_result(final)
             if on_result:
-                await on_result(final)
+                await on_result(results[index])
             python_done += 1
             if on_progress:
                 await on_progress(len(executable) + python_done, total)
@@ -451,15 +516,32 @@ class GitAdapter:
             if on_log:
                 await on_log(f"{name}: {line}")
 
-        current = next((repository for repository in repositories if repository.source_url == source), None)
+        matches = [repository for repository in repositories if _source_key(repository.source_url) == _source_key(source)]
+        if len(matches) > 1:
+            return _failure(item, "dependencies.duplicate_git_source"), None
+        current = matches[0] if matches else None
+
+        async def ensure_commit(path: Path) -> None:
+            try:
+                await _run_git("cat-file", "-e", f"{requested}^{{commit}}", cwd=path, timeout=30)
+            except GitCommandError:
+                await _run_git("fetch", "--no-tags", "origin", requested, cwd=path, on_log=git_log)
+
         try:
             if current is not None:
                 if current.dirty:
                     return _failure(item, "dependencies.local_changes"), None
+                dirty = await _run_git("status", "--porcelain", cwd=current.path, timeout=30)
+                if dirty:
+                    return _failure(item, "dependencies.local_changes"), None
                 await git_log(f"fetching commit {requested}")
-                await _run_git("fetch", "--no-tags", "origin", cwd=current.path, on_log=git_log)
+                await ensure_commit(current.path)
                 await _run_git("checkout", "--detach", requested, cwd=current.path, on_log=git_log)
+                actual = await _run_git("rev-parse", "HEAD", cwd=current.path, timeout=30)
+                if actual.casefold() != requested.casefold():
+                    raise GitCommandError(f"checked out {actual}, expected {requested}")
                 return {
+                    "task_id": str(item.get("task_id") or ""),
                     "name": name,
                     "source_url": source,
                     "requested": requested,
@@ -468,6 +550,8 @@ class GitAdapter:
                     "state": "success",
                     "error_code": None,
                     "error_params": {},
+                    "_previous_commit": current.commit,
+                    "_cloned": False,
                 }, current.path
 
             _owner, repo = parse_public_repository(source)
@@ -477,13 +561,21 @@ class GitAdapter:
             if target.exists():
                 return _failure(item, "dependencies.target_exists", {"path": target.name}), None
             await git_log(f"cloning {source}")
-            await _run_git("clone", "--progress", source, str(target), on_log=git_log)
+            created = False
             try:
+                await _run_git("clone", "--progress", source, str(target), on_log=git_log)
+                created = True
+                await ensure_commit(target)
                 await _run_git("checkout", "--detach", requested, cwd=target, on_log=git_log)
+                actual = await _run_git("rev-parse", "HEAD", cwd=target, timeout=30)
+                if actual.casefold() != requested.casefold():
+                    raise GitCommandError(f"checked out {actual}, expected {requested}")
             except (GitCommandError, UserFacingError):
-                shutil.rmtree(target, ignore_errors=True)
+                if created or target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
                 raise
             return {
+                "task_id": str(item.get("task_id") or ""),
                 "name": name,
                 "source_url": source,
                 "requested": requested,
@@ -492,6 +584,8 @@ class GitAdapter:
                 "state": "success",
                 "error_code": None,
                 "error_params": {},
+                "_previous_commit": None,
+                "_cloned": True,
             }, target
         except UserFacingError as exc:
             return _failure(item, exc.code, exc.params), None

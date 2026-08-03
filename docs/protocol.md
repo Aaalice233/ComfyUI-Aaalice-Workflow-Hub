@@ -52,7 +52,7 @@ preview.*           可选且最多一个
 inputs/*            可选，仅限画布、子图和侧边栏图像控件引用的受支持图像
 ```
 
-不得包含模型、第三方节点代码、脚本、可执行文件、符号链接或其它子目录。`manifest.inputs` 必须声明原引用、包内路径、大小、SHA-256 和节点 ID；安装时图像写入 `input/Workflow Hub/{owner-repo}/{workflow-id}/` 并改写工作流引用。`manifest.filename_separator` 可选为 `-` 或 `_`，用于让安装后的文件名沿用发布者的 `名称-v{版本}.json` 或 `名称_v{版本}.json` 格式；旧包缺少该字段时使用 `-`。
+不得包含模型、第三方节点代码、脚本、可执行文件、符号链接或其它子目录。`manifest.inputs` 必须声明原引用、包内路径、大小、SHA-256 和节点 ID；安装时图像写入当前 ComfyUI 用户专属的 `input/Workflow Hub/{user-hash}/{owner-repo}-{source-hash}/{workflow-id}/` 并改写工作流引用；`user-hash` 来自当前用户目录，`source-hash` 是 owner/repo 小写规范化后的 SHA-256 前 20 位，用于避免不同用户或订阅源目录碰撞。`manifest.filename_separator` 可选为 `-` 或 `_`，用于让安装后的文件名沿用发布者的 `名称-v{版本}.json` 或 `名称_v{版本}.json` 格式；旧包缺少该字段时使用 `-`。
 
 `custom_nodes` 声明插件仓库，而不是节点类型。Git 依赖使用 `manual: true`、`source_url` 和完整 40 位 `commit` 锁定 GitHub 工作副本；Manager 依赖使用 `registry_id` 和语义版本。发布扫描和用户补全保留这两种来源，Git clone/fetch/checkout 可并行执行，随后使用 ComfyUI 环境的 Python 串行处理各插件 `requirements.txt`；Manager 队列负责其 post-install。补全开始前会检查 GitHub/Comfy Registry 网络连通性。两种安装方式通过统一且持久化的异步操作报告插件级进度、安装日志、错误结果和重启提示。
 

@@ -1,11 +1,12 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
 from workflow_hub.catalog import Catalog
-from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager
+from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager, subscription_cache_path
 from workflow_hub.storage import UserStorage
 
 
@@ -76,6 +77,29 @@ class UpdateNotificationTests(unittest.TestCase):
 
 
 class SubscriptionStateTests(IsolatedAsyncioTestCase):
+    async def test_not_modified_catalog_keeps_cached_workflows(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": "etag",
+                "refreshed_at": "",
+                "error": None,
+            }])
+            cache = subscription_cache_path(storage, "owner", "repo")
+            cache.write_bytes(EXAMPLE.read_bytes())
+            client = patch("workflow_hub.service.GitHubClient").start()
+            client.return_value.get_catalog = AsyncMock(return_value=SimpleNamespace(not_modified=True, etag="etag"))
+            try:
+                result = await refresh_subscription(storage, "owner", "repo")
+            finally:
+                client.stop()
+            self.assertFalse(result["catalog_missing"])
+            self.assertTrue(cache.exists())
+            self.assertTrue(await aggregate_catalog(storage))
+
     async def test_removed_catalog_clears_cache_and_hides_old_workflows(self) -> None:
         with TemporaryDirectory() as folder:
             storage = UserStorage(Path(folder))

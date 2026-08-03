@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import importlib
-import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,13 +36,14 @@ from .github import BranchState, GitHubClient, GitHubError, GitTreeFile
 from .operations import Operation
 from .packages import build_package_files, install_workflow, read_package_files, write_package
 from .repository import build_projection_files, build_repository_files, json_bytes, render_workflows_readme
-from .security import ensure_within, parse_public_repository, require_github_https, safe_filename
+from .security import ensure_within, parse_public_repository, repository_storage_key, require_github_https, safe_filename
 from .storage import UserStorage
 
 _WORKFLOW_FILENAME_RE = re.compile(
     r"^(.*?)(?P<separator>[-_])v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*))?)\.json$",
     re.IGNORECASE,
 )
+_workflow_install_lock = asyncio.Lock()
 
 
 def _workflow_filename_separator(filename: str | None, version: str) -> str:
@@ -70,7 +72,95 @@ def validate_catalog_assets(catalog: Catalog) -> Catalog:
 
 
 async def list_subscriptions(storage: UserStorage) -> list[dict[str, Any]]:
-    return await storage.read_json("subscriptions.json", [])
+    try:
+        items = await storage.read_json("subscriptions.json", [])
+    except ValueError:
+        path = storage.state_dir / "subscriptions.json"
+        path.replace(path.with_name(f"subscriptions.corrupt-{uuid.uuid4().hex}.json"))
+        return []
+    if not isinstance(items, list):
+        return []
+    legacy_paths: dict[Path, list[tuple[str, str]]] = {}
+    for item in items:
+        if not isinstance(item, dict) or not item.get("owner") or not item.get("repo"):
+            continue
+        _canonical, legacy = _cache_paths(storage, str(item["owner"]), str(item["repo"]))
+        legacy_paths.setdefault(legacy, []).append((str(item["owner"]), str(item["repo"])))
+    migration_conflicts: set[tuple[str, str]] = set()
+    for legacy, sources in legacy_paths.items():
+        if not legacy.is_file():
+            continue
+        if len(sources) != 1:
+            migration_conflicts.update((owner.casefold(), repo.casefold()) for owner, repo in sources)
+            continue
+        owner, repo = sources[0]
+        canonical, _ = _cache_paths(storage, owner, repo)
+        if not canonical.exists():
+            try:
+                os.link(legacy, canonical)
+            except FileExistsError:
+                pass
+            except OSError:
+                _write_cache(canonical, legacy.read_bytes())
+        try:
+            legacy.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if migration_conflicts:
+        def mark_migration_conflicts(current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
+                {**item, "error": "subscription.cache_migration_conflict"}
+                if isinstance(item, dict)
+                and (str(item.get("owner", "")).casefold(), str(item.get("repo", "")).casefold()) in migration_conflicts
+                else item
+                for item in current
+            ]
+
+        items = await storage.update_json("subscriptions.json", [], mark_migration_conflicts)
+    return items
+
+
+def _cache_paths(storage: UserStorage, owner: str, repo: str) -> tuple[Path, Path]:
+    canonical = ensure_within(storage.cache_dir, storage.cache_dir / f"{repository_storage_key(owner, repo)}.json")
+    legacy = ensure_within(storage.cache_dir, storage.cache_dir / f"{safe_filename(f'{owner}-{repo}')}.json")
+    return canonical, legacy
+
+
+def subscription_cache_path(storage: UserStorage, owner: str, repo: str) -> Path:
+    canonical, _legacy = _cache_paths(storage, owner, repo)
+    return canonical
+
+
+def clear_subscription_cache(storage: UserStorage, owner: str, repo: str) -> None:
+    canonical, legacy = _cache_paths(storage, owner, repo)
+    canonical.unlink(missing_ok=True)
+    legacy.unlink(missing_ok=True)
+
+
+def _write_cache(path: Path, content: bytes) -> None:
+    descriptor, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _valid_cached_catalog(path: Path) -> Catalog | None:
+    if not path.is_file():
+        return None
+    try:
+        content = path.read_bytes()
+    except OSError:
+        raise
+    try:
+        return validate_catalog_assets(Catalog.model_validate_json(content))
+    except (ValidationError, ValueError):
+        return None
 
 
 async def add_subscription(storage: UserStorage, repository_url: str) -> dict[str, Any]:
@@ -88,7 +178,10 @@ async def add_subscription(storage: UserStorage, repository_url: str) -> dict[st
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "error": None,
     }
-    (storage.cache_dir / f"{owner}-{repo}.json").write_bytes(remote.content)
+    canonical_cache, legacy_cache = _cache_paths(storage, owner, repo)
+    _write_cache(canonical_cache, remote.content)
+    if legacy_cache != canonical_cache:
+        legacy_cache.unlink(missing_ok=True)
 
     def mutate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if any(value["owner"].casefold() == owner.casefold() and value["repo"].casefold() == repo.casefold() for value in items):
@@ -110,17 +203,46 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
         None,
     )
     if current is None:
-        raise ValueError("订阅源不存在")
+        raise UserFacingError("subscription.not_found")
     client = GitHubClient()
     remote = await client.get_catalog(owner, repo, current.get("etag"))
-    cache = storage.cache_dir / f"{owner}-{repo}.json"
+    cache = subscription_cache_path(storage, owner, repo)
+    canonical_cache, legacy_cache = _cache_paths(storage, owner, repo)
+    try:
+        cached_catalog = _valid_cached_catalog(cache)
+    except OSError as exc:
+        raise UserFacingError("subscription.cache_unavailable") from exc
+    unchanged = bool(remote and remote.not_modified and cached_catalog is not None)
+    if remote and remote.not_modified and cached_catalog is None:
+        remote = await client.get_catalog(owner, repo)
+        unchanged = bool(remote and remote.not_modified and cached_catalog is not None)
+        if remote and remote.not_modified:
+            remote = None
     if remote and not remote.not_modified:
-        validate_catalog_assets(Catalog.model_validate_json(remote.content))
-        cache.write_bytes(remote.content)
-    elif remote is None:
-        cache.unlink(missing_ok=True)
+        try:
+            validate_catalog_assets(Catalog.model_validate_json(remote.content))
+        except (ValidationError, ValueError) as exc:
+            clear_subscription_cache(storage, owner, repo)
+            await storage.update_json(
+                "subscriptions.json",
+                [],
+                lambda items: [
+                    {**item, "error": "subscription.catalog_invalid"}
+                    if item.get("owner", "").casefold() == owner.casefold() and item.get("repo", "").casefold() == repo.casefold()
+                    else item
+                    for item in items
+                ],
+            )
+            raise UserFacingError("subscription.catalog_invalid") from exc
+        _write_cache(canonical_cache, remote.content)
+        if legacy_cache != canonical_cache:
+            legacy_cache.unlink(missing_ok=True)
+        cache = canonical_cache
+    elif remote is None and not unchanged:
+        canonical_cache.unlink(missing_ok=True)
+        legacy_cache.unlink(missing_ok=True)
     refreshed_at = datetime.now(timezone.utc).isoformat()
-    catalog_missing = remote is None
+    catalog_missing = remote is None and not unchanged
 
     def mutate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in items:
@@ -171,7 +293,8 @@ def reveal_in_file_manager(target: Path) -> None:
 
 
 async def aggregate_catalog(storage: UserStorage) -> list[dict[str, Any]]:
-    installed = await storage.read_json("installed.json", [])
+    installed_data = await storage.read_json("installed.json", [])
+    installed = installed_data if isinstance(installed_data, list) else []
     stale_records = [item for item in installed if not _installed_record_exists(storage, item)]
     if stale_records:
         installed = await storage.update_json(
@@ -181,24 +304,57 @@ async def aggregate_catalog(storage: UserStorage) -> list[dict[str, Any]]:
         )
     result: list[dict[str, Any]] = []
     for source in await list_subscriptions(storage):
-        cache = storage.cache_dir / f"{source['owner']}-{source['repo']}.json"
+        if not isinstance(source, dict) or not source.get("owner") or not source.get("repo"):
+            continue
+        owner, repo = str(source["owner"]), str(source["repo"])
+        cache = subscription_cache_path(storage, owner, repo)
         if not cache.exists():
             continue
         try:
             catalog = validate_catalog_assets(Catalog.model_validate_json(cache.read_bytes()))
         except (ValidationError, ValueError):
+            clear_subscription_cache(storage, owner, repo)
+            await storage.update_json(
+                "subscriptions.json",
+                [],
+                lambda items: [
+                    {**item, "error": "subscription.catalog_invalid"}
+                    if isinstance(item, dict)
+                    and str(item.get("owner", "")).casefold() == owner.casefold()
+                    and str(item.get("repo", "")).casefold() == repo.casefold()
+                    else item
+                    for item in items
+                ],
+            )
+            continue
+        except OSError:
+            await storage.update_json(
+                "subscriptions.json",
+                [],
+                lambda items: [
+                    {**item, "error": "subscription.cache_unavailable"}
+                    if isinstance(item, dict)
+                    and str(item.get("owner", "")).casefold() == owner.casefold()
+                    and str(item.get("repo", "")).casefold() == repo.casefold()
+                    else item
+                    for item in items
+                ],
+            )
             continue
         for product in catalog.workflows:
             local = [
                 item
                 for item in installed
-                if item["owner"] == source["owner"] and item["repo"] == source["repo"] and item["workflow_id"] == product.id
+                if isinstance(item, dict)
+                and str(item.get("owner", "")).casefold() == owner.casefold()
+                and str(item.get("repo", "")).casefold() == repo.casefold()
+                and item.get("workflow_id") == product.id
             ]
             result.append(
                 {
                     **product.model_dump(mode="json"),
-                    "source": {"owner": source["owner"], "repo": source["repo"]},
-                    "downloaded_versions": [item["version"] for item in local],
+                    "source": {"owner": owner, "repo": repo},
+                    "downloaded_versions": [str(item.get("version")) for item in local if item.get("version")],
                 }
             )
     return result
@@ -208,7 +364,7 @@ def _installed_record_exists(storage: UserStorage, record: dict[str, Any]) -> bo
     try:
         target = ensure_within(storage.workflows_root, Path(record["path"]))
         return target.is_file()
-    except (KeyError, OSError, ValueError):
+    except (KeyError, OSError, TypeError, ValueError):
         return False
 
 
@@ -228,43 +384,57 @@ async def download_version(
         operation.stage = "downloading"
         await GitHubClient().download(str(version.package.url), temp_path, operation)
         operation.stage = "verifying"
-        target, content_hash = install_workflow(
-            temp_path,
-            storage.workflows_root,
-            owner,
-            repo,
-            product.id,
-            product.name,
-            version.version,
-            version.package.sha256,
-            Path(_folder_paths().get_input_directory()),
-        )
-        record = {
-            "owner": owner,
-            "repo": repo,
-            "workflow_id": product.id,
-            "name": product.name,
-            "version": version.version,
-            "package_sha256": version.package.sha256,
-            "workflow_sha256": content_hash,
-            "path": str(target),
-            "downloaded_at": datetime.now(timezone.utc).isoformat(),
-        }
+        async with _workflow_install_lock:
+            target, content_hash = install_workflow(
+                temp_path,
+                storage.workflows_root,
+                owner,
+                repo,
+                product.id,
+                product.name,
+                version.version,
+                version.package.sha256,
+                Path(_folder_paths().get_input_directory()),
+                f"Workflow Hub/{hashlib.sha256(storage.key.encode('utf-8')).hexdigest()[:20]}",
+            )
+            record = {
+                "owner": owner,
+                "repo": repo,
+                "workflow_id": product.id,
+                "name": product.name,
+                "version": version.version,
+                "package_sha256": version.package.sha256,
+                "workflow_sha256": content_hash,
+                "path": str(target),
+                "downloaded_at": datetime.now(timezone.utc).isoformat(),
+            }
 
-        def mutate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            key = (owner, repo, product.id, version.version)
-            rest = [
-                item
-                for item in items
-                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) != key
-            ]
-            return rest + [record]
+            def mutate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                key = (owner.casefold(), repo.casefold(), product.id, version.version)
+                rest = [
+                    item
+                    for item in items
+                    if not isinstance(item, dict)
+                    or (
+                        str(item.get("owner", "")).casefold(),
+                        str(item.get("repo", "")).casefold(),
+                        str(item.get("workflow_id", "")),
+                        str(item.get("version", "")),
+                    ) != key
+                ]
+                return rest + [record]
 
-        await storage.update_json("installed.json", [], mutate)
-        operation.stage = "complete"
-        operation.status = "success"
-        operation.result = record
-        return record
+            try:
+                await storage.update_json("installed.json", [], mutate)
+            except ValueError:
+                state = storage.state_dir / "installed.json"
+                if state.exists():
+                    state.replace(state.with_name(f"installed.corrupt-{uuid.uuid4().hex}.json"))
+                await storage.write_json("installed.json", [record])
+            operation.stage = "complete"
+            operation.status = "success"
+            operation.result = record
+            return record
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -296,12 +466,19 @@ async def download_optional_lora(model: ModelDependency, operation: Operation) -
         operation.stage = "downloading"
         await GitHubClient().download(str(model.source_url), temp_path, operation)
         operation.stage = "verifying"
-        if model.sha256 and hashlib.sha256(temp_path.read_bytes()).hexdigest() != model.sha256:
+        downloaded_hash = hashlib.sha256(temp_path.read_bytes()).hexdigest()
+        if model.sha256 and downloaded_hash != model.sha256:
             raise UserFacingError("lora.checksum_mismatch")
-        os.replace(temp_path, target)
+        already_exists = False
+        try:
+            os.link(temp_path, target)
+        except FileExistsError:
+            if hashlib.sha256(target.read_bytes()).hexdigest() != downloaded_hash:
+                raise UserFacingError("lora.existing_content_mismatch")
+            already_exists = True
         operation.stage = "complete"
         operation.status = "success"
-        operation.result = {"path": str(target), "already_exists": False}
+        operation.result = {"path": str(target), "already_exists": already_exists}
         return operation.result
     finally:
         temp_path.unlink(missing_ok=True)

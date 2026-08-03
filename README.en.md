@@ -52,7 +52,7 @@ Requires ComfyUI Frontend `1.33.9+`; ComfyUI-Manager `3.0+` is supported, `4.2.1
 Runtime data is written to `workflow_hub/` inside the current ComfyUI user-data directory. Downloaded workflows are stored under:
 
 ```text
-workflows/Workflow Hub/{owner}-{repo}/{workflow-id}/{name}-v{version}.json
+workflows/Workflow Hub/{owner}-{repo}-{source-hash}/{workflow-id}/{name}-v{version}.json
 ```
 
 ## Boundaries

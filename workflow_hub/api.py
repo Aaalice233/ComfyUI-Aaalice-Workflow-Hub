@@ -22,6 +22,7 @@ from .security import ensure_within, parse_public_repository
 from .service import (
     add_subscription,
     aggregate_catalog,
+    clear_subscription_cache,
     delete_version,
     delete_workflow,
     download_optional_lora,
@@ -33,6 +34,7 @@ from .service import (
     refresh_subscription,
     resume_publication,
     reveal_in_file_manager,
+    subscription_cache_path,
     update_product,
     update_version_changelog,
 )
@@ -52,32 +54,209 @@ async def _json(request: web.Request) -> dict[str, Any]:
     if origin:
         parsed = urlparse(origin)
         if parsed.netloc.casefold() != request.host.casefold() or parsed.scheme != request.scheme:
-            raise ValueError("拒绝跨来源写请求")
+            raise UserFacingError("request.origin_invalid")
     if request.content_length and request.content_length > MAX_JSON:
-        raise ValueError("请求体超过 20 MiB")
+        raise UserFacingError("request.body_too_large")
     raw = await request.read()
     if len(raw) > MAX_JSON:
-        raise ValueError("请求体超过 20 MiB")
+        raise UserFacingError("request.body_too_large")
     if raw and request.content_type != "application/json":
-        raise ValueError("JSON 请求体必须使用 application/json")
-    data = json.loads(raw or b"{}")
+        raise UserFacingError("request.content_type_invalid")
+    try:
+        data = json.loads(raw or b"{}")
+    except json.JSONDecodeError as exc:
+        raise UserFacingError("request.json_invalid") from exc
     if not isinstance(data, dict):
-        raise ValueError("请求体必须是 JSON 对象")
+        raise UserFacingError("request.object_required")
     return data
+
+
+def _source_parts(owner: Any, repo: Any) -> tuple[str, str]:
+    try:
+        return parse_public_repository(f"https://github.com/{str(owner).strip()}/{str(repo).strip()}")
+    except ValueError as exc:
+        raise UserFacingError("subscription.invalid_source") from exc
+
+
+async def _require_subscribed_source(storage: UserStorage, owner: Any, repo: Any) -> tuple[str, str]:
+    owner, repo = _source_parts(owner, repo)
+    if not any(
+        isinstance(item, dict)
+        and str(item.get("owner", "")).casefold() == owner.casefold()
+        and str(item.get("repo", "")).casefold() == repo.casefold()
+        for item in await list_subscriptions(storage)
+    ):
+        raise UserFacingError("subscription.not_found")
+    return owner, repo
+
+
+def _publish_product_payload(data: dict[str, Any]) -> dict[str, Any]:
+    product = data.get("product")
+    if not isinstance(product, dict):
+        raise UserFacingError("publisher.product_invalid")
+    try:
+        return stamp_product_comfyui_version(product)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UserFacingError("publisher.product_invalid") from exc
+
+
+def _validate_publish_payload(data: dict[str, Any]) -> dict[str, Any]:
+    product = _publish_product_payload(data)
+    try:
+        validated = WorkflowProduct.model_validate(prepare_publish_product(product))
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise UserFacingError("publisher.product_invalid") from exc
+    if len(validated.versions) != 1:
+        raise UserFacingError("publisher.product_invalid")
+    if any(model.type == "loras" for model in validated.versions[0].models):
+        raise UserFacingError("publisher.lora_forbidden")
+    if not isinstance(data.get("workflow"), dict):
+        raise UserFacingError("publisher.workflow_invalid")
+    if not isinstance(data.get("repository"), dict):
+        raise UserFacingError("publisher.product_invalid")
+    try:
+        parse_public_repository(str(data.get("repository_url") or ""))
+    except (TypeError, ValueError) as exc:
+        raise UserFacingError("publisher.repository_invalid") from exc
+    workflow_filename = data.get("workflow_filename")
+    if workflow_filename is not None and not isinstance(workflow_filename, str):
+        raise UserFacingError("publisher.product_invalid")
+    cover = data.get("cover", data.get("preview"))
+    if cover is not None and (
+        not isinstance(cover, dict)
+        or not isinstance(cover.get("filename"), str)
+        or not isinstance(cover.get("data_base64"), str)
+    ):
+        raise UserFacingError("publisher.product_invalid")
+    images, _ = scan_workflow_assets(data["workflow"])
+    if any(item.status != "ready" for item in images):
+        raise UserFacingError("publisher.assets_invalid")
+    return product
+
+
+def _catalog_version(catalog: Catalog, workflow_id: Any, version: Any) -> tuple[Any, Any]:
+    product = next((item for item in catalog.workflows if item.id == str(workflow_id)), None)
+    if product is None:
+        raise UserFacingError("subscription.workflow_not_found")
+    selected = next((item for item in product.versions if item.version == str(version)), None)
+    if selected is None:
+        raise UserFacingError("subscription.version_not_found")
+    return product, selected
+
+
+async def _github_token(storage: UserStorage) -> str:
+    token = await tokens.get(storage.key)
+    if not token:
+        raise UserFacingError("github.authentication_required")
+    return token
+
+
+def _manager_origin(request: web.Request) -> str:
+    transport = request.transport
+    sockname = transport.get_extra_info("sockname") if transport else None
+    if isinstance(sockname, tuple) and len(sockname) > 1 and isinstance(sockname[1], int):
+        host = str(sockname[0])
+        if host in {"0.0.0.0", "::"}:
+            host = "127.0.0.1" if "." in host or host == "0.0.0.0" else "::1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{request.scheme}://{host}:{sockname[1]}"
+    return f"{request.scheme}://{request.host}"
+
+
+def _dependency_key(item: dict[str, Any]) -> str:
+    source = str(item.get("source_url") or "").strip().casefold().rstrip("/")
+    if source:
+        return f"git:{source.removesuffix('.git')}"
+    registry_id = str(item.get("registry_id") or "").strip().casefold()
+    if registry_id:
+        return f"manager:{registry_id}"
+    return f"name:{str(item.get('name') or '').strip().casefold()}"
+
+
+def _normalise_dependency_plan(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    by_key: dict[str, dict[str, Any]] = {}
+    for raw in items:
+        item = dict(raw)
+        key = _dependency_key(item)
+        item["task_id"] = key
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = item
+            result.append(item)
+            continue
+        requested = str(existing.get("requested") or "")
+        duplicate_requested = str(item.get("requested") or "")
+        if requested != duplicate_requested:
+            existing["action"] = "conflict"
+            existing["warning_code"] = (
+                "dependencies.conflicting_commits"
+                if key.startswith("git:")
+                else "dependencies.conflicting_registry_versions"
+            )
+            existing["warning_params"] = {}
+    return result
+
+
+async def _plan_dependencies(
+    dependencies: list[dict[str, Any]],
+    version_policy: str,
+    manager_origin: str,
+) -> list[dict[str, Any]]:
+    align_versions = version_policy == "align"
+    git_items = await GitAdapter().plan(dependencies, align_versions=align_versions)
+    manager_items = await ManagerAdapter(manager_origin).plan(dependencies, align_versions=align_versions)
+    return _normalise_dependency_plan([*git_items, *manager_items])
+
+
+def _dependency_from_action(item: dict[str, Any]) -> dict[str, Any]:
+    dependency: dict[str, Any] = {
+        "name": str(item.get("name") or ""),
+        "registry_id": str(item.get("registry_id") or "").strip() or None,
+        "source_url": str(item.get("source_url") or "").strip() or None,
+        "required": item.get("required", True),
+        "manual": item.get("manual", False),
+    }
+    requested = str(item.get("requested") or item.get("commit") or "").strip() or None
+    if dependency["source_url"]:
+        dependency["commit"] = requested
+        dependency["registry_id"] = None
+    else:
+        dependency["version"] = requested
+    return dependency
 
 
 def _response_error(exc: Exception) -> web.Response:
     if isinstance(exc, UserFacingError):
         return web.json_response({"error_code": exc.code, "error_params": exc.params}, status=400)
     if isinstance(exc, ValidationError):
-        return web.json_response({"error": "数据校验失败", "details": exc.errors(include_url=False)}, status=400)
+        return web.json_response(
+            {
+                "error_code": "request.invalid_payload",
+                "error_params": {"detail": json.dumps(exc.errors(include_url=False), ensure_ascii=False)},
+            },
+            status=400,
+        )
     if isinstance(exc, GitHubError):
         # 401 原样透传 HTTP 状态，前端据此把界面降级为未登录。
         status = 401 if exc.status == 401 else (502 if exc.status >= 500 or exc.status == 0 else 400)
-        return web.json_response({"error": str(exc), "github_status": exc.status}, status=status)
+        return web.json_response(
+            {
+                "error_code": "github.request_failed",
+                "error_params": {"status": exc.status, "detail": str(exc)},
+            },
+            status=status,
+        )
     if isinstance(exc, (ValueError, KeyError, json.JSONDecodeError)):
-        return web.json_response({"error": str(exc).strip("'")}, status=400)
-    return web.json_response({"error": str(exc) or exc.__class__.__name__}, status=500)
+        return web.json_response(
+            {"error_code": "request.invalid", "error_params": {"detail": str(exc).strip("'")}},
+            status=400,
+        )
+    return web.json_response(
+        {"error_code": "operation.failed", "error_params": {"detail": str(exc) or exc.__class__.__name__}},
+        status=500,
+    )
 
 
 def endpoint(handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
@@ -116,6 +295,8 @@ async def _run(operation: Operation, action: Awaitable[dict[str, Any]]) -> None:
     except Exception as exc:
         operation.status = "failed"
         operation.stage = "failed"
+        operation.error_code = "operation.failed"
+        operation.error_params = {"detail": str(exc)[-1000:]}
         operation.logs.append(str(exc))
 
 
@@ -126,29 +307,53 @@ async def _check_dependency_network(
     manager_actions: list[dict[str, Any]],
     git_actions: list[dict[str, Any]],
     on_log: Callable[[str], Awaitable[None]],
+    manager_origin: str,
 ) -> None:
     hosts: list[str] = []
-    if git_actions:
-        hosts.append("https://api.github.com/")
+    for item in git_actions:
+        source = str(item.get("source_url") or "").strip().rstrip("/")
+        if source and source not in hosts:
+            hosts.append(source)
     if manager_actions:
-        hosts.append("https://api.comfy.org/")
+        hosts.extend((
+            "https://api.comfy.org/",
+            f"{manager_origin}/v2/manager/version",
+            f"{manager_origin}/manager/version",
+        ))
     if not hosts:
         return
+    manager_version_hosts = {
+        f"{manager_origin}/v2/manager/version",
+        f"{manager_origin}/manager/version",
+    } if manager_actions else set()
+    github_hosts = {host for host in hosts if host.casefold().startswith("https://github.com/")}
     await on_log("network check: checking plugin download endpoints")
     timeout = aiohttp.ClientTimeout(total=10)
 
-    async def check(host: str) -> tuple[str, str | None]:
+    async def check(session: aiohttp.ClientSession, host: str) -> tuple[str, str | None]:
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(host, allow_redirects=True) as response:
-                    if response.status >= 500:
-                        return host, f"HTTP {response.status}"
-                    return host, None
+            async with session.get(host, allow_redirects=False) as response:
+                if (
+                    response.status >= 500
+                    or (host in manager_version_hosts and response.status >= 400)
+                    or (host in github_hosts and response.status >= 400)
+                ):
+                    return host, f"HTTP {response.status}"
+                return host, None
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             return host, str(exc) or exc.__class__.__name__
 
-    results = await asyncio.gather(*(check(host) for host in hosts))
-    failures = [(host, detail) for host, detail in results if detail]
+    semaphore = asyncio.Semaphore(8)
+
+    async def bounded_check(session: aiohttp.ClientSession, host: str) -> tuple[str, str | None]:
+        async with semaphore:
+            return await check(session, host)
+
+    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        results = await asyncio.gather(*(bounded_check(session, host) for host in hosts))
+    failures = [(host, detail) for host, detail in results if detail and host not in manager_version_hosts]
+    if manager_actions and not any(not detail for host, detail in results if host in manager_version_hosts):
+        failures.extend((host, detail) for host, detail in results if host in manager_version_hosts and detail)
     for host, detail in results:
         await on_log(f"network check: {host} -> {'ok' if not detail else detail}")
     if failures:
@@ -169,7 +374,20 @@ async def _perform_dependency_operation(
     progress_total = len(manager_actions) + len(git_actions) * 2
     network_steps = 1 if executable else 0
     operation.progress = {"received": 0, "total": progress_total + network_steps}
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = [
+        {
+            "task_id": item.get("task_id"),
+            "name": item.get("name", item.get("registry_id") or item.get("source_url") or ""),
+            "requested": item.get("requested"),
+            "action": item.get("action", ""),
+            "state": "success" if item.get("action") == "keep" else "queued",
+            "registry_id": item.get("registry_id"),
+            "source_url": item.get("source_url"),
+            "installer": item.get("installer"),
+        }
+        for item in actions
+        if item.get("action") in {"keep", "install", "upgrade", "downgrade"}
+    ]
 
     async def add_log(line: str) -> None:
         text = line.replace("\r", "").strip()
@@ -180,9 +398,9 @@ async def _perform_dependency_operation(
         operation.progress = {"received": done, "total": total}
 
     async def update_result(result: dict[str, Any]) -> None:
-        key = str(result.get("registry_id") or result.get("source_url") or result.get("name") or "")
+        key = str(result.get("task_id") or result.get("registry_id") or result.get("source_url") or result.get("name") or "")
         existing = next(
-            (item for item in results if str(item.get("registry_id") or item.get("source_url") or item.get("name") or "") == key),
+            (item for item in results if str(item.get("task_id") or item.get("registry_id") or item.get("source_url") or item.get("name") or "") == key),
             None,
         )
         if existing is None:
@@ -199,7 +417,7 @@ async def _perform_dependency_operation(
         operation.stage = "checking_network"
         completed = 0
         if network_steps:
-            await _check_dependency_network(manager_actions, git_actions, add_log)
+            await _check_dependency_network(manager_actions, git_actions, add_log, manager_origin)
             completed = network_steps
             await update_progress(completed, progress_total + network_steps)
         operation.stage = "installing"
@@ -210,6 +428,7 @@ async def _perform_dependency_operation(
             await add_log("manager queue: submitting dependency tasks")
             async def manager_task_queued(item: dict[str, Any]) -> None:
                 await update_result({
+                    "task_id": item.get("task_id"),
                     "name": item.get("name", item.get("registry_id", "")),
                     "requested": item.get("requested"),
                     "action": item.get("action", "install"),
@@ -221,6 +440,7 @@ async def _perform_dependency_operation(
             queued = await manager.execute(manager_actions, operation.id, on_queued=manager_task_queued)
             for item in queued:
                 await update_result({
+                    "task_id": item.get("task_id"),
                     "name": item.get("name", item.get("registry_id", "")),
                     "requested": item.get("requested"),
                     "action": item.get("action", "install"),
@@ -231,8 +451,10 @@ async def _perform_dependency_operation(
             await update_progress(completed, progress_total + network_steps)
             history_seen: set[str] = set()
             last_status: tuple[int, int, int, bool] | None = None
+            manager_idle_polls = 0
             for _ in range(1800):
                 status = await manager.queue_status(operation.id)
+                manager_idle_polls = 0 if status["processing"] else manager_idle_polls + 1
                 snapshot = (status["total"], status["done"], status["in_progress"], status["processing"])
                 if snapshot != last_status:
                     await add_log(f"manager queue: total={snapshot[0]} done={snapshot[1]} in_progress={snapshot[2]} processing={snapshot[3]}")
@@ -243,6 +465,8 @@ async def _perform_dependency_operation(
                 total_count = max(0, status["total"] - baseline_status["total"]) if legacy else status["total"]
                 await update_progress(network_steps + max(manager_completed, min(done_count, len(manager_actions)), 0), progress_total + network_steps)
                 for item in results:
+                    if item.get("installer") != "manager" or item.get("action") not in {"install", "upgrade", "downgrade"}:
+                        continue
                     key = str(item.get("registry_id") or "")
                     outcome = history.get(key)
                     if not outcome or key in history_seen:
@@ -260,7 +484,20 @@ async def _perform_dependency_operation(
                     await update_progress(network_steps + manager_completed, progress_total + network_steps)
                 if manager_completed >= len(manager_actions):
                     break
-                if not status["processing"] and (total_count == 0 or done_count >= len(manager_actions)):
+                if not status["processing"] and manager_idle_polls >= 3 and (total_count == 0 or done_count >= len(manager_actions)):
+                    if legacy:
+                        for item in results:
+                            if item.get("installer") != "manager" or item.get("state") != "installing":
+                                continue
+                            item["state"] = "unknown"
+                            item["error_code"] = "dependencies.manager_result_unknown"
+                            item["error_params"] = {"name": item.get("name", "")}
+                            item["message"] = "manager task result unavailable"
+                            await add_log(f"{item.get('name', '')}: {item['message']}")
+                            await update_result(item)
+                        manager_completed = len(manager_actions)
+                        await update_progress(network_steps + manager_completed, progress_total + network_steps)
+                        break
                     try:
                         verified = await manager.verify_actions(manager_actions)
                     except UserFacingError:
@@ -325,15 +562,31 @@ async def _perform_dependency_operation(
         operation.stage = "failed"
         operation.error_code = exc.code
         operation.error_params = exc.params
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
+        code = "dependencies.manager_request_failed" if manager_actions else "dependencies.operation_failed"
+        params = {"status": 0, "detail": str(exc)[-1000:]} if manager_actions else {"detail": str(exc)[-1000:]}
+        for item in results:
+            if item.get("state") in {"queued", "installing", "python_installing"}:
+                item["state"] = "failed"
+                item["error_code"] = code
+                item["error_params"] = {"name": item.get("name", ""), **params}
+        operation.result = {"tasks": list(results)}
+        operation.status = "failed"
+        operation.stage = "failed"
+        operation.error_code = code
+        operation.error_params = params
+        operation.logs.append(str(exc))
     except Exception as exc:
         for item in results:
-            if item.get("state") in {"queued", "installing"}:
+            if item.get("state") in {"queued", "installing", "python_installing"}:
                 item["state"] = "failed"
                 item["error_code"] = "dependencies.manager_task_failed"
                 item["error_params"] = {"name": item.get("name", ""), "detail": str(exc)[-1000:]}
         operation.result = {"tasks": list(results)}
         operation.status = "failed"
         operation.stage = "failed"
+        operation.error_code = "dependencies.operation_failed"
+        operation.error_params = {"detail": str(exc)[-1000:]}
         operation.logs.append(str(exc))
 
 
@@ -347,21 +600,24 @@ async def _run_dependency_operation(
 
 
 async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> list[dict[str, str]]:
-    cache = storage.cache_dir / f"{owner}-{repo}.json"
+    cache = subscription_cache_path(storage, owner, repo)
     try:
-        previous = Catalog.model_validate_json(cache.read_bytes()) if cache.exists() else None
+        previous = None
+        if cache.exists():
+            try:
+                previous = Catalog.model_validate_json(cache.read_bytes())
+            except (OSError, ValidationError, ValueError):
+                clear_subscription_cache(storage, owner, repo)
         result = await refresh_subscription(storage, owner, repo)
         if not result["changed"] or previous is None:
             return []
-        current = Catalog.model_validate_json(cache.read_bytes())
+        current = Catalog.model_validate_json(subscription_cache_path(storage, owner, repo).read_bytes())
         return find_catalog_updates(previous, current, owner, repo)
-    except Exception as exc:
-        error_text = str(exc)
-
+    except Exception:
         def record_error(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for item in items:
-                if (item["owner"], item["repo"]) == (owner, repo):
-                    item["error"] = error_text
+                if isinstance(item, dict) and str(item.get("owner", "")).casefold() == owner.casefold() and str(item.get("repo", "")).casefold() == repo.casefold():
+                    item["error"] = "subscription.refresh_failed"
             return items
 
         await storage.update_json("subscriptions.json", [], record_error)
@@ -371,7 +627,9 @@ async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -
 async def _refresh_startup_sources(storage: UserStorage) -> list[dict[str, str]]:
     updates: list[dict[str, str]] = []
     for source in await list_subscriptions(storage):
-        updates.extend(await _refresh_startup_source(storage, source["owner"], source["repo"]))
+        if not isinstance(source, dict) or not source.get("owner") or not source.get("repo"):
+            continue
+        updates.extend(await _refresh_startup_source(storage, str(source["owner"]), str(source["repo"])))
     return updates
 
 
@@ -422,7 +680,7 @@ def register_routes() -> None:
         github_user = credential.get("user") if credential and isinstance(credential.get("user"), dict) else None
         return web.json_response(
             {
-                "plugin_version": "1.0.0",
+                "plugin_version": "1.0.1",
                 "minimum_frontend": "1.33.9",
                 "comfyui_version": current_comfyui_version(),
                 "git": local_git_status(),
@@ -463,23 +721,25 @@ def register_routes() -> None:
     @endpoint
     async def subscriptions_delete(request: web.Request) -> web.StreamResponse:
         await _json(request)
-        owner, repo = request.match_info["owner"], request.match_info["repo"]
+        owner, repo = _source_parts(request.match_info["owner"], request.match_info["repo"])
         storage = UserStorage.from_request(request)
         await storage.update_json(
             "subscriptions.json",
             [],
-            lambda items: [item for item in items if (item["owner"], item["repo"]) != (owner, repo)],
+            lambda items: [
+                item for item in items
+                if not (item.get("owner", "").casefold() == owner.casefold() and item.get("repo", "").casefold() == repo.casefold())
+            ],
         )
-        (storage.cache_dir / f"{owner}-{repo}.json").unlink(missing_ok=True)
+        clear_subscription_cache(storage, owner, repo)
         return web.json_response({"removed": True, "downloads_kept": True})
 
     @routes.post(f"{BASE}/subscriptions/{{owner}}/{{repo}}/refresh")
     @endpoint
     async def subscription_refresh(request: web.Request) -> web.StreamResponse:
         await _json(request)
-        result = await refresh_subscription(
-            UserStorage.from_request(request), request.match_info["owner"], request.match_info["repo"]
-        )
+        owner, repo = _source_parts(request.match_info["owner"], request.match_info["repo"])
+        result = await refresh_subscription(UserStorage.from_request(request), owner, repo)
         return web.json_response(result)
 
     @routes.get(f"{BASE}/workflows")
@@ -492,12 +752,13 @@ def register_routes() -> None:
     async def workflow_download(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         storage = UserStorage.from_request(request)
-        cache = storage.cache_dir / f"{data['owner']}-{data['repo']}.json"
+        owner, repo = await _require_subscribed_source(storage, data.get("owner"), data.get("repo"))
+        data["owner"], data["repo"] = owner, repo
+        cache = subscription_cache_path(storage, owner, repo)
         if not cache.is_file():
             raise UserFacingError("subscription.catalog_missing")
         catalog = Catalog.model_validate_json(cache.read_bytes())
-        product = next(item for item in catalog.workflows if item.id == data["workflow_id"])
-        version = next(item for item in product.versions if item.version == data["version"])
+        product, version = _catalog_version(catalog, data.get("workflow_id"), data.get("version"))
         operation = await operations.create(
             "download",
             storage,
@@ -513,17 +774,23 @@ def register_routes() -> None:
         if data.get("confirmed") is not True:
             raise UserFacingError("lora.download_confirmation_required")
         storage = UserStorage.from_request(request)
-        cache = storage.cache_dir / f"{data['owner']}-{data['repo']}.json"
+        owner, repo = await _require_subscribed_source(storage, data.get("owner"), data.get("repo"))
+        data["owner"], data["repo"] = owner, repo
+        cache = subscription_cache_path(storage, owner, repo)
         if not cache.is_file():
             raise UserFacingError("subscription.catalog_missing")
         catalog = Catalog.model_validate_json(cache.read_bytes())
-        product = next(item for item in catalog.workflows if item.id == data["workflow_id"])
-        version = next(item for item in product.versions if item.version == data["version"])
+        product, version = _catalog_version(catalog, data.get("workflow_id"), data.get("version"))
         model = next(
-            item
-            for item in version.models
-            if item.type == "loras" and item.filename == data["filename"]
+            (
+                item
+                for item in version.models
+                if item.type == "loras" and item.filename == str(data.get("filename") or "")
+            ),
+            None,
         )
+        if model is None:
+            raise UserFacingError("lora.not_found")
         operation = await operations.create(
             "lora-download",
             storage,
@@ -537,28 +804,40 @@ def register_routes() -> None:
     async def workflow_local_delete(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         storage = UserStorage.from_request(request)
+        owner, repo = _source_parts(data.get("owner"), data.get("repo"))
+        key = (owner.casefold(), repo.casefold(), str(data.get("workflow_id") or ""), str(data.get("version") or ""))
         installed = await storage.read_json("installed.json", [])
-        key = (data["owner"], data["repo"], data["workflow_id"], data["version"])
         record = next(
             (
                 item
                 for item in installed
-                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) == key
+                if (
+                    str(item.get("owner", "")).casefold(),
+                    str(item.get("repo", "")).casefold(),
+                    str(item.get("workflow_id", "")),
+                    str(item.get("version", "")),
+                ) == key
             ),
             None,
         )
         if not record:
-            raise ValueError("未找到已记录版本")
+            raise UserFacingError("subscription.local_version_not_found")
         target = ensure_within(storage.workflows_root, Path(record["path"]))
         target.unlink(missing_ok=True)
-        await storage.write_json(
-            "installed.json",
-            [
+
+        def remove_record(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [
                 item
-                for item in installed
-                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) != key
-            ],
-        )
+                for item in items
+                if (
+                    str(item.get("owner", "")).casefold(),
+                    str(item.get("repo", "")).casefold(),
+                    str(item.get("workflow_id", "")),
+                    str(item.get("version", "")),
+                ) != key
+            ]
+
+        await storage.update_json("installed.json", [], remove_record)
         return web.json_response({"deleted": True})
 
     @routes.post(f"{BASE}/workflows/local/reveal")
@@ -567,17 +846,22 @@ def register_routes() -> None:
         data = await _json(request)
         storage = UserStorage.from_request(request)
         installed = await storage.read_json("installed.json", [])
-        key = (data["owner"], data["repo"], data["workflow_id"], data["version"])
+        owner, repo = _source_parts(data.get("owner"), data.get("repo"))
+        key = (owner.casefold(), repo.casefold(), str(data.get("workflow_id") or ""), str(data.get("version") or ""))
         record = next(
             (
-                item
-                for item in installed
-                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) == key
+                item for item in installed
+                if (
+                    str(item.get("owner", "")).casefold(),
+                    str(item.get("repo", "")).casefold(),
+                    str(item.get("workflow_id", "")),
+                    str(item.get("version", "")),
+                ) == key
             ),
             None,
         )
         if not record:
-            raise ValueError("未找到已记录版本")
+            raise UserFacingError("subscription.local_version_not_found")
         target = ensure_within(storage.workflows_root, Path(record["path"]))
         reveal_in_file_manager(target)
         return web.json_response({"opened": True})
@@ -588,20 +872,25 @@ def register_routes() -> None:
         data = await _json(request)
         storage = UserStorage.from_request(request)
         installed = await storage.read_json("installed.json", [])
-        key = (data["owner"], data["repo"], data["workflow_id"], data["version"])
+        owner, repo = _source_parts(data.get("owner"), data.get("repo"))
+        key = (owner.casefold(), repo.casefold(), str(data.get("workflow_id") or ""), str(data.get("version") or ""))
         record = next(
             (
-                item
-                for item in installed
-                if (item["owner"], item["repo"], item["workflow_id"], item["version"]) == key
+                item for item in installed
+                if (
+                    str(item.get("owner", "")).casefold(),
+                    str(item.get("repo", "")).casefold(),
+                    str(item.get("workflow_id", "")),
+                    str(item.get("version", "")),
+                ) == key
             ),
             None,
         )
         if not record:
-            raise ValueError("未找到已记录版本")
+            raise UserFacingError("subscription.local_version_not_found")
         target = ensure_within(storage.workflows_root, Path(record["path"]))
         if not target.is_file():
-            raise ValueError("本地工作流文件不存在")
+            raise UserFacingError("subscription.local_file_missing")
         return web.json_response({"workflow": json.loads(target.read_text(encoding="utf-8"))})
 
     @routes.post(f"{BASE}/workflows/dependencies/plan")
@@ -612,20 +901,9 @@ def register_routes() -> None:
         version_policy = str(data.get("version_policy") or "align").strip().casefold()
         if version_policy not in {"align", "warn"}:
             raise UserFacingError("dependencies.invalid_version_policy")
-        align_versions = version_policy == "align"
-        git_items = await GitAdapter().plan(dependencies, align_versions=align_versions)
-        manager_items = await ManagerAdapter(f"{request.scheme}://{request.host}").plan(dependencies, align_versions=align_versions)
-        planned = {
-            (str(item.get("registry_id") or "") or str(item.get("source_url") or item.get("name"))): item
-            for item in [*git_items, *manager_items]
-        }
-        result = [
-            planned.get(
-                str(item.get("registry_id") or "") or str(item.get("source_url") or item.get("name")),
-                item,
-            )
-            for item in dependencies
-        ]
+        if not isinstance(dependencies, list) or not all(isinstance(item, dict) for item in dependencies):
+            raise UserFacingError("dependencies.invalid_plan")
+        result = await _plan_dependencies(dependencies, version_policy, _manager_origin(request))
         return web.json_response({"items": result})
 
     @routes.post(f"{BASE}/workflows/dependencies/execute")
@@ -633,36 +911,62 @@ def register_routes() -> None:
     async def dependency_execute(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         if data.get("confirmed") is not True:
-            raise ValueError("必须明确确认后才能修改节点环境")
+            raise UserFacingError("dependencies.confirmation_required")
         version_policy = str(data.get("version_policy") or "align").strip().casefold()
         if version_policy not in {"align", "warn"}:
             raise UserFacingError("dependencies.invalid_version_policy")
-        if version_policy == "warn" and any(
-            item.get("action") in {"upgrade", "downgrade"} for item in data.get("actions", [])
-        ):
-            raise UserFacingError("dependencies.version_alignment_disabled")
+        selected = data.get("actions", [])
+        if not selected or not isinstance(selected, list) or not all(isinstance(item, dict) for item in selected):
+            raise UserFacingError("dependencies.invalid_plan")
+        manager_origin = _manager_origin(request)
+        fresh_plan = await _plan_dependencies(
+            [_dependency_from_action(item) for item in selected],
+            version_policy,
+            manager_origin,
+        )
+        selected_keys = {_dependency_key(item) for item in selected}
+        fresh_by_key = {str(item.get("task_id")): item for item in fresh_plan}
+        actions: list[dict[str, Any]] = []
+        for selected_item in selected:
+            key = _dependency_key(selected_item)
+            fresh = fresh_by_key.get(key)
+            if fresh is None or fresh.get("action") in {"manual", "unknown", "conflict"}:
+                raise UserFacingError(
+                    "dependencies.plan_changed",
+                    {"name": str(selected_item.get("name") or selected_item.get("registry_id") or selected_item.get("source_url") or key)},
+                )
+            if key in selected_keys:
+                actions.append(fresh)
+        metadata = dict(data.get("metadata") or {})
+        metadata["actions"] = [
+            {
+                "task_id": item.get("task_id"),
+                "name": item.get("name"),
+                "registry_id": item.get("registry_id"),
+                "source_url": item.get("source_url"),
+                "requested": item.get("requested"),
+                "action": item.get("action"),
+                "installer": item.get("installer"),
+            }
+            for item in actions
+        ]
         storage = UserStorage.from_request(request)
-        operation = await operations.create("dependencies", storage, data.get("metadata") or {})
-        manager_origin = f"{request.scheme}://{request.host}"
-        asyncio.create_task(_run_dependency_operation(operation, data.get("actions", []), manager_origin))
+        operation = await operations.create("dependencies", storage, metadata)
+        asyncio.create_task(_run_dependency_operation(operation, actions, manager_origin))
         return web.json_response({"operation_id": operation.id}, status=202)
 
     @routes.get(f"{BASE}/github/repositories")
     @endpoint
     async def github_repositories(request: web.Request) -> web.StreamResponse:
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         return web.json_response({"items": await _guarded_github_call(storage, GitHubClient(token).list_repositories())})
 
     @routes.get(f"{BASE}/publisher/catalog/{{owner}}/{{repo}}")
     @endpoint
     async def publisher_catalog(request: web.Request) -> web.StreamResponse:
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         owner = request.match_info["owner"]
         repo = request.match_info["repo"]
         remote = await _guarded_github_call(storage, GitHubClient(token).get_catalog(owner, repo))
@@ -711,7 +1015,7 @@ def register_routes() -> None:
         storage = UserStorage.from_request(request)
         flow = await storage.read_json("device_flow.json", None)
         if not flow:
-            raise ValueError("登录请求不存在或已过期")
+            raise UserFacingError("github.login_expired")
         data = await poll_device_flow(flow["device_code"])
         if "error" in data:
             return web.json_response({"pending": data["error"] in {"authorization_pending", "slow_down"}, "error": data["error"]})
@@ -732,7 +1036,7 @@ def register_routes() -> None:
         storage = UserStorage.from_request(request)
         credential = await tokens.get_record(storage.key)
         if not credential or not credential.get("refresh_token"):
-            raise ValueError("当前 GitHub 凭据不可刷新，请重新登录")
+            raise UserFacingError("github.credential_unavailable")
         try:
             refreshed = await refresh_access_token(str(credential["refresh_token"]))
         except GitHubError as exc:
@@ -756,9 +1060,7 @@ def register_routes() -> None:
     async def github_repository_create(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         return web.json_response(
             await _guarded_github_call(
                 storage,
@@ -771,24 +1073,19 @@ def register_routes() -> None:
     @endpoint
     async def publisher_validate(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
-        product = WorkflowProduct.model_validate(prepare_publish_product(stamp_product_comfyui_version(data["product"])))
-        if any(model.type == "loras" for version in product.versions for model in version.models):
-            raise UserFacingError("publisher.lora_forbidden")
-        if not isinstance(data.get("workflow"), dict):
-            raise ValueError("工作流 JSON 必须是对象")
-        images, _ = scan_workflow_assets(data["workflow"])
-        failed_images = [item for item in images if item.status != "ready"]
-        if failed_images:
-            raise ValueError("工作流引用的加载图像存在缺失、超限或不支持的文件")
+        _validate_publish_payload(data)
         return web.json_response({"valid": True})
 
     @routes.post(f"{BASE}/publisher/scan-dependencies")
     @endpoint
     async def publisher_scan_dependencies(request: web.Request) -> web.StreamResponse:
         await _json(request)
-        items = await GitAdapter().installed_dependencies()
         try:
-            manager_items = await ManagerAdapter(f"{request.scheme}://{request.host}").installed_dependencies()
+            items = await GitAdapter().installed_dependencies()
+        except UserFacingError:
+            items = []
+        try:
+            manager_items = await ManagerAdapter(_manager_origin(request)).installed_dependencies()
         except UserFacingError:
             manager_items = []
         seen_sources = {str(item.get("source_url") or "").casefold() for item in items if item.get("source_url")}
@@ -810,7 +1107,7 @@ def register_routes() -> None:
     async def publisher_scan_assets(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         if not isinstance(data.get("workflow"), dict):
-            raise ValueError("工作流 JSON 必须是对象")
+            raise UserFacingError("publisher.workflow_invalid")
         images, loras = scan_workflow_assets(data["workflow"])
         return web.json_response(
             {"images": [item.public() for item in images], "loras": [item.public() for item in loras]}
@@ -826,13 +1123,11 @@ def register_routes() -> None:
     async def publisher_pending_resume(request: web.Request) -> web.StreamResponse:
         await _json(request)
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         pending = await storage.read_json("pending_publications.json", [])
         record = next((item for item in pending if item.get("tag") == request.match_info["tag"]), None)
         if not record:
-            raise ValueError("待同步发布不存在")
+            raise UserFacingError("publisher.pending_not_found")
         operation = await operations.create("publish-resume", storage, {"tag": record.get("tag", "")})
         asyncio.create_task(
             _run(
@@ -854,12 +1149,13 @@ def register_routes() -> None:
     @endpoint
     async def publisher_publish(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
-        product = stamp_product_comfyui_version(data["product"])
+        product = _validate_publish_payload(data)
+        try:
+            owner, repo = parse_public_repository(str(data.get("repository_url") or ""))
+        except (TypeError, ValueError) as exc:
+            raise UserFacingError("publisher.repository_invalid") from exc
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
-        owner, repo = parse_public_repository(str(data["repository_url"]))
+        token = await _github_token(storage)
         operation = await operations.create("publish", storage, {"owner": owner, "repo": repo, "workflow_id": product.get("id", "")})
         asyncio.create_task(
             _run(
@@ -888,9 +1184,7 @@ def register_routes() -> None:
     async def publisher_update(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         result = await _guarded_github_call(
             storage,
             update_product(
@@ -907,9 +1201,7 @@ def register_routes() -> None:
     @endpoint
     async def publisher_manage_list(request: web.Request) -> web.StreamResponse:
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         items = await _guarded_github_call(
             storage,
             list_managed_products(token, request.match_info["owner"], request.match_info["repo"]),
@@ -921,11 +1213,9 @@ def register_routes() -> None:
     async def publisher_workflow_delete(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         if data.get("confirmed") is not True:
-            raise ValueError("必须明确确认后才能删除工作流")
+            raise UserFacingError("publisher.confirmation_required")
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         result = await _guarded_github_call(
             storage,
             delete_workflow(token, request.match_info["owner"], request.match_info["repo"], request.match_info["workflow_id"]),
@@ -937,11 +1227,9 @@ def register_routes() -> None:
     async def publisher_version_delete(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         if data.get("confirmed") is not True:
-            raise ValueError("必须明确确认后才能删除版本")
+            raise UserFacingError("publisher.confirmation_required")
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         result = await _guarded_github_call(
             storage,
             delete_version(
@@ -959,9 +1247,7 @@ def register_routes() -> None:
     async def publisher_version_update(request: web.Request) -> web.StreamResponse:
         data = await _json(request)
         storage = UserStorage.from_request(request)
-        token = await tokens.get(storage.key)
-        if not token:
-            raise ValueError("请先登录 GitHub")
+        token = await _github_token(storage)
         result = await _guarded_github_call(
             storage,
             update_version_changelog(
@@ -983,6 +1269,9 @@ def register_routes() -> None:
         operation = await operations.get(request.match_info["operation_id"], storage)
         if operation.kind != "dependencies":
             raise UserFacingError("operation.invalid_manager_result")
+        late_manager_result = operation.status == "failed" and operation.error_code == "dependencies.manager_result_unknown"
+        if operation.status != "running" and not late_manager_result:
+            return web.json_response(operation.public())
         results = data.get("results") if isinstance(data.get("results"), dict) else {}
         tasks = operation.result.get("tasks", []) if isinstance(operation.result, dict) else []
         failed = False
@@ -997,7 +1286,7 @@ def register_routes() -> None:
             task["state"] = state
             task["message"] = str(update.get("message") or "")
             task["error_code"] = None if state == "success" else "dependencies.manager_task_failed"
-            task["error_params"] = {} if state == "success" else {"name": task.get("name", "")}
+            task["error_params"] = {} if state == "success" else {"name": task.get("name", ""), "detail": task.get("message", "")}
             if state == "failed":
                 failed = True
             if task["message"]:

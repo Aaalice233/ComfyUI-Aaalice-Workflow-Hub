@@ -45,6 +45,17 @@ class GitSourceTests(IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["action"], "manual")
         self.assertEqual(result[0]["warning_code"], "dependencies.local_changes")
 
+    def test_plan_blocks_duplicate_git_sources(self):
+        repositories = [
+            GitRepository("pack-a", Path("custom_nodes/pack-a"), SOURCE, COMMIT_A, False),
+            GitRepository("pack-b", Path("custom_nodes/pack-b"), SOURCE, COMMIT_B, False),
+        ]
+        dependency = {"name": "pack", "source_url": SOURCE, "commit": COMMIT_A, "manual": True}
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=repositories)):
+            result = self._run_plan([dependency])
+        self.assertEqual(result[0]["action"], "manual")
+        self.assertEqual(result[0]["warning_code"], "dependencies.duplicate_git_source")
+
     def test_plan_skips_legacy_registry_dependency(self):
         dependency = {"registry_id": "old-pack", "name": "Old Pack", "version": "1.0.0", "manual": False}
         with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[])):

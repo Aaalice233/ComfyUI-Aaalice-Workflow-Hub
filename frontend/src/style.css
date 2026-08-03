@@ -3158,6 +3158,7 @@ code {
 
 .dependency-row small {
   color: var(--muted);
+  font-size: 12px;
 }
 
 .dependency-execution {
@@ -3213,7 +3214,8 @@ code {
   color: var(--muted);
 }
 
-.dependency-tasks li[data-state="installing"] svg {
+.dependency-tasks li[data-state="installing"] svg,
+.dependency-tasks li[data-state="python_installing"] svg {
   color: var(--accent);
 }
 
@@ -3424,7 +3426,8 @@ pre {
   color: var(--muted);
 }
 
-.operation-tasks li[data-state="installing"] svg {
+.operation-tasks li[data-state="installing"] svg,
+.operation-tasks li[data-state="python_installing"] svg {
   color: var(--accent);
 }
 

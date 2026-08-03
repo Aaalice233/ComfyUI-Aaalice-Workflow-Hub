@@ -52,7 +52,7 @@
 运行时数据写入当前 ComfyUI 用户数据目录的 `workflow_hub/`，下载文件位于：
 
 ```text
-workflows/Workflow Hub/{owner}-{repo}/{workflow-id}/{名称}-v{版本}.json
+workflows/Workflow Hub/{owner}-{repo}-{source-hash}/{workflow-id}/{名称}-v{版本}.json
 ```
 
 ## 边界

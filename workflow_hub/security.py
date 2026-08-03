@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
@@ -30,7 +31,7 @@ def require_github_https(url: str) -> str:
 def parse_public_repository(value: str) -> tuple[str, str]:
     value = value.strip()
     parsed = urlparse(value if "://" in value else f"https://github.com/{value}")
-    if parsed.scheme != "https" or parsed.hostname != "github.com":
+    if parsed.scheme != "https" or parsed.hostname != "github.com" or parsed.username or parsed.password:
         raise ValueError("请输入公开 GitHub 仓库地址")
     parts = [part for part in parsed.path.strip("/").split("/") if part]
     if len(parts) != 2:
@@ -42,6 +43,11 @@ def parse_public_repository(value: str) -> tuple[str, str]:
     if not allowed.fullmatch(owner) or not allowed.fullmatch(repo):
         raise ValueError("无效的 GitHub 仓库地址")
     return owner, repo
+
+
+def repository_storage_key(owner: str, repo: str) -> str:
+    value = f"{owner.casefold().strip()}/{repo.casefold().strip()}".encode("utf-8")
+    return hashlib.sha256(value).hexdigest()[:20]
 
 
 def safe_filename(value: str, fallback: str = "workflow") -> str:

@@ -24,8 +24,14 @@ class JsonRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await _json(RequestStub(b"")), {})
 
     async def test_non_empty_body_requires_json_content_type(self) -> None:
-        with self.assertRaisesRegex(ValueError, "application/json"):
+        with self.assertRaises(UserFacingError) as caught:
             await _json(RequestStub(b"{}", "text/plain"))
+        self.assertEqual(caught.exception.code, "request.content_type_invalid")
+
+    async def test_invalid_json_uses_a_stable_error_code(self) -> None:
+        with self.assertRaises(UserFacingError) as caught:
+            await _json(RequestStub(b"{", "application/json"))
+        self.assertEqual(caught.exception.code, "request.json_invalid")
 
     async def test_json_object_is_parsed(self) -> None:
         self.assertEqual(await _json(RequestStub(b'{"value": 1}', "application/json")), {"value": 1})

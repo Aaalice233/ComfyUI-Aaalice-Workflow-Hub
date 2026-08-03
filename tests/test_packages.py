@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from workflow_hub.packages import build_package, inspect_package, install_workflow
+from workflow_hub.security import repository_storage_key
 
 
 class PackageTests(unittest.TestCase):
@@ -96,5 +97,6 @@ class PackageTests(unittest.TestCase):
             )
             installed = json.loads(target.read_text(encoding="utf-8"))
             reference = installed["nodes"][0]["widgets_values"][0]
-            self.assertEqual(reference, f"Workflow Hub/owner-repo/demo/{digest[:12]}-source.png")
+            source_name = f"owner-repo-{repository_storage_key('owner', 'repo')}"
+            self.assertEqual(reference, f"Workflow Hub/{source_name}/demo/{digest[:12]}-source.png")
             self.assertTrue((root / "input" / reference).is_file())

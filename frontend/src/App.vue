@@ -86,7 +86,7 @@ type Operation = {
   result?: Record<string, unknown>;
 };
 type DependencyPlan = {
-  registry_id?: string | null; source_url?: string | null; name: string; requested?: string | null; installed?: string | null;
+  task_id?: string; registry_id?: string | null; source_url?: string | null; name: string; requested?: string | null; installed?: string | null;
   action: "keep" | "install" | "upgrade" | "downgrade" | "newer" | "conflict" | "unknown" | "manual";
   installer?: "git" | "manager";
   warning_code?: string | null; warning_params?: Record<string, string | number>;
@@ -99,9 +99,9 @@ type ScannedNodeDependency = NodeDependencyInfo & {
   installer?: "git" | "manager";
 };
 type DependencyResult = {
-  name: string; registry_id?: string | null; source_url?: string | null; requested?: string | null; action: string;
+  task_id?: string; name: string; registry_id?: string | null; source_url?: string | null; requested?: string | null; action: string;
   installer?: "git" | "manager";
-  state: "queued" | "installing" | "success" | "failed" | "unknown";
+  state: "queued" | "installing" | "python_installing" | "success" | "failed" | "unknown";
   error_code?: string | null; error_params?: Record<string, string | number>;
 };
 type DependencyExecutionTask = DependencyResult & { registryId: string; version: string; message: string };
@@ -157,17 +157,23 @@ const device = ref<{ user_code: string; verification_uri: string; interval: numb
 const deviceCodeCopied = ref(false);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
 const selectedDependencyActions = reactive<Record<string, string[]>>({});
-const dependencyConfirmed = reactive<Record<string, boolean>>({});
 const dependencyAlignment = reactive<Record<string, boolean>>({});
 const dependencyOperationIds = reactive<Record<string, string>>({});
 const dependencyOperationSynced = reactive<Record<string, boolean>>({});
+const downloadOperationIds = reactive<Record<string, string>>({});
+const loraOperationIds = reactive<Record<string, string>>({});
 const managerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 const pendingManagerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 const managerResultSyncing = new Set<string>();
+const dependencyPlanGeneration = reactive<Record<string, number>>({});
+const dependencyPlanLoading = reactive<Record<string, boolean>>({});
+const loading = ref(true);
+let operationPollInFlight = false;
 let managerSocket: WebSocket | null = null;
 let operationTimer = 0;
 let loginTimer = 0;
 let copiedTimer = 0;
+let startupRefreshTimer = 0;
 
 const operationStageMessages: Record<string, MessageKey> = {
   queued: "stageQueued",
@@ -196,6 +202,7 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.github_source_missing": "dependenciesGithubSourceMissing",
   "dependencies.commit_missing": "dependenciesCommitMissing",
   "dependencies.conflicting_commits": "dependenciesConflictingCommits",
+  "dependencies.duplicate_git_source": "dependenciesDuplicateGitSource",
   "dependencies.local_changes": "dependenciesLocalChanges",
   "dependencies.target_exists": "dependenciesTargetExists",
   "dependencies.git_command_failed": "dependenciesGitCommandFailed",
@@ -211,8 +218,42 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.python_requirements_failed": "dependenciesPythonRequirementsFailed",
   "dependencies.manager_result_unknown": "dependenciesManagerResultUnknown",
   "operation.interrupted": "operationInterrupted",
+  "operation.failed": "operationFailedDetail",
   "operation.invalid_manager_result": "operationInvalidManagerResult",
+  "dependencies.operation_failed": "operationFailedDetail",
+  "request.invalid": "requestInvalid",
+  "request.invalid_payload": "requestInvalidPayload",
+  "request.origin_invalid": "requestOriginInvalid",
+  "request.body_too_large": "requestBodyTooLarge",
+  "request.content_type_invalid": "requestContentTypeInvalid",
+  "request.json_invalid": "requestJsonInvalid",
+  "request.object_required": "requestObjectRequired",
+  "github.request_failed": "githubRequestFailed",
+  "github.authentication_required": "githubAuthenticationRequired",
+  "github.login_expired": "githubLoginExpired",
+  "github.credential_unavailable": "githubCredentialUnavailable",
+  "subscription.invalid_source": "subscriptionInvalidSource",
+  "subscription.not_found": "subscriptionNotFound",
+  "subscription.workflow_not_found": "subscriptionWorkflowNotFound",
+  "subscription.version_not_found": "subscriptionVersionNotFound",
+  "subscription.catalog_invalid": "subscriptionCatalogInvalid",
+  "subscription.local_version_not_found": "subscriptionLocalVersionNotFound",
+  "subscription.local_file_missing": "subscriptionLocalFileMissing",
+  "dependencies.invalid_plan": "dependenciesInvalidPlan",
+  "dependencies.confirmation_required": "dependenciesConfirmationRequired",
+  "dependencies.plan_changed": "dependenciesPlanChanged",
+  "lora.not_found": "loraNotFound",
+  "publisher.lora_forbidden": "loraPublishForbidden",
+  "publisher.confirmation_required": "publisherConfirmationRequired",
+  "publisher.product_invalid": "publisherProductInvalid",
+  "publisher.repository_invalid": "publisherRepositoryInvalid",
+  "publisher.workflow_invalid": "publisherWorkflowInvalid",
+  "publisher.assets_invalid": "publisherAssetsInvalid",
+  "publisher.pending_not_found": "publisherPendingNotFound",
   "subscription.catalog_missing": "subscriptionCatalogMissing",
+  "subscription.refresh_failed": "subscriptionRefreshFailed",
+  "subscription.cache_unavailable": "subscriptionCacheUnavailable",
+  "subscription.cache_migration_conflict": "subscriptionCacheMigrationConflict",
 };
 
 const form = reactive({
@@ -260,11 +301,15 @@ const activeDependencyOperation = computed(() => {
 function operationTaskRows(operation: Operation): DependencyExecutionTask[] {
   const rawTasks = Array.isArray(operation.result?.tasks) ? operation.result.tasks as DependencyResult[] : [];
   return rawTasks.map((entry) => {
-    const registryId = String(entry.registry_id || entry.source_url || entry.name);
-    const override = managerTaskOverrides[`${operation.id}:${registryId}`] || pendingManagerTaskOverrides[registryId];
+    const taskId = String(entry.task_id || entry.registry_id || entry.source_url || entry.name);
+    const overrideKey = String(entry.registry_id || "");
+    const override = overrideKey
+      ? managerTaskOverrides[`${operation.id}:${overrideKey}`] || pendingManagerTaskOverrides[overrideKey]
+      : undefined;
     return {
       ...entry,
-      registryId,
+      task_id: entry.task_id,
+      registryId: taskId,
       state: override?.state || entry.state,
       version: entry.requested || "",
       message: override?.message || (entry.error_code ? localizedBackendError(entry.error_code, entry.error_params) : ""),
@@ -279,19 +324,24 @@ const activeDependencyExecution = computed(() => {
     total: operation.progress?.total || tasks.length,
     done: operation.progress?.received || (operation.status === "running" ? 0 : tasks.length),
     finished: operation.status !== "running",
+    failed: operation.status === "failed",
     tasks,
     logs: [...operation.logs, ...Object.entries(managerTaskOverrides)
       .filter(([key]) => key.startsWith(`${operation.id}:`))
       .map(([key, value]) => `${key.slice(operation.id.length + 1)}: ${value.message || value.state}`)],
   };
 });
-const dependencyExecutionFailures = computed(() =>
-  activeDependencyExecution.value?.tasks.filter((task) => task.state === "failed").length || 0
-);
+const dependencyExecutionFailures = computed(() => {
+  const execution = activeDependencyExecution.value;
+  if (!execution) return 0;
+  const taskFailures = execution.tasks.filter((task) => task.state === "failed" || task.state === "unknown").length;
+  return taskFailures || (execution.failed ? 1 : 0);
+});
 const dependencyOperationRunning = computed(() => operations.value.some((item) => item.kind === "dependencies" && item.status === "running"));
 const dependencyTaskStateKeys: Record<DependencyTaskState, MessageKey> = {
   queued: "installTaskQueued",
   installing: "installTaskInstalling",
+  python_installing: "installTaskPythonInstalling",
   success: "installTaskSuccess",
   failed: "installTaskFailed",
   unknown: "installTaskUnknown",
@@ -434,11 +484,54 @@ function openDetails(item: Product) {
   selected.value = item;
   selectedDetailVersion.value = latest(item)?.version || "";
 }
-function dependencyKey(item: Product | null, version: Version | null) {
-  return item && version ? `${item.source.owner}/${item.source.repo}/${item.id}@${version.version}` : "";
+function productKey(item: Product | null) {
+  return item ? `${item.source.owner}/${item.source.repo}/${item.id}` : "";
 }
-function dependencyActionKey(item: DependencyPlan, index: number) {
-  return `${index}:${item.source_url || item.registry_id || item.name}:${item.requested || ""}:${item.action}`;
+function dependencyKey(item: Product | null, version: Version | null) {
+  return item && version ? `${productKey(item)}@${version.version}` : "";
+}
+function downloadKey(item: Product, version: Version) {
+  return `${item.source.owner.toLowerCase()}/${item.source.repo.toLowerCase()}/${item.id}@${version.version}`;
+}
+function isVersionDownloading(item: Product, version: Version) {
+  const key = downloadKey(item, version);
+  const owner = item.source.owner.toLowerCase();
+  const repo = item.source.repo.toLowerCase();
+  return Boolean(downloadOperationIds[key]) || operations.value.some((operation) =>
+    operation.kind === "download" && operation.status === "running"
+    && String(operation.metadata?.owner || "").toLowerCase() === owner
+    && String(operation.metadata?.repo || "").toLowerCase() === repo
+    && operation.metadata?.workflow_id === item.id
+    && operation.metadata?.version === version.version
+  );
+}
+function loraDownloadKey(item: Product, version: Version, model: ModelAsset) {
+  return `${downloadKey(item, version)}:${model.type}:${model.filename}`;
+}
+function isLoraDownloading(item: Product, version: Version, model: ModelAsset) {
+  const key = loraDownloadKey(item, version, model);
+  const owner = item.source.owner.toLowerCase();
+  const repo = item.source.repo.toLowerCase();
+  return Boolean(loraOperationIds[key]) || operations.value.some((operation) =>
+    operation.kind === "lora-download" && operation.status === "running"
+    && String(operation.metadata?.owner || "").toLowerCase() === owner
+    && String(operation.metadata?.repo || "").toLowerCase() === repo
+    && operation.metadata?.workflow_id === item.id
+    && operation.metadata?.version === version.version
+    && operation.metadata?.filename === model.filename
+  );
+}
+function dependencyIdentity(item: { task_id?: string; source_url?: string | null; registry_id?: string | null; name?: string }) {
+  if (item.task_id) return item.task_id;
+  if (item.source_url) return `git:${item.source_url.trim().toLowerCase().replace(/\/$/, "").replace(/\.git$/, "")}`;
+  if (item.registry_id) return `manager:${item.registry_id.trim().toLowerCase()}`;
+  return `name:${String(item.name || "").trim().toLowerCase()}`;
+}
+function dependencyActionKey(item: DependencyPlan, _index: number) {
+  return `${dependencyIdentity(item)}:${item.requested || ""}:${item.action}`;
+}
+function dependencyNodeKey(item: NodeDependencyInfo) {
+  return dependencyIdentity(item);
 }
 function humanBytes(value: number) {
   if (value < 1024) return `${value} B`;
@@ -448,21 +541,29 @@ function humanBytes(value: number) {
 function operationStageLabel(stage: string) {
   return t.value(operationStageMessages[stage] || "stageUnknown", { stage });
 }
+function operationKindLabel(kind: string) {
+  const labels: Record<string, MessageKey> = {
+    dependencies: "dependencyInstall",
+    download: "operationDownload",
+    "lora-download": "operationLoraDownload",
+    publish: "operationPublish",
+  };
+  return t.value(labels[kind] || "operationUnknown", { kind });
+}
 function localizedBackendError(code: string, params?: Record<string, string | number>) {
   const key = backendErrorMessages[code];
-  return key ? t.value(key, params) : code;
+  return key ? t.value(key, params) : t.value("operationFailedDetail", { detail: params?.detail || code });
 }
 function errorMessage(reason: unknown) {
   if (reason instanceof ApiError && reason.code) return localizedBackendError(reason.code, reason.params);
   return reason instanceof Error ? reason.message : String(reason);
 }
 function operationErrorMessage(item: Operation) {
-  const summary = item.error_code ? t.value(backendErrorMessages[item.error_code] || "operationFailed", item.error_params) : "";
+  const summary = item.error_code ? localizedBackendError(item.error_code, item.error_params) : "";
   return [summary, ...item.logs].filter(Boolean).join("\n");
 }
 function sourceErrorMessage(item: Source) {
-  const key = item.error ? backendErrorMessages[item.error] : undefined;
-  return key ? t.value(key) : item.error || item.url;
+  return item.error ? localizedBackendError(item.error) : item.url;
 }
 function moveToPublishStep(step: 1 | 2 | 3) {
   if (step === 1 || (step === 2 && canConfirmPublishResources.value) || (step === 3 && canFinalizePublish.value)) {
@@ -506,54 +607,59 @@ async function openSourceComposer() {
   sourceInput.value?.focus();
 }
 async function load() {
+  loading.value = true;
   clearMessages();
-  const [s, sub, flows, ops] = await Promise.all([
-    api<Status>("/status"),
-    api<{ items: Source[] }>("/subscriptions"),
-    api<{ items: Product[] }>("/workflows"),
-    api<{ items: Operation[] }>("/operations"),
-  ]);
-  status.value = s;
-  sources.value = sub.items;
-  products.value = flows.items;
-  operations.value = ops.items;
-  if (s.github.authenticated) {
-    try {
-      const [repos, pending] = await Promise.all([
-        api<{ items: PublishRepository[] }>("/github/repositories"),
-        api<{ items: { tag: string }[] }>("/publisher/pending"),
-      ]);
-      repositories.value = repos.items;
-      let remembered = "";
+  try {
+    const [s, sub, flows, ops] = await Promise.all([
+      api<Status>("/status"),
+      api<{ items: Source[] }>("/subscriptions"),
+      api<{ items: Product[] }>("/workflows"),
+      api<{ items: Operation[] }>("/operations"),
+    ]);
+    status.value = s;
+    sources.value = sub.items;
+    products.value = flows.items;
+    operations.value = ops.items;
+    if (s.github.authenticated) {
       try {
-        remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
-      } catch {
-        // Browser storage may be unavailable in hardened embedded views.
+        const [repos, pending] = await Promise.all([
+          api<{ items: PublishRepository[] }>("/github/repositories"),
+          api<{ items: { tag: string }[] }>("/publisher/pending"),
+        ]);
+        repositories.value = repos.items;
+        let remembered = "";
+        try {
+          remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
+        } catch {
+          // Browser storage may be unavailable in hardened embedded views.
+        }
+        form.repository_url = resolvePublishRepositoryUrl(
+          repositories.value,
+          form.repository_url,
+          remembered
+        );
+        await applySelectedRepository();
+        pendingPublications.value = pending.items;
+      } catch (reason) {
+        if (!(reason instanceof ApiError && reason.status === 401)) throw reason;
+        status.value.github.authenticated = false;
+        repositories.value = [];
+        error.value = reason.message;
       }
-      form.repository_url = resolvePublishRepositoryUrl(
-        repositories.value,
-        form.repository_url,
-        remembered
-      );
-      await applySelectedRepository();
-      pendingPublications.value = pending.items;
-    } catch (reason) {
-      if (!(reason instanceof ApiError && reason.status === 401)) throw reason;
-      // The backend has already discarded the dead credential; drop the local
-      // authenticated state so the publish UI offers sign-in instead of failing again.
-      status.value.github.authenticated = false;
+    } else {
       repositories.value = [];
-      error.value = reason.message;
     }
-  } else {
-    repositories.value = [];
-  }
-  if (selected.value) {
-    selected.value = products.value.find((item) =>
-      item.id === selected.value?.id
-      && item.source.owner === selected.value?.source.owner
-      && item.source.repo === selected.value?.source.repo
-    ) || null;
+    if (selected.value) {
+      selected.value = products.value.find((item) =>
+        item.id === selected.value?.id
+        && item.source.owner === selected.value?.source.owner
+        && item.source.repo === selected.value?.source.repo
+      ) || null;
+    }
+  } catch (reason) {
+    error.value = errorMessage(reason);
+  } finally {
+    loading.value = false;
   }
 }
 async function withBusy(name: string, action: () => Promise<void>) {
@@ -579,11 +685,16 @@ async function refreshSource(item: Source) {
 }
 async function refreshAllSources() {
   await withBusy("refresh-all", async () => {
+    let failed = 0;
     for (const item of sources.value) {
-      await post(`/subscriptions/${item.owner}/${item.repo}/refresh`, {});
+      try {
+        await post(`/subscriptions/${item.owner}/${item.repo}/refresh`, {});
+      } catch {
+        failed += 1;
+      }
     }
     await load();
-    notice.value = t.value("allSourcesRefreshed");
+    notice.value = failed ? t.value("someSourcesFailed", { count: failed }) : t.value("allSourcesRefreshed");
   });
 }
 async function removeSource(item: Source) {
@@ -594,16 +705,19 @@ async function removeSource(item: Source) {
   });
 }
 async function download(item: Product, version: Version) {
+  if (isVersionDownloading(item, version)) return;
   await withBusy("download", async () => {
     const result = await post<{ operation_id: string }>("/workflows/download", {
       owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
     });
+    downloadOperationIds[downloadKey(item, version)] = result.operation_id;
     notice.value = `${t.value("activities")}: ${result.operation_id}`;
     drawer.value = true;
     await pollOperations();
   });
 }
 async function downloadLora(item: Product, version: Version, model: ModelAsset) {
+  if (isLoraDownloading(item, version, model)) return;
   await withBusy(`lora-${model.filename}`, async () => {
     const result = await post<{ operation_id: string }>("/workflows/models/download", {
       owner: item.source.owner,
@@ -613,6 +727,7 @@ async function downloadLora(item: Product, version: Version, model: ModelAsset) 
       filename: model.filename,
       confirmed: true,
     });
+    loraOperationIds[loraDownloadKey(item, version, model)] = result.operation_id;
     notice.value = `${t.value("activities")}: ${result.operation_id}`;
     drawer.value = true;
     await pollOperations();
@@ -652,18 +767,31 @@ async function planDependencies(item: Product, version: Version) {
 }
 async function fetchDependencyPlan(item: Product, version: Version) {
   const key = dependencyKey(item, version);
+  const generation = (dependencyPlanGeneration[key] || 0) + 1;
+  dependencyPlanGeneration[key] = generation;
+  dependencyPlanLoading[key] = true;
   const alignVersions = dependencyAlignment[key] ?? true;
   dependencyAlignment[key] = alignVersions;
-  const result = await post<{ items: DependencyPlan[] }>("/workflows/dependencies/plan", {
-    dependencies: version.custom_nodes,
-    version_policy: alignVersions ? "align" : "warn",
-  });
-  dependencyPlans[key] = result.items;
-  selectedDependencyActions[key] = result.items
-    .map((entry, index) => ({ entry, id: dependencyActionKey(entry, index) }))
-    .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade" || entry.action === "downgrade")
-    .map(({ id }) => id);
-  dependencyConfirmed[key] = false;
+  try {
+    const result = await post<{ items: DependencyPlan[] }>("/workflows/dependencies/plan", {
+      dependencies: version.custom_nodes,
+      version_policy: alignVersions ? "align" : "warn",
+    });
+    if (dependencyPlanGeneration[key] !== generation) return;
+    dependencyPlans[key] = result.items;
+    selectedDependencyActions[key] = result.items
+      .map((entry, index) => ({ entry, id: dependencyActionKey(entry, index) }))
+      .filter(({ entry }) => entry.action === "install" || entry.action === "upgrade" || entry.action === "downgrade")
+      .map(({ id }) => id);
+  } catch (reason) {
+    if (dependencyPlanGeneration[key] === generation) {
+      delete dependencyPlans[key];
+      delete selectedDependencyActions[key];
+    }
+    throw reason;
+  } finally {
+    if (dependencyPlanGeneration[key] === generation) dependencyPlanLoading[key] = false;
+  }
 }
 async function toggleDependencyAlignment(item: Product, version: Version, enabled: boolean) {
   const key = dependencyKey(item, version);
@@ -695,9 +823,7 @@ function dependencyPlanEntry(node: NodeDependencyInfo): DependencyPlan | null {
   if (!item || !version) return null;
   const plan = dependencyPlans[dependencyKey(item, version)];
   if (!plan) return null;
-  return plan.find((entry) => (node.source_url && entry.source_url === node.source_url)
-    || (node.registry_id && entry.registry_id === node.registry_id)
-    || entry.name === node.name) || null;
+  return plan.find((entry) => dependencyIdentity(entry) === dependencyNodeKey(node)) || null;
 }
 const dependencyActionLabels: Record<DependencyPlan["action"], MessageKey> = {
   keep: "depStatusInstalled",
@@ -724,8 +850,6 @@ function toggleDependencyAction(key: string, id: string, checked: boolean) {
 async function executeDependencyPlan(item: Product | null, version: Version | null) {
   if (!item || !version) return;
   const key = dependencyKey(item, version);
-  if (!dependencyConfirmed[key]) return;
-  if (!confirm(t.value("confirmPluginChanges"))) return;
   const selectedIds = new Set(selectedDependencyActions[key] || []);
   const actions = (dependencyPlans[key] || []).filter((entry, index) => selectedIds.has(dependencyActionKey(entry, index)));
   await withBusy("dependency-execute", async () => {
@@ -736,7 +860,6 @@ async function executeDependencyPlan(item: Product | null, version: Version | nu
       metadata: { workflow_key: key },
       actions,
     });
-    dependencyConfirmed[key] = false;
     dependencyOperationIds[key] = result.operation_id;
     dependencyOperationSynced[key] = false;
     try {
@@ -763,7 +886,7 @@ function handleManagerQueueEvent(data: Record<string, unknown>) {
   if (data.status !== "done" || typeof data.nodepack_result !== "object" || !data.nodepack_result) return;
   const results = data.nodepack_result as Record<string, unknown>;
   for (const operation of operations.value) {
-    if (operation.kind !== "dependencies" || !Array.isArray(operation.result?.tasks)) continue;
+    if ((operation.status !== "running" && operation.error_code !== "dependencies.manager_result_unknown") || operation.kind !== "dependencies" || !Array.isArray(operation.result?.tasks)) continue;
     const updates: Record<string, { state: "success" | "failed"; message: string }> = {};
     for (const task of operation.result.tasks as DependencyResult[]) {
       const registryId = String(task.registry_id || "");
@@ -791,25 +914,40 @@ function syncManagerResults(operation: Operation, updates: Record<string, { stat
     .catch(() => undefined)
     .finally(() => managerResultSyncing.delete(operation.id));
 }
+function scheduleOperationPoll() {
+  window.clearTimeout(operationTimer);
+  operationTimer = window.setTimeout(() => void pollOperations(), 1000);
+}
 async function pollOperations() {
-  operations.value = (await api<{ items: Operation[] }>("/operations")).items;
-  for (const operation of operations.value) {
-    if (operation.kind === "dependencies" && Array.isArray(operation.result?.tasks)) {
-      const updates: Record<string, { state: "success" | "failed"; message: string }> = {};
-      for (const task of operation.result.tasks as DependencyResult[]) {
-        const registryId = String(task.registry_id || "");
-        const override = registryId ? pendingManagerTaskOverrides[registryId] : undefined;
-        if (registryId && override) updates[registryId] = override;
+  if (operationPollInFlight) return;
+  operationPollInFlight = true;
+  try {
+    operations.value = (await api<{ items: Operation[] }>("/operations")).items;
+    for (const [key, operationId] of Object.entries(downloadOperationIds)) {
+      const operation = operations.value.find((item) => item.id === operationId);
+      if (!operation || operation.status !== "running") delete downloadOperationIds[key];
+    }
+    for (const [key, operationId] of Object.entries(loraOperationIds)) {
+      const operation = operations.value.find((item) => item.id === operationId);
+      if (!operation || operation.status !== "running") delete loraOperationIds[key];
+    }
+    for (const operation of operations.value) {
+      if ((operation.status === "running" || operation.error_code === "dependencies.manager_result_unknown") && operation.kind === "dependencies" && Array.isArray(operation.result?.tasks)) {
+        const updates: Record<string, { state: "success" | "failed"; message: string }> = {};
+        for (const task of operation.result.tasks as DependencyResult[]) {
+          const registryId = String(task.registry_id || "");
+          const override = registryId ? pendingManagerTaskOverrides[registryId] : undefined;
+          if (registryId && override) updates[registryId] = override;
+        }
+        syncManagerResults(operation, updates);
       }
-      syncManagerResults(operation, updates);
+      const workflowKey = typeof operation.metadata?.workflow_key === "string" ? operation.metadata.workflow_key : "";
+      if (operation.kind === "dependencies" && workflowKey && !dependencyOperationIds[workflowKey]) {
+        dependencyOperationIds[workflowKey] = operation.id;
+        dependencyOperationSynced[workflowKey] = operation.status !== "running";
+      }
     }
-    const workflowKey = typeof operation.metadata?.workflow_key === "string" ? operation.metadata.workflow_key : "";
-    if (operation.kind === "dependencies" && workflowKey && !dependencyOperationIds[workflowKey]) {
-      dependencyOperationIds[workflowKey] = operation.id;
-      dependencyOperationSynced[workflowKey] = operation.status !== "running";
-    }
-  }
-  for (const [key, operationId] of Object.entries(dependencyOperationIds)) {
+    for (const [key, operationId] of Object.entries(dependencyOperationIds)) {
     const operation = operations.value.find((item) => item.id === operationId);
     if (!operation || operation.status === "running" || dependencyOperationSynced[key]) continue;
     dependencyOperationSynced[key] = true;
@@ -817,14 +955,24 @@ async function pollOperations() {
       try { await fetchDependencyPlan(selected.value, activeDetailVersion.value); } catch { /* manual check remains available */ }
     }
   }
-  if (operations.value.some((item) => item.status === "running")) {
-    window.clearTimeout(operationTimer);
-    operationTimer = window.setTimeout(pollOperations, 1000);
-  } else {
-    await Promise.all([
-      api<{ items: Product[] }>("/workflows").then((value) => products.value = value.items),
-      api<{ items: Source[] }>("/subscriptions").then((value) => sources.value = value.items),
-    ]);
+    if (operations.value.some((item) => item.status === "running" || item.error_code === "dependencies.manager_result_unknown")) {
+      scheduleOperationPoll();
+    } else {
+      await Promise.all([
+        api<{ items: Product[] }>("/workflows").then((value) => {
+          products.value = value.items;
+          if (selected.value) {
+            selected.value = value.items.find((item) => productKey(item) === productKey(selected.value)) || selected.value;
+          }
+        }),
+        api<{ items: Source[] }>("/subscriptions").then((value) => sources.value = value.items),
+      ]);
+    }
+  } catch (reason) {
+    error.value = errorMessage(reason);
+    scheduleOperationPoll();
+  } finally {
+    operationPollInFlight = false;
   }
 }
 function requestCurrentCanvasWorkflow() {
@@ -1234,8 +1382,13 @@ onMounted(async () => {
   document.addEventListener("keydown", handleWorkspaceShortcut);
   window.addEventListener("message", handleHubMessage);
   requestCurrentCanvasWorkflow();
-  try { await load(); await pollOperations(); }
-  catch (reason) { error.value = errorMessage(reason); }
+  try {
+    await load();
+    await pollOperations();
+    startupRefreshTimer = window.setTimeout(() => {
+      void post("/update-notifications", {}).then(() => load()).catch((reason) => { error.value = errorMessage(reason); });
+    }, 300);
+  } catch (reason) { error.value = errorMessage(reason); }
 });
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleWorkspaceShortcut);
@@ -1243,6 +1396,7 @@ onBeforeUnmount(() => {
   clearTimeout(operationTimer);
   clearTimeout(loginTimer);
   clearTimeout(copiedTimer);
+  clearTimeout(startupRefreshTimer);
   managerSocket?.close();
 });
 </script>
@@ -1350,7 +1504,8 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div v-if="visibleProducts.length" class="catalog">
+            <div v-if="loading" class="empty-state loading-state"><LoaderCircle :size="32" class="dependency-task-spin" /><p>{{ t("loading") }}</p></div>
+            <div v-else-if="visibleProducts.length" class="catalog">
               <article v-for="item in visibleProducts" :key="`${item.source.owner}/${item.source.repo}/${item.id}`"
                 class="workflow-card" tabindex="0" @click="openDetails(item)" @keyup.enter="openDetails(item)">
                 <div class="preview-wrap">
@@ -1361,7 +1516,7 @@ onBeforeUnmount(() => {
                 <div class="card-body">
                   <div class="card-heading"><h2>{{ item.name }}</h2><ArrowRight :size="17" /></div>
                   <p>{{ item.summary }}</p>
-                  <div class="tags"><span v-if="item.category" class="category-tag"><FolderOpen :size="11" />{{ item.category }}</span><span v-for="tag in item.tags" :key="tag">{{ tag }}</span></div>
+                  <div class="tags"><span v-if="item.category" class="category-tag"><FolderOpen :size="11" />{{ item.category }}</span><span v-if="item.archived" class="archived-tag">{{ t("archived") }}</span><span v-for="tag in item.tags" :key="tag">{{ tag }}</span></div>
                   <footer>
                     <a class="source-origin" :href="productRepositoryUrl(item)" target="_blank" rel="noopener"
                       :title="t('repositoryPage')" :aria-label="`${t('repositoryPage')}: ${item.source.owner}/${item.source.repo}`"
@@ -1722,7 +1877,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="version-actions" :class="{ 'downloaded-actions': selected.downloaded_versions.includes(activeDetailVersion.version) }">
-              <button v-if="!selected.downloaded_versions.includes(activeDetailVersion.version)" class="primary wide" :disabled="!!busy" @click="download(selected, activeDetailVersion)"><DownloadIcon :size="17" />{{ t("download") }}</button>
+              <button v-if="!selected.downloaded_versions.includes(activeDetailVersion.version)" class="primary wide" :disabled="!!busy || isVersionDownloading(selected, activeDetailVersion)" @click="download(selected, activeDetailVersion)"><LoaderCircle v-if="isVersionDownloading(selected, activeDetailVersion)" :size="17" class="dependency-task-spin" /><DownloadIcon v-else :size="17" />{{ isVersionDownloading(selected, activeDetailVersion) ? t("downloading") : t("download") }}</button>
               <template v-else>
                 <button class="primary wide" :disabled="!!busy" @click="loadLocalVersion(selected, activeDetailVersion)"><FileJson :size="17" />{{ t("loadToCanvas") }}</button>
                 <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, activeDetailVersion)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
@@ -1773,7 +1928,7 @@ onBeforeUnmount(() => {
                 <div class="resource-group-heading"><TriangleAlert :size="16" /><strong>{{ t("optionalLoras") }}</strong><small>{{ t("downloadIndividually") }}</small></div>
                 <div v-for="model in loraAssets(activeDetailVersion)" :key="`${model.type}:${model.filename}`" class="model-asset">
                   <span><strong>{{ model.name }}</strong><small>{{ model.filename }}</small></span>
-                  <button class="secondary" :disabled="!!busy" @click="downloadLora(selected, activeDetailVersion, model)"><DownloadIcon :size="15" />{{ t("download") }}</button>
+                  <button class="secondary" :disabled="!!busy || isLoraDownloading(selected, activeDetailVersion, model)" @click="downloadLora(selected, activeDetailVersion, model)"><LoaderCircle v-if="isLoraDownloading(selected, activeDetailVersion, model)" :size="15" class="dependency-task-spin" /><DownloadIcon v-else :size="15" />{{ isLoraDownloading(selected, activeDetailVersion, model) ? t("downloading") : t("download") }}</button>
                 </div>
               </section>
             </div>
@@ -1785,6 +1940,7 @@ onBeforeUnmount(() => {
               </div>
             </details>
 
+          <div v-if="dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]" class="message info"><LoaderCircle :size="17" class="dependency-task-spin" /><span>{{ t("checkingDependencies") }}</span></div>
           <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)]" class="dependency-plan">
             <div v-if="!status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
             <label class="version-alignment-row"><input
@@ -1800,10 +1956,9 @@ onBeforeUnmount(() => {
               <span><strong>{{ entry.name }}</strong><small><b class="dependency-installer-badge" :data-installer="entry.installer">{{ entry.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ entry.installed || "—" }} → {{ entry.requested || t("gitRevisionUnavailable") }} · {{ t(dependencyActionLabels[entry.action]) }}<template v-if="entry.warning_code"> · {{ dependencyWarning(entry) }}</template></small></span>
             </label>
             <div v-if="activeCoreMismatch" class="message warning"><TriangleAlert :size="16" /><span>{{ t("coreVersionMismatchDetail", { required: comfyuiCompatibilityLabel(activeDetailVersion), current: status?.comfyui_version || "—" }) }}</span></div>
-            <label class="confirm-row"><input v-model="dependencyConfirmed[dependencyKey(selected, activeDetailVersion)]" type="checkbox" />{{ t("confirmEnvironment") }}</label>
             <button class="primary wide"
-              :disabled="!dependencyConfirmed[dependencyKey(selected, activeDetailVersion)] || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.length || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning"
-              @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("execute") }}</button>
+              :disabled="!selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.length || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
+              @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("oneClickInstall") }}</button>
 
             <div v-if="activeDependencyExecution" class="dependency-execution">
               <div class="dependency-progress-head">
@@ -1812,7 +1967,7 @@ onBeforeUnmount(() => {
               </div>
               <ul class="dependency-tasks">
                 <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
-                  <LoaderCircle v-if="task.state === 'installing'" :size="15" class="dependency-task-spin" />
+                  <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="15" class="dependency-task-spin" />
                   <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
                   <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
                   <Clock v-else :size="15" />
@@ -1826,8 +1981,10 @@ onBeforeUnmount(() => {
                 <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
               </details>
               <div v-if="activeDependencyExecution.finished" class="dependency-result">
-                <span>{{ dependencyExecutionFailures ? t("installFinishedWithFailures", { count: dependencyExecutionFailures }) : t("installFinished") }}</span>
-                <span>{{ t("restartToApply") }}</span>
+                <span v-if="dependencyExecutionFailures">{{ t("installFinishedWithFailures", { count: dependencyExecutionFailures }) }}</span>
+                <span v-else>{{ t("installFinished") }}</span>
+                <span v-if="!dependencyExecutionFailures">{{ t("restartToApply") }}</span>
+                <pre v-if="dependencyExecutionFailures && activeDependencyOperation?.error_code">{{ operationErrorMessage(activeDependencyOperation) }}</pre>
               </div>
             </div>
           </div>
@@ -1866,7 +2023,7 @@ onBeforeUnmount(() => {
       <div class="drawer-head"><div><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button></div>
       <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
       <article v-for="item in operations" :key="item.id" class="operation">
-        <div><strong>{{ item.kind === "dependencies" ? t("dependencyInstall") : item.kind }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
+        <div><strong>{{ operationKindLabel(item.kind) }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
         <template v-if="item.progress?.total">
           <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
             :aria-valuenow="Math.round(progressPercent(item.progress))">
@@ -1876,7 +2033,7 @@ onBeforeUnmount(() => {
         </template>
         <ul v-if="item.kind === 'dependencies' && operationTaskRows(item).length" class="operation-tasks">
           <li v-for="task in operationTaskRows(item)" :key="task.registryId" :data-state="task.state">
-            <LoaderCircle v-if="task.state === 'installing'" :size="14" class="dependency-task-spin" />
+            <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="14" class="dependency-task-spin" />
             <CheckCircle2 v-else-if="task.state === 'success'" :size="14" />
             <AlertCircle v-else-if="task.state === 'failed'" :size="14" />
             <Clock v-else :size="14" />

@@ -10,6 +10,25 @@ from typing import Any
 from .security import redact
 
 
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        protected = {"token", "access_token", "refresh_token", "password", "secret", "client_secret", "authorization", "cookie"}
+        return {
+            key: "[REDACTED]"
+            if (
+                str(key).casefold() in protected
+                or str(key).casefold().endswith(("_token", "_password", "_secret"))
+            )
+            else _redact_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
+
+
 @dataclass
 class Operation:
     id: str
@@ -27,14 +46,14 @@ class Operation:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def public(self) -> dict[str, Any]:
-        data = asdict(self)
-        data.pop("owner_key", None)
-        data["logs"] = [redact(line) for line in self.logs[-200:]]
+        data = self.record()
+        data["logs"] = data["logs"][-200:]
         return data
 
     def record(self) -> dict[str, Any]:
-        data = asdict(self)
+        data = _redact_value(asdict(self))
         data.pop("owner_key", None)
+        data["logs"] = data["logs"][-200:]
         return data
 
 
@@ -54,15 +73,20 @@ class OperationStore:
         owner_key = self._owner_key(storage)
         if owner_key in self._loaded:
             return
-        self._loaded.add(owner_key)
         if storage is None:
+            self._loaded.add(owner_key)
             return
         self._storages[owner_key] = storage
-        records = await storage.read_json("operations.json", [])
+        try:
+            records = await storage.read_json("operations.json", [])
+        except ValueError:
+            path = storage.state_dir / "operations.json"
+            path.replace(path.with_name(f"operations.corrupt-{uuid.uuid4().hex}.json"))
+            records = []
         if not isinstance(records, list):
-            return
-        order = self._orders.setdefault(owner_key, deque(maxlen=100))
-        for record in records:
+            records = []
+        order = self._orders.setdefault(owner_key, deque())
+        for record in records[:100]:
             if not isinstance(record, dict) or not record.get("id") or record["id"] in self._items:
                 continue
             operation = Operation(
@@ -89,9 +113,11 @@ class OperationStore:
             self._items[operation.id] = operation
             order.append(operation.id)
         await self._persist_owner(storage, owner_key)
+        self._loaded.add(owner_key)
 
     async def _persist_owner(self, storage: Any, owner_key: str) -> None:
-        order = self._orders.setdefault(owner_key, deque(maxlen=100))
+        order = self._orders.setdefault(owner_key, deque())
+        self._trim_order(owner_key)
         records = [self._items[item].record() for item in order if item in self._items]
         await storage.write_json("operations.json", records)
 
@@ -110,6 +136,29 @@ class OperationStore:
             await self.persist(operation)
         await self.persist(operation)
 
+    def _trim_order(self, owner_key: str) -> None:
+        order = self._orders.setdefault(owner_key, deque())
+        while len(order) > 100:
+            evicted = next(
+                (
+                    item_id
+                    for item_id in reversed(order)
+                    if self._items.get(item_id) is not None and self._items[item_id].status != "running"
+                ),
+                None,
+            )
+            if evicted is None:
+                break
+            order.remove(evicted)
+            self._items.pop(evicted, None)
+
+    def _append_order(self, owner_key: str, operation_id: str) -> None:
+        order = self._orders.setdefault(owner_key, deque())
+        if operation_id in order:
+            order.remove(operation_id)
+        order.appendleft(operation_id)
+        self._trim_order(owner_key)
+
     async def create(self, kind: str, storage: Any | None = None, metadata: dict[str, Any] | None = None) -> Operation:
         owner_key = self._owner_key(storage)
         async with self._lock:
@@ -121,7 +170,7 @@ class OperationStore:
                 metadata=metadata or {},
             )
             self._items[item.id] = item
-            self._orders.setdefault(owner_key, deque(maxlen=100)).appendleft(item.id)
+            self._append_order(owner_key, item.id)
             if storage is not None:
                 await self._persist_owner(storage, owner_key)
         asyncio.create_task(self._monitor(item))

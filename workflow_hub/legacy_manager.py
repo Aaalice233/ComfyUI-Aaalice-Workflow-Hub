@@ -6,6 +6,8 @@ import asyncio
 import re
 from typing import Any
 
+from .security import parse_public_repository
+
 import aiohttp
 
 from .errors import UserFacingError
@@ -22,7 +24,22 @@ def _parse_version(value: str) -> tuple[int, ...]:
 
 def _github_url(value: str | None) -> str | None:
     text = str(value or "").strip().strip("/")
-    return f"https://github.com/{text}" if text.count("/") == 1 else None
+    if text.startswith("github:"):
+        text = text.removeprefix("github:")
+    if text.startswith("git@github.com:"):
+        text = text.removeprefix("git@github.com:")
+    elif text.startswith("ssh://git@github.com/"):
+        text = text.removeprefix("ssh://git@github.com/")
+    elif text.startswith("https://github.com/"):
+        text = text.removeprefix("https://github.com/")
+    elif text.startswith("github.com/"):
+        text = text.removeprefix("github.com/")
+    text = text.removesuffix(".git").strip("/")
+    try:
+        owner, repo = parse_public_repository(text)
+    except ValueError:
+        return None
+    return f"https://github.com/{owner}/{repo}"
 
 
 def _version_tuple(value: str | None) -> tuple[int, int, int] | None:
@@ -41,10 +58,7 @@ def _manager_compatible(flavor: str, version: str | None) -> bool:
 
 
 def _source_from_aux(value: str | None) -> str | None:
-    text = str(value or "").strip()
-    if text.startswith("https://github.com/"):
-        text = text.removeprefix("https://github.com/").strip("/")
-    return _github_url(text)
+    return _github_url(value)
 
 
 @dataclass
@@ -71,19 +85,21 @@ class ManagerAdapter:
         if cached is not None:
             return cached
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=True) as session:
                 for flavor, path in (("v2", "/v2/manager/version"), ("legacy", "/manager/version")):
                     try:
                         async with session.get(f"{self.origin}{path}", timeout=3) as response:
                             if response.status != 200:
                                 continue
                             version = (await response.text()).strip().strip('"')
+                            if _version_tuple(version) is None:
+                                continue
                             detected = (flavor, version)
                             _flavor_cache[self.origin] = detected
                             return detected
-                    except (aiohttp.ClientError, asyncio.TimeoutError):
+                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                         continue
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             pass
         return None
 
@@ -109,11 +125,19 @@ class ManagerAdapter:
     async def installed(self) -> dict[str, dict[str, Any]]:
         detected = await self._require_compatible()
         path = "/v2/customnode/installed" if detected[0] == "v2" else "/customnode/installed"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.origin}{path}", timeout=5) as response:
-                if response.status != 200:
-                    raise UserFacingError("dependencies.manager_request_failed", {"status": response.status})
-                data = await response.json()
+        try:
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                async with session.get(f"{self.origin}{path}", timeout=5) as response:
+                    if response.status != 200:
+                        raise UserFacingError("dependencies.manager_request_failed", {"status": response.status})
+                    data = await response.json()
+        except UserFacingError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
+            raise UserFacingError(
+                "dependencies.manager_request_failed",
+                {"status": 0, "detail": str(exc) or exc.__class__.__name__},
+            ) from exc
         if isinstance(data, dict):
             result: dict[str, dict[str, Any]] = {}
             for module_name, item in data.items():
@@ -121,7 +145,8 @@ class ManagerAdapter:
                     continue
                 registry_id = str(item.get("cnr_id") or item.get("id") or "").strip() or None
                 aux_id = str(item.get("aux_id") or "").strip() or None
-                key = registry_id or (f"github:{aux_id}" if aux_id else f"module:{module_name}")
+                aux_source = _source_from_aux(aux_id)
+                key = registry_id or (f"github:{aux_source.casefold()}" if aux_source else f"module:{module_name}")
                 result[key] = {
                     **item,
                     "registry_id": registry_id,
@@ -131,6 +156,8 @@ class ManagerAdapter:
                     "version": item.get("version") or item.get("ver"),
                 }
             return result
+        if not isinstance(data, list):
+            raise UserFacingError("dependencies.manager_request_failed", {"status": 0, "detail": "invalid installed-plugin response"})
         return {
             str(item.get("id")): {
                 **item,
@@ -151,16 +178,19 @@ class ManagerAdapter:
             registry_id = str(item.get("registry_id") or "").strip() or None
             if not registry_id:
                 continue
+            source_url = _source_from_aux(item.get("aux_id"))
+            version = str(item.get("version") or "").strip() or None
+            git_worktree = bool(source_url and version and re.fullmatch(r"[0-9a-fA-F]{40}", version))
             result.append(
                 {
-                    "registry_id": registry_id,
-                    "source_url": _source_from_aux(item.get("aux_id")),
+                    "registry_id": None if git_worktree else registry_id,
+                    "source_url": source_url if git_worktree else None,
                     "name": str(item.get("name") or item.get("module_name") or registry_id),
-                    "version": str(item.get("version") or "").strip() or None,
-                    "commit": None,
+                    "version": None if git_worktree else version,
+                    "commit": version if git_worktree else None,
                     "required": True,
-                    "manual": False,
-                    "installer": "manager",
+                    "manual": git_worktree,
+                    "installer": "git" if git_worktree else "manager",
                     "dirty": False,
                 }
             )
@@ -174,17 +204,28 @@ class ManagerAdapter:
             str(dependency.get("name") or "").strip().casefold(),
             str(dependency.get("module_name") or "").strip().casefold(),
         } - {""}
-        for key in (registry_id, f"github:{source}" if source else ""):
+        for key in (registry_id, f"github:{source.casefold()}" if source else ""):
             if key and key in installed:
                 return installed[key]
-        for item in installed.values():
-            if str(item.get("registry_id") or "").strip() == registry_id:
-                return item
-            if source and _source_from_aux(item.get("aux_id")) == source:
-                return item
-            if str(item.get("module_name") or item.get("name") or "").strip().casefold() in names:
-                return item
-        return None
+        if registry_id:
+            match = next(
+                (item for item in installed.values() if str(item.get("registry_id") or "").strip().casefold() == registry_id.casefold()),
+                None,
+            )
+            if match is not None:
+                return match
+        if source:
+            match = next(
+                (item for item in installed.values() if (_source_from_aux(item.get("aux_id")) or "").casefold() == source.casefold()),
+                None,
+            )
+            if match is not None:
+                return match
+        matches = [
+            item for item in installed.values()
+            if str(item.get("module_name") or item.get("name") or "").strip().casefold() in names
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     async def plan(self, dependencies: list[dict[str, Any]], align_versions: bool = True) -> list[dict[str, Any]]:
         registry_dependencies = [item for item in dependencies if item.get("registry_id") and not item.get("source_url")]
@@ -192,10 +233,12 @@ class ManagerAdapter:
             return []
         detected = await self._detect()
         compatible = detected is not None and _manager_compatible(*detected)
+        installed_error: UserFacingError | None = None
         try:
             installed = await self.installed() if compatible else {}
-        except UserFacingError:
+        except UserFacingError as exc:
             installed = {}
+            installed_error = exc
         requested_by_id: dict[str, set[str]] = {}
         for dependency in registry_dependencies:
             version = str(dependency.get("version") or "").strip()
@@ -209,6 +252,8 @@ class ManagerAdapter:
             installed_version = str(current.get("version") or "").strip() or None if current else None
             if len(requested_by_id.get(registry_id, set())) > 1:
                 action, warning_code = "conflict", "dependencies.conflicting_registry_versions"
+            elif installed_error is not None:
+                action, warning_code = "manual", installed_error.code
             elif not compatible:
                 action = "manual"
                 warning_code = "dependencies.manager_incompatible" if detected else "dependencies.manager_unavailable"
@@ -239,7 +284,11 @@ class ManagerAdapter:
                     required=dependency.get("required", True),
                     manual=False,
                     warning_code=warning_code,
-                    warning_params={"version": detected[1]} if warning_code == "dependencies.manager_incompatible" and detected else {},
+                    warning_params=(
+                        installed_error.params
+                        if installed_error is not None
+                        else {"version": detected[1]} if warning_code == "dependencies.manager_incompatible" and detected else {}
+                    ),
                 )
             )
         return [asdict(item) for item in result]
@@ -255,7 +304,7 @@ class ManagerAdapter:
             return []
         detected = await self._require_compatible()
         queued: list[dict[str, Any]] = []
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=30)) as session:
             for item in executable:
                 target_version = item.get("requested") or "latest"
                 if detected[0] == "legacy":
@@ -334,11 +383,13 @@ class ManagerAdapter:
         url = f"{self.origin}/v2/manager/queue/status" if detected[0] == "v2" else f"{self.origin}/manager/queue/status"
         if detected[0] == "v2" and client_id:
             url += f"?client_id={client_id}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=5) as response:
+        async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url) as response:
                 if response.status != 200:
                     raise UserFacingError("dependencies.manager_request_failed", {"status": response.status})
                 data = await response.json()
+        if not isinstance(data, dict):
+            raise UserFacingError("dependencies.manager_request_failed", {"status": 0, "detail": "invalid queue status response"})
         done = int(data.get("done_count") or 0)
         in_progress = int(data.get("in_progress_count") or 0)
         total = done + in_progress + int(data.get("pending_count") or 0) if detected[0] == "v2" else int(data.get("total_count") or 0)
@@ -348,23 +399,31 @@ class ManagerAdapter:
         detected = await self._detect()
         if detected is None or not _manager_compatible(*detected) or detected[0] != "v2":
             return {}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.origin}/v2/manager/queue/history?client_id={client_id}", timeout=5) as response:
+        async with aiohttp.ClientSession(trust_env=True, timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(f"{self.origin}/v2/manager/queue/history?client_id={client_id}") as response:
                 if response.status != 200:
                     raise UserFacingError("dependencies.manager_request_failed", {"status": response.status})
                 data = await response.json()
-        history = data.get("history") if isinstance(data, dict) else None
-        if not isinstance(history, dict):
-            return {}
+        if not isinstance(data, dict):
+            raise UserFacingError("dependencies.manager_request_failed", {"status": 0, "detail": "invalid queue history response"})
+        history = data.get("history")
+        if not isinstance(history, (dict, list)):
+            raise UserFacingError("dependencies.manager_request_failed", {"status": 0, "detail": "invalid queue history response"})
+        entries = history.items() if isinstance(history, dict) else enumerate(history)
         result: dict[str, dict[str, Any]] = {}
-        for task_id, item in history.items():
+        for task_id, item in entries:
             if not isinstance(item, dict):
                 continue
             status = item.get("status") if isinstance(item.get("status"), dict) else {}
-            outcome = str(status.get("status_str") or "").casefold()
-            result[str(item.get("ui_id") or task_id)] = {
-                "outcome": "success" if outcome in {"success", "skipped", "skip"} else "failed",
-                "message": str(item.get("result") or ""),
+            outcome = str(
+                status.get("status_str")
+                or item.get("outcome")
+                or (item.get("status") if isinstance(item.get("status"), str) else "")
+            ).casefold()
+            message = item.get("result") or item.get("message") or ""
+            result[str(item.get("ui_id") or item.get("task_id") or task_id)] = {
+                "outcome": "success" if outcome in {"success", "succeeded", "completed", "skipped", "skip"} else "failed",
+                "message": str(message),
             }
         return result
 

@@ -27,7 +27,7 @@ class UserStorage:
 
     @property
     def key(self) -> str:
-        return str(self.root).casefold()
+        return os.path.normcase(str(self.root))
 
     async def read_json(self, name: str, default: Any) -> Any:
         path = self.state_dir / name
