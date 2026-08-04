@@ -918,8 +918,11 @@ function syncPublishOperation(items: Operation[]) {
     drawer.value = false;
     error.value = "";
     notice.value = "";
-    invalidateCatalogCache();
-    void refreshCatalog().catch((reason) => { error.value = errorMessage(reason); });
+    void (async () => {
+      await refreshSubscribedSource(catalogOperationTarget(operation));
+      invalidateCatalogCache();
+      await refreshCatalog();
+    })().catch((reason) => { error.value = errorMessage(reason); });
     return;
   }
   forgetPublishOperation();
@@ -1958,11 +1961,20 @@ function managementOperationTarget(operation: Operation) {
   const repo = String(operation.metadata?.repo || "");
   return owner && repo ? `${owner}/${repo}` : "";
 }
+function catalogOperationTarget(operation: Operation) {
+  const repository = typeof operation.result?.repository === "string" ? operation.result.repository : "";
+  return repository || managementOperationTarget(operation);
+}
+async function refreshSubscribedSource(targetFullName: string) {
+  const target = targetFullName.toLowerCase();
+  if (!target) return;
+  const source = sources.value.find((item) => `${item.owner}/${item.repo}`.toLowerCase() === target);
+  if (source) await post(`/subscriptions/${source.owner}/${source.repo}/refresh`, {});
+}
 async function reloadAfterManage(targetFullName = manageRepositoryFullName()) {
   const target = targetFullName.toLowerCase();
   if (target && manageRepositoryFullName().toLowerCase() === target) await loadManaged();
-  const source = sources.value.find((item) => `${item.owner}/${item.repo}`.toLowerCase() === target);
-  if (source) await post(`/subscriptions/${source.owner}/${source.repo}/refresh`, {});
+  await refreshSubscribedSource(targetFullName);
   invalidateCatalogCache();
   await load();
 }

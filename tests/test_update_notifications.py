@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import unittest
 from pathlib import Path
@@ -141,6 +142,67 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             self.assertFalse(result["catalog_missing"])
             self.assertTrue(cache.exists())
             self.assertTrue(await aggregate_catalog(storage))
+
+    async def test_forced_refresh_does_not_send_cached_etag(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            content = EXAMPLE.read_bytes()
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": '"old-etag"',
+                "catalog_hash": hashlib.sha256(content).hexdigest(),
+                "refreshed_at": "",
+                "error": None,
+            }])
+            subscription_cache_path(storage, "owner", "repo").write_bytes(content)
+            with patch("workflow_hub.service.GitHubClient") as client:
+                client.return_value.get_raw_catalog = AsyncMock(
+                    return_value=SimpleNamespace(content=content, etag='"new-etag"', not_modified=False)
+                )
+                await refresh_subscription(storage, "owner", "repo", force=True)
+                client.return_value.get_raw_catalog.assert_awaited_once_with(
+                    "owner", "repo", None, force=True
+                )
+
+    async def test_refreshes_same_source_are_serialized(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            content = EXAMPLE.read_bytes()
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": '"old-etag"',
+                "catalog_hash": hashlib.sha256(content).hexdigest(),
+                "refreshed_at": "",
+                "error": None,
+            }])
+            subscription_cache_path(storage, "owner", "repo").write_bytes(content)
+            started = asyncio.Event()
+            release = asyncio.Event()
+            calls = 0
+
+            async def raw_catalog(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    started.set()
+                    await release.wait()
+                return SimpleNamespace(content=content, etag=f'"etag-{calls}"', not_modified=False)
+
+            with patch("workflow_hub.service.GitHubClient") as client:
+                client.return_value.get_raw_catalog.side_effect = raw_catalog
+                first = asyncio.create_task(refresh_subscription(storage, "owner", "repo"))
+                await started.wait()
+                second = asyncio.create_task(refresh_subscription(storage, "owner", "repo"))
+                await asyncio.sleep(0)
+                self.assertFalse(second.done())
+                release.set()
+                await asyncio.gather(first, second)
+
+            self.assertEqual(calls, 2)
 
     async def test_raw_catalog_hash_keeps_unchanged_catalog(self) -> None:
         with TemporaryDirectory() as folder:

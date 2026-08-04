@@ -43,6 +43,12 @@ _WORKFLOW_FILENAME_RE = re.compile(
     re.IGNORECASE,
 )
 _workflow_install_lock = asyncio.Lock()
+_subscription_refresh_locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+
+
+def _subscription_refresh_lock(storage: UserStorage, owner: str, repo: str) -> asyncio.Lock:
+    key = (storage.key, owner.casefold(), repo.casefold())
+    return _subscription_refresh_locks.setdefault(key, asyncio.Lock())
 
 
 def _workflow_filename_separator(filename: str | None, version: str) -> str:
@@ -192,7 +198,24 @@ async def add_subscription(storage: UserStorage, repository_url: str) -> dict[st
     return {**item, "catalog": catalog.model_dump(mode="json")}
 
 
-async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> dict[str, Any]:
+async def refresh_subscription(
+    storage: UserStorage,
+    owner: str,
+    repo: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    async with _subscription_refresh_lock(storage, owner, repo):
+        return await _refresh_subscription(storage, owner, repo, force=force)
+
+
+async def _refresh_subscription(
+    storage: UserStorage,
+    owner: str,
+    repo: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
     subscriptions = await list_subscriptions(storage)
     current = next(
         (
@@ -205,7 +228,12 @@ async def refresh_subscription(storage: UserStorage, owner: str, repo: str) -> d
     if current is None:
         raise UserFacingError("subscription.not_found")
     client = GitHubClient()
-    remote = await client.get_raw_catalog(owner, repo, current.get("etag"))
+    remote = await client.get_raw_catalog(
+        owner,
+        repo,
+        None if force else current.get("etag"),
+        force=force,
+    )
     cache = subscription_cache_path(storage, owner, repo)
     canonical_cache, legacy_cache = _cache_paths(storage, owner, repo)
     try:

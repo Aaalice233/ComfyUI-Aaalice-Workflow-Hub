@@ -798,7 +798,7 @@ def register_routes() -> None:
     async def subscription_refresh(request: web.Request) -> web.StreamResponse:
         await _json(request)
         owner, repo = _source_parts(request.match_info["owner"], request.match_info["repo"])
-        result = await refresh_subscription(UserStorage.from_request(request), owner, repo)
+        result = await refresh_subscription(UserStorage.from_request(request), owner, repo, force=True)
         return web.json_response(result)
 
     @routes.get(f"{BASE}/workflows")

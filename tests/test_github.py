@@ -110,6 +110,14 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.call[2]["headers"], {"Accept": "text/plain", "If-None-Match": '"old-etag"'})
 
+    async def test_forced_raw_catalog_refresh_bypasses_conditional_cache(self):
+        client = RawCatalogClient()
+
+        await client.get_raw_catalog("owner", "repo", '"old-etag"', force=True)
+
+        self.assertIn("?workflow_hub_refresh=", client.call[1])
+        self.assertEqual(client.call[2]["headers"], {"Accept": "text/plain", "Cache-Control": "no-cache"})
+
     async def test_token_remains_in_session_when_keyring_read_fails(self):
         store = TokenStore()
         store._keyring = WriteOnlyKeyring()

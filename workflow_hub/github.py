@@ -191,11 +191,22 @@ class GitHubClient:
         content = base64.b64decode(data["content"])
         return ContentFile(content=content, sha=data["sha"], etag=response_headers.get("ETag"))
 
-    async def get_raw_catalog(self, owner: str, repo: str, etag: str | None = None) -> ContentFile | None:
+    async def get_raw_catalog(
+        self,
+        owner: str,
+        repo: str,
+        etag: str | None = None,
+        *,
+        force: bool = False,
+    ) -> ContentFile | None:
         headers = {"Accept": "text/plain"}
-        if etag:
+        if etag and not force:
             headers["If-None-Match"] = etag
         url = f"{RAW}/{quote(owner, safe='')}/{quote(repo, safe='')}/HEAD/workflow-catalog.json"
+        if force:
+            # GitHub Raw caches HEAD for several minutes; explicit refresh must observe a just-pushed catalog.
+            headers["Cache-Control"] = "no-cache"
+            url = f"{url}?workflow_hub_refresh={time.time_ns()}"
         try:
             data, response_headers = await self.request("GET", url, expected=(200, 304), headers=headers)
         except GitHubError as exc:
