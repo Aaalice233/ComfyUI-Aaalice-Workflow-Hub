@@ -39,7 +39,7 @@ import {
 } from "@lucide/vue";
 import { ApiError, api, post, remove } from "./api";
 import { renderMarkdown } from "./markdown";
-import { t, type MessageKey } from "./i18n";
+import { locale, t, type MessageKey } from "./i18n";
 import {
   publishRepositoryUrl,
   resolvePublishRepositoryUrl,
@@ -81,7 +81,7 @@ type Status = {
   github: { configured: boolean; authenticated: boolean; user?: { login: string; avatar_url: string }; persistent_credentials: boolean };
 };
 type Operation = {
-  id: string; kind: string; stage: string; status: string; logs: string[]; metadata?: Record<string, unknown>;
+  id: string; kind: string; stage: string; status: string; logs: string[]; created_at: string; metadata?: Record<string, unknown>;
   error_code?: string; error_params?: Record<string, string | number>;
   progress?: { received: number; total: number }; progress_mode?: "bytes" | "tasks";
   result?: Record<string, unknown>;
@@ -192,6 +192,9 @@ const dependencyOperationSynced = reactive<Record<string, boolean>>({});
 const publisherManagementOperationIds = reactive<Record<string, boolean>>({});
 const publisherManagementOperationSynced = reactive<Record<string, boolean>>({});
 const downloadOperationIds = reactive<Record<string, string>>({});
+const deletingOperationIds = reactive<Record<string, boolean>>({});
+const clearingOperations = ref(false);
+const hiddenOperationIds = new Set<string>();
 const managerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 const pendingManagerTaskOverrides = reactive<Record<string, { state: "success" | "failed"; message: string }>>({});
 const managerResultSyncing = new Set<string>();
@@ -261,6 +264,8 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.python_requirements_failed": "dependenciesPythonRequirementsFailed",
   "dependencies.manager_result_unknown": "dependenciesManagerResultUnknown",
   "operation.interrupted": "operationInterrupted",
+  "operation.not_found": "operationNotFound",
+  "operation.active": "operationActive",
   "operation.failed": "operationFailedDetail",
   "operation.invalid_manager_result": "operationInvalidManagerResult",
   "dependencies.operation_failed": "operationFailedDetail",
@@ -388,11 +393,21 @@ const dependencyExecutionFailures = computed(() => {
   const taskFailures = execution.tasks.filter((task) => task.state === "failed" || task.state === "unknown").length;
   return taskFailures || (execution.failed ? 1 : 0);
 });
-const dependencyOperationRunning = computed(() => operations.value.some((item) => item.kind === "dependencies" && item.status === "running"));
+const dependencyOperationRunning = computed(() => operations.value.some((item) => item.kind === "dependencies" && isOperationActive(item)));
 const publisherManagementOperationRunning = computed(() =>
   Object.keys(publisherManagementOperationIds).length > 0
   || operations.value.some((item) => item.kind === "publisher-manage" && item.status === "running"),
 );
+const completedOperationCount = computed(() => operations.value.filter((item) => !isOperationActive(item)).length);
+const activityMutationBusy = computed(() => clearingOperations.value || Object.keys(deletingOperationIds).length > 0);
+const operationTimeFormatter = computed(() => new Intl.DateTimeFormat(locale.value, {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+}));
 const dependencyTaskStateKeys: Record<DependencyTaskState, MessageKey> = {
   queued: "installTaskQueued",
   installing: "installTaskInstalling",
@@ -580,7 +595,7 @@ function pluginDependencyCheck(version: Version | null): PluginDependencyCheck {
   }
   const item = selected.value;
   const key = item ? dependencyKey(item, version) : "";
-  if (!item || !status.value || dependencyPlanLoading[key] || activeDependencyOperation.value?.status === "running") {
+  if (!item || !status.value || dependencyPlanLoading[key] || (activeDependencyOperation.value && isOperationActive(activeDependencyOperation.value))) {
     return {
       state: "checking",
       tone: "muted",
@@ -713,6 +728,14 @@ function humanBytes(value: number) {
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
   return `${(value / 1024 / 1024).toFixed(1)} MiB`;
 }
+function isOperationActive(item: Operation) {
+  return item.status === "running" || item.error_code === "dependencies.manager_result_unknown";
+}
+function operationTimeLabel(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return operationTimeFormatter.value.format(date);
+}
 function operationStageLabel(stage: string) {
   return t.value(operationStageMessages[stage] || "stageUnknown", { stage });
 }
@@ -785,6 +808,51 @@ function operationErrorMessage(item: Operation) {
   const summary = item.error_code ? localizedBackendError(item.error_code, item.error_params) : "";
   return [summary, ...item.logs].filter(Boolean).join("\n");
 }
+function updateOperations(items: Operation[]) {
+  operations.value = items.filter((item) => !hiddenOperationIds.has(item.id));
+}
+function prependOperation(item: Operation) {
+  if (hiddenOperationIds.has(item.id)) return;
+  operations.value = [item, ...operations.value.filter((entry) => entry.id !== item.id)];
+}
+function hideOperations(ids: string[]) {
+  for (const id of ids) hiddenOperationIds.add(id);
+  operations.value = operations.value.filter((item) => !hiddenOperationIds.has(item.id));
+}
+async function deleteOperation(item: Operation) {
+  if (isOperationActive(item) || activityMutationBusy.value) return;
+  deletingOperationIds[item.id] = true;
+  error.value = "";
+  try {
+    await remove(`/operations/${encodeURIComponent(item.id)}`);
+    hideOperations([item.id]);
+    notice.value = t.value("activityDeleted");
+  } catch (reason) {
+    if (reason instanceof ApiError && reason.code === "operation.not_found") {
+      hideOperations([item.id]);
+      return;
+    }
+    error.value = errorMessage(reason);
+  } finally {
+    delete deletingOperationIds[item.id];
+  }
+}
+async function clearCompletedOperations() {
+  if (!completedOperationCount.value || activityMutationBusy.value) return;
+  if (!confirm(t.value("confirmClearActivities", { count: completedOperationCount.value }))) return;
+  clearingOperations.value = true;
+  error.value = "";
+  try {
+    const result = await remove<{ deleted: number; ids: string[] }>("/operations/completed");
+    const ids = Array.isArray(result.ids) ? result.ids : [];
+    hideOperations(ids);
+    notice.value = t.value("activitiesCleared", { count: result.deleted });
+  } catch (reason) {
+    error.value = errorMessage(reason);
+  } finally {
+    clearingOperations.value = false;
+  }
+}
 function sourceErrorMessage(item: Source) {
   return item.error ? localizedBackendError(item.error) : item.url;
 }
@@ -841,7 +909,7 @@ async function load() {
     status.value = s;
     sources.value = sub.items;
     products.value = flows.items;
-    operations.value = ops.items;
+    updateOperations(ops.items);
     for (const operation of ops.items) {
       if (operation.kind === "publisher-manage" && operation.status === "running") {
         publisherManagementOperationIds[operation.id] = true;
@@ -1036,7 +1104,7 @@ async function syncDownloadDependencies() {
       drawer.value = true;
       try {
         const operation = await api<Operation>(`/operations/${result.operation_id}`);
-        operations.value = [operation, ...operations.value.filter((item) => item.id !== operation.id)];
+        prependOperation(operation);
       } catch {
         // The operation poll remains the source of truth if the initial detail read races the start.
       }
@@ -1132,7 +1200,7 @@ watch(operations, (items) => {
   const check = downloadPreflight.value;
   if (!check?.syncing || !check.syncOperationId) return;
   const operation = items.find((item) => item.id === check.syncOperationId);
-  if (!operation || operation.status === "running" || operation.error_code === "dependencies.manager_result_unknown") return;
+  if (!operation || isOperationActive(operation)) return;
   if (operation.status !== "success") {
     check.syncing = false;
     check.syncOperationId = "";
@@ -1203,7 +1271,7 @@ async function executeDependencyPlan(item: Product | null, version: Version | nu
     dependencyOperationSynced[key] = false;
     try {
       const operation = await api<Operation>(`/operations/${result.operation_id}`);
-      operations.value = [operation, ...operations.value.filter((item) => item.id !== operation.id)];
+      prependOperation(operation);
     } catch {
       // Polling below remains the source of truth if the initial detail read races the operation.
     }
@@ -1225,7 +1293,7 @@ function handleManagerQueueEvent(data: Record<string, unknown>) {
   if (data.status !== "done" || typeof data.nodepack_result !== "object" || !data.nodepack_result) return;
   const results = data.nodepack_result as Record<string, unknown>;
   for (const operation of operations.value) {
-    if ((operation.status !== "running" && operation.error_code !== "dependencies.manager_result_unknown") || operation.kind !== "dependencies" || !Array.isArray(operation.result?.tasks)) continue;
+    if (!isOperationActive(operation) || operation.kind !== "dependencies" || !Array.isArray(operation.result?.tasks)) continue;
     const updates: Record<string, { state: "success" | "failed"; message: string }> = {};
     for (const task of operation.result.tasks as DependencyResult[]) {
       const registryId = String(task.registry_id || "");
@@ -1261,10 +1329,15 @@ async function pollOperations() {
   if (operationPollInFlight) return;
   operationPollInFlight = true;
   try {
-    operations.value = (await api<{ items: Operation[] }>("/operations")).items;
+    updateOperations((await api<{ items: Operation[] }>("/operations")).items);
     for (const [operationId] of Object.entries(publisherManagementOperationIds)) {
       const operation = operations.value.find((item) => item.id === operationId);
-      if (!operation || operation.status === "running" || publisherManagementOperationSynced[operationId]) continue;
+      if (!operation) {
+        delete publisherManagementOperationIds[operationId];
+        delete publisherManagementOperationSynced[operationId];
+        continue;
+      }
+      if (operation.status === "running" || publisherManagementOperationSynced[operationId]) continue;
       publisherManagementOperationSynced[operationId] = true;
       const target = managementOperationTarget(operation);
       try {
@@ -1287,7 +1360,7 @@ async function pollOperations() {
       if (!operation || operation.status !== "running") delete downloadOperationIds[key];
     }
     for (const operation of operations.value) {
-      if ((operation.status === "running" || operation.error_code === "dependencies.manager_result_unknown") && operation.kind === "dependencies" && Array.isArray(operation.result?.tasks)) {
+      if (isOperationActive(operation) && operation.kind === "dependencies" && Array.isArray(operation.result?.tasks)) {
         const updates: Record<string, { state: "success" | "failed"; message: string }> = {};
         for (const task of operation.result.tasks as DependencyResult[]) {
           const registryId = String(task.registry_id || "");
@@ -1299,18 +1372,23 @@ async function pollOperations() {
       const workflowKey = typeof operation.metadata?.workflow_key === "string" ? operation.metadata.workflow_key : "";
       if (operation.kind === "dependencies" && workflowKey && !dependencyOperationIds[workflowKey]) {
         dependencyOperationIds[workflowKey] = operation.id;
-        dependencyOperationSynced[workflowKey] = operation.status !== "running";
+        dependencyOperationSynced[workflowKey] = !isOperationActive(operation);
       }
     }
     for (const [key, operationId] of Object.entries(dependencyOperationIds)) {
-    const operation = operations.value.find((item) => item.id === operationId);
-    if (!operation || operation.status === "running" || dependencyOperationSynced[key]) continue;
-    dependencyOperationSynced[key] = true;
-    if (selected.value && activeDetailVersion.value && key === dependencyKey(selected.value, activeDetailVersion.value)) {
-      try { await fetchDependencyPlan(selected.value, activeDetailVersion.value); } catch { /* manual check remains available */ }
+      const operation = operations.value.find((item) => item.id === operationId);
+      if (!operation) {
+        delete dependencyOperationIds[key];
+        delete dependencyOperationSynced[key];
+        continue;
+      }
+      if (isOperationActive(operation) || dependencyOperationSynced[key]) continue;
+      dependencyOperationSynced[key] = true;
+      if (selected.value && activeDetailVersion.value && key === dependencyKey(selected.value, activeDetailVersion.value)) {
+        try { await fetchDependencyPlan(selected.value, activeDetailVersion.value); } catch { /* manual check remains available */ }
+      }
     }
-  }
-    if (operations.value.some((item) => item.status === "running" || item.error_code === "dependencies.manager_result_unknown")) {
+    if (operations.value.some(isOperationActive)) {
       scheduleOperationPoll();
     } else {
       await Promise.all([
@@ -1784,7 +1862,7 @@ onBeforeUnmount(() => {
       <div class="rail-actions">
         <button class="rail-action" :title="t('activities')" :aria-label="t('activities')" @click="drawer = !drawer">
           <ActivityIcon :size="17" /><span>{{ t("activities") }}</span>
-          <i v-if="operations.some(o => o.status === 'running')" class="pulse" />
+          <i v-if="operations.some(isOperationActive)" class="pulse" />
         </button>
         <button v-if="status?.github.authenticated" class="account-card" :title="t('logout')" :aria-label="t('logout')" @click="logout">
           <img v-if="status.github.user?.avatar_url" :src="status.github.user.avatar_url" alt="" />
@@ -2540,51 +2618,84 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <aside v-if="drawer" class="activity-drawer">
-      <div class="drawer-head"><div><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div><button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button></div>
-      <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
-      <article v-for="item in operations" :key="item.id" class="operation">
-        <div><strong>{{ operationKindLabel(item.kind, item.metadata) }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
-        <template v-if="hasStageProgress(item)">
-          <div
-            class="operation-stage-progress"
-            :class="{ complete: item.status === 'success', failed: item.status === 'failed' }"
-            role="progressbar"
-            :aria-label="stageProgressLabel(item)"
-            aria-valuemin="0"
-            :aria-valuemax="stageProgress(item).total"
-            :aria-valuenow="stageProgress(item).completed"
+    <aside v-if="drawer" class="activity-drawer" :aria-busy="activityMutationBusy">
+      <div class="drawer-head">
+        <div class="drawer-title"><span class="section-icon"><ActivityIcon :size="18" /></span><h2>{{ t("activities") }}</h2></div>
+        <div class="drawer-actions">
+          <button
+            v-if="completedOperationCount > 0"
+            class="ghost activity-clear"
+            :disabled="activityMutationBusy"
+            :title="t('clearCompletedActivities', { count: completedOperationCount })"
+            :aria-label="t('clearCompletedActivities', { count: completedOperationCount })"
+            @click="clearCompletedOperations"
           >
-            <span
-              v-for="(_, index) in operationProgressStages(item) || []"
-              :key="index"
-              :class="{
-                complete: index < stageProgress(item).completed,
-                active: item.status === 'running' && index === stageProgress(item).current - 1,
-                failed: item.status === 'failed' && index === stageProgress(item).current - 1,
-              }"
-            />
+            <LoaderCircle v-if="clearingOperations" :size="15" class="dependency-task-spin" />
+            <Trash2 v-else :size="15" />
+            {{ t("clearCompletedActivities", { count: completedOperationCount }) }}
+          </button>
+          <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="drawer = false"><X :size="18" /></button>
+        </div>
+      </div>
+      <div v-if="!operations.length" class="empty small"><ActivityIcon :size="25" /><span>{{ t("noActivities") }}</span></div>
+      <div v-else class="activity-list">
+        <article v-for="item in operations" :key="item.id" class="operation">
+          <div class="operation-heading">
+            <div class="operation-label"><strong>{{ operationKindLabel(item.kind, item.metadata) }}</strong><span :class="`status ${item.status}`">{{ operationStageLabel(item.stage) }}</span></div>
+            <button
+              v-if="!isOperationActive(item)"
+              class="icon-button operation-delete"
+              :disabled="activityMutationBusy"
+              :title="t('deleteActivity')"
+              :aria-label="t('deleteActivity')"
+              @click="deleteOperation(item)"
+            >
+              <LoaderCircle v-if="deletingOperationIds[item.id]" :size="15" class="dependency-task-spin" />
+              <Trash2 v-else :size="15" />
+            </button>
           </div>
-          <small class="progress-copy stage-progress-copy">{{ stageProgressLabel(item) }}</small>
-        </template>
-        <template v-else-if="item.progress?.total">
-          <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-            :aria-valuenow="Math.round(progressPercent(item.progress))">
-            <i :style="{ width: `${progressPercent(item.progress)}%` }" />
-          </div>
-          <small class="progress-copy">{{ item.progress_mode === "tasks" ? t("installProgress", { done: item.progress.received, total: item.progress.total }) : `${humanBytes(item.progress.received)} / ${humanBytes(item.progress.total)}` }}</small>
-        </template>
-        <ul v-if="item.kind === 'dependencies' && operationTaskRows(item).length" class="operation-tasks">
-          <li v-for="task in operationTaskRows(item)" :key="task.registryId" :data-state="task.state">
-            <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="14" class="dependency-task-spin" />
-            <CheckCircle2 v-else-if="task.state === 'success'" :size="14" />
-            <AlertCircle v-else-if="task.state === 'failed'" :size="14" />
-            <Clock v-else :size="14" />
-            <span>{{ task.name }}</span><small>{{ task.version || task.installer || "" }}</small>
-          </li>
-        </ul>
-        <pre v-if="item.error_code || item.logs.length">{{ operationErrorMessage(item) }}</pre>
-      </article>
+          <time class="operation-time" :datetime="item.created_at">{{ t("activityTime", { time: operationTimeLabel(item.created_at) }) }}</time>
+          <template v-if="hasStageProgress(item)">
+            <div
+              class="operation-stage-progress"
+              :class="{ complete: item.status === 'success', failed: item.status === 'failed' }"
+              role="progressbar"
+              :aria-label="stageProgressLabel(item)"
+              aria-valuemin="0"
+              :aria-valuemax="stageProgress(item).total"
+              :aria-valuenow="stageProgress(item).completed"
+            >
+              <span
+                v-for="(_, index) in operationProgressStages(item) || []"
+                :key="index"
+                :class="{
+                  complete: index < stageProgress(item).completed,
+                  active: item.status === 'running' && index === stageProgress(item).current - 1,
+                  failed: item.status === 'failed' && index === stageProgress(item).current - 1,
+                }"
+              />
+            </div>
+            <small class="progress-copy stage-progress-copy">{{ stageProgressLabel(item) }}</small>
+          </template>
+          <template v-else-if="item.progress?.total">
+            <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+              :aria-valuenow="Math.round(progressPercent(item.progress))">
+              <i :style="{ width: `${progressPercent(item.progress)}%` }" />
+            </div>
+            <small class="progress-copy">{{ item.progress_mode === "tasks" ? t("installProgress", { done: item.progress.received, total: item.progress.total }) : `${humanBytes(item.progress.received)} / ${humanBytes(item.progress.total)}` }}</small>
+          </template>
+          <ul v-if="item.kind === 'dependencies' && operationTaskRows(item).length" class="operation-tasks">
+            <li v-for="task in operationTaskRows(item)" :key="task.registryId" :data-state="task.state">
+              <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="14" class="dependency-task-spin" />
+              <CheckCircle2 v-else-if="task.state === 'success'" :size="14" />
+              <AlertCircle v-else-if="task.state === 'failed'" :size="14" />
+              <Clock v-else :size="14" />
+              <span>{{ task.name }}</span><small>{{ task.version || task.installer || "" }}</small>
+            </li>
+          </ul>
+          <pre v-if="item.error_code || item.logs.length">{{ operationErrorMessage(item) }}</pre>
+        </article>
+      </div>
     </aside>
 
   </div>

@@ -1337,6 +1337,25 @@ def register_routes() -> None:
         await operations.persist(operation)
         return web.json_response(operation.public())
 
+    @routes.delete(f"{BASE}/operations/completed")
+    @endpoint
+    async def operations_delete_completed(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        deleted = await operations.delete_completed(UserStorage.from_request(request))
+        return web.json_response({"deleted": len(deleted), "ids": deleted})
+
+    @routes.delete(f"{BASE}/operations/{{operation_id}}")
+    @endpoint
+    async def operation_delete(request: web.Request) -> web.StreamResponse:
+        await _json(request)
+        storage = UserStorage.from_request(request)
+        result = await operations.delete(request.match_info["operation_id"], storage)
+        if result == "not_found":
+            raise UserFacingError("operation.not_found")
+        if result == "active":
+            raise UserFacingError("operation.active")
+        return web.json_response({"deleted": True, "operation_id": request.match_info["operation_id"]})
+
     @routes.get(f"{BASE}/operations")
     @endpoint
     async def operations_list(request: web.Request) -> web.StreamResponse:

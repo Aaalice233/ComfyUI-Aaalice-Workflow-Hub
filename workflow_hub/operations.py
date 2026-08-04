@@ -5,9 +5,12 @@ import uuid
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from .security import redact
+
+
+OperationDeleteResult = Literal["deleted", "not_found", "active"]
 
 
 def _redact_value(value: Any) -> Any:
@@ -44,6 +47,10 @@ class Operation:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     owner_key: str | None = field(default=None, repr=False)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def is_active(self) -> bool:
+        # Manager can replace this provisional failure when its late queue result arrives.
+        return self.status == "running" or self.error_code == "dependencies.manager_result_unknown"
 
     def public(self) -> dict[str, Any]:
         data = self.record()
@@ -143,7 +150,7 @@ class OperationStore:
                 (
                     item_id
                     for item_id in reversed(order)
-                    if self._items.get(item_id) is not None and self._items[item_id].status != "running"
+                    if self._items.get(item_id) is not None and not self._items[item_id].is_active()
                 ),
                 None,
             )
@@ -194,6 +201,42 @@ class OperationStore:
             await self._load(storage)
             order = self._orders.get(owner_key, deque())
             return [self._items[item].public() for item in order if item in self._items]
+
+    async def delete(self, operation_id: str, storage: Any | None = None) -> OperationDeleteResult:
+        owner_key = self._owner_key(storage)
+        async with self._lock:
+            await self._load(storage)
+            operation = self._items.get(operation_id)
+            if operation is None or (storage is not None and operation.owner_key != owner_key):
+                return "not_found"
+            if operation.is_active():
+                return "active"
+            order = self._orders.setdefault(owner_key, deque())
+            try:
+                order.remove(operation_id)
+            except ValueError:
+                return "not_found"
+            self._items.pop(operation_id, None)
+            if storage is not None:
+                await self._persist_owner(storage, owner_key)
+            return "deleted"
+
+    async def delete_completed(self, storage: Any | None = None) -> list[str]:
+        owner_key = self._owner_key(storage)
+        async with self._lock:
+            await self._load(storage)
+            order = self._orders.setdefault(owner_key, deque())
+            deleted = [
+                operation_id
+                for operation_id in order
+                if operation_id in self._items and not self._items[operation_id].is_active()
+            ]
+            for operation_id in deleted:
+                order.remove(operation_id)
+                self._items.pop(operation_id, None)
+            if deleted and storage is not None:
+                await self._persist_owner(storage, owner_key)
+            return deleted
 
 
 operations = OperationStore()

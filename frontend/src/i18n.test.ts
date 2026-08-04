@@ -23,11 +23,15 @@ describe("translations", () => {
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("目标目录 custom_nodes/example 已存在，未覆盖本地文件。");
     expect(t.value("pluginStatusMissing", { count: 2 })).toBe("缺少 2 个");
     expect(t.value("includedImagesDetail", { count: 1 })).toBe("包含 1 张随包图片，安装时会写入当前用户的隔离目录。");
+    expect(t.value("clearCompletedActivities", { count: 2 })).toBe("清除已完成（2）");
+    expect(t.value("activityTime", { time: "2026/01/01 12:00:00" })).toBe("时间：2026/01/01 12:00:00");
     locale.value = "en";
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("The target directory custom_nodes/example already exists; local files were not overwritten.");
     expect(t.value("dependencyVersionTransition", { installed: "old", requested: "new" })).toBe("old → new");
     expect(t.value("pluginStatusMissing", { count: 2 })).toBe("2 missing");
     expect(t.value("includedImagesDetail", { count: 1 })).toBe("Includes 1 bundled image(s), installed into the current user's isolated directory.");
+    expect(t.value("clearCompletedActivities", { count: 2 })).toBe("Clear completed (2)");
+    expect(t.value("activityTime", { time: "01/01/2026 12:00:00" })).toBe("Time: 01/01/2026 12:00:00");
   });
 
   it("localizes publish and management stage progress in both languages", () => {

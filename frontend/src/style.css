@@ -3825,7 +3825,9 @@ pre {
   z-index: 50;
   width: min(400px, calc(100vw - 36px));
   max-height: calc(100vh - 36px);
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 16px;
   border-radius: 16px;
   background: #1b1d20;
@@ -3835,15 +3837,38 @@ pre {
 .drawer-head {
   margin-bottom: 12px;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.drawer-head > div {
+.drawer-title,
+.drawer-actions {
   gap: 9px;
+}
+
+.drawer-actions {
+  margin-left: auto;
+  align-items: center;
+}
+
+.activity-clear {
+  min-height: 32px;
+  margin-left: 0;
+  padding: 0 9px;
+  font-size: 13px;
 }
 
 .drawer-head h2 {
   margin: 0;
   font-size: 16px;
+}
+
+.activity-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  margin-right: -6px;
+  padding-right: 6px;
 }
 
 .empty.small {
@@ -3867,8 +3892,48 @@ pre {
   justify-content: space-between;
 }
 
-.operation strong {
+.operation-heading {
+  min-width: 0;
+}
+
+.operation-label {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.operation-label strong {
+  overflow: hidden;
   font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operation-label .status {
+  flex: none;
+}
+
+.operation-time {
+  display: block;
+  margin-top: 5px;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.operation-delete {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  margin-left: 8px;
+  color: var(--muted);
+}
+
+.operation-delete:hover:not(:disabled) {
+  color: var(--danger);
+  background: rgb(226 121 126 / 9%);
 }
 
 .status {

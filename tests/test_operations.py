@@ -48,6 +48,56 @@ class OperationStoreTests(IsolatedAsyncioTestCase):
             self.assertEqual(items[0]["stage"], "failed")
             self.assertEqual(items[0]["error_code"], "operation.interrupted")
 
+    async def test_completed_operations_can_be_deleted_and_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = UserStorage(Path(directory))
+            store = OperationStore()
+            operation = await store.create("download", storage)
+            operation.status = "success"
+            operation.stage = "complete"
+            await store.persist(operation)
+
+            self.assertEqual(await store.delete(operation.id, storage), "deleted")
+            self.assertEqual(await store.list(storage), [])
+            await asyncio.sleep(0.6)
+
+    async def test_bulk_delete_keeps_running_and_late_manager_operations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = UserStorage(Path(directory))
+            store = OperationStore()
+            success = await store.create("download", storage)
+            failed = await store.create("publish", storage)
+            active = await store.create("dependencies", storage)
+            success.status = "success"
+            success.stage = "complete"
+            failed.status = "failed"
+            failed.stage = "failed"
+            failed.error_code = "operation.failed"
+            late_manager = await store.create("dependencies", storage)
+            late_manager.status = "failed"
+            late_manager.stage = "failed"
+            late_manager.error_code = "dependencies.manager_result_unknown"
+            for operation in (success, failed, active, late_manager):
+                await store.persist(operation)
+
+            self.assertEqual(await store.delete(active.id, storage), "active")
+            deleted = await store.delete_completed(storage)
+            self.assertEqual(set(deleted), {success.id, failed.id})
+            self.assertEqual({item["id"] for item in await store.list(storage)}, {active.id, late_manager.id})
+
+            active.status = "failed"
+            active.stage = "failed"
+            await store.persist(active)
+            restored = OperationStore()
+            self.assertEqual(
+                {item["id"] for item in await restored.list(storage)},
+                {active.id, late_manager.id},
+            )
+            late_manager.status = "failed"
+            late_manager.error_code = "operation.failed"
+            await store.persist(late_manager)
+            await asyncio.sleep(0.6)
+
     async def test_corrupt_operation_state_is_quarantined(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = UserStorage(Path(directory))
