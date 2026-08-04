@@ -216,6 +216,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
                 "owner": "owner",
                 "repo": "repo",
                 "url": "https://github.com/owner/repo",
+                "default_branch": "main",
                 "etag": "etag",
                 "refreshed_at": "",
                 "error": None,
@@ -240,6 +241,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
                 "owner": "owner",
                 "repo": "repo",
                 "url": "https://github.com/owner/repo",
+                "default_branch": "main",
                 "etag": '"old-etag"',
                 "catalog_hash": hashlib.sha256(content).hexdigest(),
                 "refreshed_at": "",
@@ -252,7 +254,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
                 )
                 await refresh_subscription(storage, "owner", "repo", force=True)
                 client.return_value.get_raw_catalog.assert_awaited_once_with(
-                    "owner", "repo", None, force=True
+                    "owner", "repo", None, force=True, ref="main"
                 )
 
     async def test_refreshes_same_source_are_serialized(self) -> None:
@@ -263,6 +265,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
                 "owner": "owner",
                 "repo": "repo",
                 "url": "https://github.com/owner/repo",
+                "default_branch": "main",
                 "etag": '"old-etag"',
                 "catalog_hash": hashlib.sha256(content).hexdigest(),
                 "refreshed_at": "",
@@ -301,6 +304,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
                 "owner": "owner",
                 "repo": "repo",
                 "url": "https://github.com/owner/repo",
+                "default_branch": "main",
                 "etag": '"old-raw-etag"',
                 "catalog_hash": hashlib.sha256(content).hexdigest(),
                 "refreshed_at": "",
@@ -322,6 +326,45 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             self.assertEqual(subscriptions[0]["etag"], '"new-raw-etag"')
             self.assertEqual(subscriptions[0]["catalog_hash"], hashlib.sha256(content).hexdigest())
 
+    async def test_replaces_same_version_catalog_and_migrates_branch(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            previous_content = EXAMPLE.read_bytes()
+            previous = load_catalog()
+            previous_product = previous.workflows[0]
+            replaced_version = previous_product.versions[0].model_copy(update={"changelog": "替换后的工作流"})
+            current = previous.model_copy(update={
+                "workflows": [previous_product.model_copy(update={"versions": [replaced_version]})],
+            })
+            current_content = current.model_dump_json().encode()
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": '"old-etag"',
+                "catalog_hash": hashlib.sha256(previous_content).hexdigest(),
+                "refreshed_at": "",
+                "error": None,
+            }])
+            subscription_cache_path(storage, "owner", "repo").write_bytes(previous_content)
+            with patch("workflow_hub.service.GitHubClient") as client:
+                client.return_value.get_default_branch = AsyncMock(return_value="main")
+                client.return_value.get_raw_catalog = AsyncMock(
+                    return_value=SimpleNamespace(content=current_content, etag='"new-etag"', not_modified=False)
+                )
+                result = await refresh_subscription(storage, "owner", "repo", force=True)
+
+            self.assertTrue(result["changed"])
+            self.assertEqual(subscription_cache_path(storage, "owner", "repo").read_bytes(), current_content)
+            subscriptions = await storage.read_json("subscriptions.json", [])
+            self.assertEqual(subscriptions[0]["default_branch"], "main")
+            self.assertEqual(subscriptions[0]["etag"], '"new-etag"')
+            self.assertEqual(subscriptions[0]["catalog_hash"], hashlib.sha256(current_content).hexdigest())
+            client.return_value.get_default_branch.assert_awaited_once_with("owner", "repo")
+            client.return_value.get_raw_catalog.assert_awaited_once_with(
+                "owner", "repo", None, force=True, ref="main"
+            )
+
     async def test_removed_catalog_clears_cache_and_hides_old_workflows(self) -> None:
         with TemporaryDirectory() as folder:
             storage = UserStorage(Path(folder))
@@ -329,6 +372,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
                 "owner": "owner",
                 "repo": "repo",
                 "url": "https://github.com/owner/repo",
+                "default_branch": "main",
                 "etag": "etag",
                 "refreshed_at": "",
                 "error": None,

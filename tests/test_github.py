@@ -72,6 +72,16 @@ class RawCatalogClient(GitHubClient):
         return b"{}", {"ETag": '"raw-etag"'}
 
 
+class DefaultBranchClient(GitHubClient):
+    def __init__(self):
+        super().__init__()
+        self.call = None
+
+    async def request(self, method: str, url: str, **kwargs):
+        self.call = (method, url, kwargs)
+        return {"default_branch": "trunk"}, {}
+
+
 class WriteOnlyKeyring:
     def set_password(self, *_args):
         return None
@@ -96,6 +106,13 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]["default_branch"], "trunk")
         self.assertEqual(items[1]["description"], "Catalog")
 
+    async def test_reads_default_branch_from_repository_metadata(self):
+        client = DefaultBranchClient()
+
+        self.assertEqual(await client.get_default_branch("owner", "repo"), "trunk")
+        self.assertEqual(client.call[0], "GET")
+        self.assertEqual(client.call[1], "https://api.github.com/repos/owner/repo")
+
     async def test_reads_public_catalog_from_raw_default_branch(self):
         client = RawCatalogClient()
 
@@ -109,6 +126,13 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
             "https://raw.githubusercontent.com/owner/repo/HEAD/workflow-catalog.json",
         )
         self.assertEqual(client.call[2]["headers"], {"Accept": "text/plain", "If-None-Match": '"old-etag"'})
+
+    async def test_raw_catalog_can_use_a_resolved_branch(self):
+        client = RawCatalogClient()
+
+        await client.get_raw_catalog("owner", "repo", force=True, ref="trunk")
+
+        self.assertIn("/owner/repo/trunk/workflow-catalog.json?workflow_hub_refresh=", client.call[1])
 
     async def test_forced_raw_catalog_refresh_bypasses_conditional_cache(self):
         client = RawCatalogClient()

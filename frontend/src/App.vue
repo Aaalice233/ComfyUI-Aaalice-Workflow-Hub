@@ -54,7 +54,7 @@ import {
   type PublishRepository,
 } from "./repository-selection";
 
-type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
+type Source = { owner: string; repo: string; url: string; default_branch?: string; refreshed_at: string; error?: string };
 type ManagedVersion = { version: string; published_at: string; changelog: string; package: { size: number } };
 type ManagedProduct = {
   id: string; name: string; category: string; summary: string; description: string;

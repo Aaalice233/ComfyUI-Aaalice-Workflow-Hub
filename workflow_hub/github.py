@@ -176,6 +176,13 @@ class GitHubClient:
             if own:
                 await session.close()
 
+    async def get_default_branch(self, owner: str, repo: str) -> str:
+        data, _ = await self.request("GET", f"{API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}")
+        branch = str(data.get("default_branch") or "")
+        if not branch:
+            raise GitHubError("GitHub 仓库没有可用的默认分支", 409)
+        return branch
+
     async def get_catalog(self, owner: str, repo: str, etag: str | None = None) -> ContentFile | None:
         headers = {"If-None-Match": etag} if etag else {}
         try:
@@ -198,13 +205,15 @@ class GitHubClient:
         etag: str | None = None,
         *,
         force: bool = False,
+        ref: str = "HEAD",
     ) -> ContentFile | None:
         headers = {"Accept": "text/plain"}
         if etag and not force:
             headers["If-None-Match"] = etag
-        url = f"{RAW}/{quote(owner, safe='')}/{quote(repo, safe='')}/HEAD/workflow-catalog.json"
+        encoded_ref = quote(ref, safe="/")
+        url = f"{RAW}/{quote(owner, safe='')}/{quote(repo, safe='')}/{encoded_ref}/workflow-catalog.json"
         if force:
-            # GitHub Raw caches HEAD for several minutes; explicit refresh must observe a just-pushed catalog.
+            # GitHub Raw can cache symbolic refs for several minutes; explicit refresh must observe a just-pushed catalog.
             headers["Cache-Control"] = "no-cache"
             url = f"{url}?workflow_hub_refresh={time.time_ns()}"
         try:
