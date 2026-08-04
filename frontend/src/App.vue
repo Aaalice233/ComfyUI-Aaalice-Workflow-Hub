@@ -86,6 +86,13 @@ type Operation = {
   progress?: { received: number; total: number }; progress_mode?: "bytes" | "tasks";
   result?: Record<string, unknown>;
 };
+type PublishStep = 1 | 2 | 3 | 4;
+type PublishDraft = {
+  name: string;
+  version: string;
+  workflowId: string;
+  repository: string;
+};
 type CoreVersionCheck = {
   state: "aligned" | "mismatch" | "not_declared" | "unavailable";
   tone: "ok" | "warn" | "muted";
@@ -139,6 +146,8 @@ type PluginDependencyCheck = {
 };
 
 const LAST_PUBLISH_REPOSITORY_KEY = "aaalice-workflow-hub:last-publish-repository";
+const PUBLISH_OPERATION_KEY = "aaalice-workflow-hub:publish-operation";
+const PUBLISH_SOURCE_KEY = "aaalice-workflow-hub:publish-source";
 const tab = ref<"subscribe" | "publish" | "manage">("subscribe");
 const status = ref<Status | null>(null);
 const sources = ref<Source[]>([]);
@@ -181,7 +190,11 @@ const selectedCatalogProductId = ref("");
 const imageReferences = ref<AssetReference[]>([]);
 const loraReferences = ref<AssetReference[]>([]);
 const coverImage = ref<{ name: string; filename: string; data_base64: string; previewUrl: string; size: number } | null>(null);
-const publishStep = ref<1 | 2 | 3>(1);
+const publishStep = ref<PublishStep>(1);
+const publishOperationId = ref("");
+const publishSourceName = ref("");
+const publishDraft = ref<PublishDraft | null>(null);
+const publishCompletion = ref<Operation | null>(null);
 const device = ref<{ user_code: string; verification_uri: string; interval: number } | null>(null);
 const deviceCodeCopied = ref(false);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
@@ -348,7 +361,14 @@ const preflightSyncableDependencies = computed(() =>
     && dependencyActionRequiresSelection(entry.action)
     && dependencyInstallerAvailable(entry))
 );
-const publishStepLabels = computed(() => [t.value("stepResources"), t.value("stepDetails"), t.value("stepReview")]);
+const publishStepLabels = computed(() => [t.value("stepResources"), t.value("stepDetails"), t.value("stepReview"), t.value("stepComplete")]);
+const publishOperation = computed(() =>
+  publishOperationId.value ? operations.value.find((item) => item.id === publishOperationId.value) || null : null
+);
+const publishOperationRunning = computed(() => {
+  const operation = publishOperation.value;
+  return !!operation && isOperationActive(operation);
+});
 const activeDependencyOperation = computed(() => {
   if (!selected.value || !activeDetailVersion.value) return null;
   const operationId = dependencyOperationIds[dependencyKey(selected.value, activeDetailVersion.value)];
@@ -408,6 +428,13 @@ const operationTimeFormatter = computed(() => new Intl.DateTimeFormat(locale.val
   minute: "2-digit",
   second: "2-digit",
 }));
+const publishCompletionName = computed(() => publishResultText(publishCompletion.value, "name") || publishDraft.value?.name || t.value("publishedWorkflow"));
+const publishCompletionVersion = computed(() => publishResultText(publishCompletion.value, "version") || publishDraft.value?.version || t.value("none"));
+const publishCompletionRepository = computed(() => publishResultText(publishCompletion.value, "repository") || publishDraft.value?.repository || t.value("none"));
+const publishCompletionWorkflowId = computed(() => publishResultText(publishCompletion.value, "workflow_id") || publishDraft.value?.workflowId || t.value("none"));
+const publishCompletionRepositoryPath = computed(() => publishResultText(publishCompletion.value, "repository_path") || t.value("none"));
+const publishCompletionReleaseUrl = computed(() => publishResultText(publishCompletion.value, "release_url"));
+const publishCompletionTime = computed(() => publishCompletion.value ? operationTimeLabel(publishCompletion.value.created_at) : "");
 const dependencyTaskStateKeys: Record<DependencyTaskState, MessageKey> = {
   queued: "installTaskQueued",
   installing: "installTaskInstalling",
@@ -731,6 +758,10 @@ function humanBytes(value: number) {
 function isOperationActive(item: Operation) {
   return item.status === "running" || item.error_code === "dependencies.manager_result_unknown";
 }
+function publishResultText(operation: Operation | null, key: string) {
+  const value = operation?.result?.[key];
+  return typeof value === "string" && value ? value : "";
+}
 function operationTimeLabel(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -819,6 +850,59 @@ function hideOperations(ids: string[]) {
   for (const id of ids) hiddenOperationIds.add(id);
   operations.value = operations.value.filter((item) => !hiddenOperationIds.has(item.id));
 }
+function rememberPublishOperation(id: string) {
+  publishOperationId.value = id;
+  publishSourceName.value = workflowSourceName.value;
+  publishCompletion.value = null;
+  try {
+    window.sessionStorage.setItem(PUBLISH_OPERATION_KEY, id);
+    window.sessionStorage.setItem(PUBLISH_SOURCE_KEY, publishSourceName.value);
+  } catch {
+    // The current page can still track the operation when browser storage is unavailable.
+  }
+}
+function forgetPublishOperation() {
+  publishOperationId.value = "";
+  publishSourceName.value = "";
+  try {
+    window.sessionStorage.removeItem(PUBLISH_OPERATION_KEY);
+    window.sessionStorage.removeItem(PUBLISH_SOURCE_KEY);
+  } catch {
+    // Nothing else is required when browser storage is unavailable.
+  }
+}
+function restorePublishOperation() {
+  if (publishOperationId.value) return;
+  try {
+    publishOperationId.value = window.sessionStorage.getItem(PUBLISH_OPERATION_KEY) || "";
+    publishSourceName.value = publishOperationId.value ? window.sessionStorage.getItem(PUBLISH_SOURCE_KEY) || "" : "";
+  } catch {
+    publishOperationId.value = "";
+    publishSourceName.value = "";
+  }
+}
+function syncPublishOperation(items: Operation[]) {
+  if (!publishOperationId.value) return;
+  const operation = items.find((item) => item.id === publishOperationId.value);
+  if (!operation || isOperationActive(operation)) return;
+  if (operation.status === "success") {
+    if (publishCompletion.value?.id === operation.id && publishStep.value === 4) return;
+    publishCompletion.value = operation;
+    if (operation.kind === "publish-resume") {
+      const tag = String(operation.metadata?.tag || "");
+      if (tag) pendingPublications.value = pendingPublications.value.filter((item) => item.tag !== tag);
+    }
+    publishStep.value = 4;
+    drawer.value = false;
+    error.value = "";
+    notice.value = "";
+    return;
+  }
+  forgetPublishOperation();
+  publishCompletion.value = null;
+  notice.value = "";
+  error.value = operationErrorMessage(operation) || t.value("operationFailed");
+}
 async function deleteOperation(item: Operation) {
   if (isOperationActive(item) || activityMutationBusy.value) return;
   deletingOperationIds[item.id] = true;
@@ -856,7 +940,8 @@ async function clearCompletedOperations() {
 function sourceErrorMessage(item: Source) {
   return item.error ? localizedBackendError(item.error) : item.url;
 }
-function moveToPublishStep(step: 1 | 2 | 3) {
+function moveToPublishStep(step: PublishStep) {
+  if (step === 4 || publishOperationRunning.value) return;
   if (step === 1 || (step === 2 && canConfirmPublishResources.value) || (step === 3 && canFinalizePublish.value)) {
     publishStep.value = step;
   }
@@ -898,6 +983,7 @@ async function openSourceComposer() {
 }
 async function load() {
   loading.value = true;
+  restorePublishOperation();
   clearMessages();
   try {
     const [s, sub, flows, ops] = await Promise.all([
@@ -910,6 +996,7 @@ async function load() {
     sources.value = sub.items;
     products.value = flows.items;
     updateOperations(ops.items);
+    syncPublishOperation(ops.items);
     for (const operation of ops.items) {
       if (operation.kind === "publisher-manage" && operation.status === "running") {
         publisherManagementOperationIds[operation.id] = true;
@@ -1330,6 +1417,7 @@ async function pollOperations() {
   operationPollInFlight = true;
   try {
     updateOperations((await api<{ items: Operation[] }>("/operations")).items);
+    syncPublishOperation(operations.value);
     for (const [operationId] of Object.entries(publisherManagementOperationIds)) {
       const operation = operations.value.find((item) => item.id === operationId);
       if (!operation) {
@@ -1437,6 +1525,13 @@ async function handleHubMessage(event: MessageEvent) {
   const sourceChanged = !workflow.value || workflowSourceName.value !== filename;
   workflow.value = current as Record<string, unknown>;
   workflowSourceName.value = filename;
+  const samePublishedSource = !!publishSourceName.value && publishSourceName.value === filename;
+  if (sourceChanged && publishStep.value === 4 && !samePublishedSource) {
+    forgetPublishOperation();
+    publishCompletion.value = null;
+    publishDraft.value = null;
+    publishStep.value = 1;
+  }
   if (sourceChanged) {
     const parsed = parseWorkflowFilename(filename);
     form.name = parsed.name;
@@ -1621,6 +1716,14 @@ function chooseCoverImage(event: Event) {
 function clearCoverImage() {
   coverImage.value = null;
 }
+function publishDraftFromForm(): PublishDraft {
+  return {
+    name: form.name.trim(),
+    version: form.version.trim(),
+    workflowId: form.id || generatedWorkflowId(form.name.trim()),
+    repository: `${form.author}/${form.repository_name}`,
+  };
+}
 async function validatePublish() {
   await withBusy("validate", async () => {
     if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
@@ -1631,20 +1734,63 @@ async function validatePublish() {
 async function publishNow() {
   await withBusy("publish", async () => {
     if (!workflow.value) throw new Error(t.value("workflowUnavailable"));
-    await post("/publisher/validate", payload());
-    const result = await post<{ operation_id: string }>("/publisher/publish", payload());
-    notice.value = `${t.value("activities")}: ${result.operation_id}`;
+    const request = payload();
+    await post("/publisher/validate", request);
+    publishDraft.value = publishDraftFromForm();
+    const result = await post<{ operation_id: string }>("/publisher/publish", request);
+    rememberPublishOperation(result.operation_id);
+    notice.value = t.value("publishStarted");
     drawer.value = true;
+    try {
+      prependOperation(await api<Operation>(`/operations/${encodeURIComponent(result.operation_id)}`));
+    } catch {
+      // Polling remains the source of truth if the operation detail races its creation.
+    }
     await pollOperations();
   });
 }
 async function resumePending(tag: string) {
   await withBusy("resume", async () => {
+    publishDraft.value = null;
+    publishStep.value = 3;
     const result = await post<{ operation_id: string }>(`/publisher/pending/${encodeURIComponent(tag)}/resume`, {});
-    notice.value = `${t.value("activities")}: ${result.operation_id}`;
+    rememberPublishOperation(result.operation_id);
+    notice.value = t.value("publishStarted");
     drawer.value = true;
+    try {
+      prependOperation(await api<Operation>(`/operations/${encodeURIComponent(result.operation_id)}`));
+    } catch {
+      // Polling remains the source of truth if the operation detail races its creation.
+    }
     await pollOperations();
   });
+}
+function startAnotherPublication() {
+  if (publishOperationRunning.value) return;
+  forgetPublishOperation();
+  publishDraft.value = null;
+  publishCompletion.value = null;
+  publishStep.value = 1;
+  form.id = "";
+  form.category = "";
+  form.summary = "";
+  form.description = "";
+  form.tags = "";
+  form.changelog = "";
+  coverImage.value = null;
+  selectedCatalogProductId.value = "";
+  const parsed = parseWorkflowFilename(workflowSourceName.value);
+  form.name = parsed.name;
+  form.version = parsed.version || "1.0";
+  syncSelectedPlugins();
+  clearMessages();
+  requestCurrentCanvasWorkflow();
+}
+async function openPublishedManage() {
+  const repository = publishCompletionRepository.value;
+  if (repository.includes("/")) manageRepositoryUrl.value = `https://github.com/${repository}`;
+  tab.value = "manage";
+  await enterManage();
 }
 function manageRepositoryFullName() {
   const match = manageRepositoryUrl.value.match(/github\.com\/([^/]+\/[^/]+)/i);
@@ -2024,12 +2170,12 @@ onBeforeUnmount(() => {
                 </details>
               </div>
 
-              <section class="panel publish-console-shell">
-                <header class="publish-context-bar" :class="{ unavailable: !workflow }">
+              <section class="panel publish-console-shell" :class="{ complete: publishStep === 4 }" :aria-busy="publishOperationRunning">
+                <header class="publish-context-bar" :class="{ unavailable: !workflow, complete: publishStep === 4 }">
                   <span class="upload-icon"><FileJson :size="20" /></span>
                   <span class="current-workflow-copy">
-                    <small>{{ t("publishing") }}</small>
-                    <strong>{{ workflowSourceName || t("readingCanvas") }}</strong>
+                    <small>{{ publishStep === 4 ? t("publishCompleteEyebrow") : t("publishing") }}</small>
+                    <strong>{{ publishStep === 4 ? publishCompletionName : (workflowSourceName || t("readingCanvas")) }}</strong>
                     <em v-if="canvasWorkflowError">{{ canvasWorkflowError }}</em>
                   </span>
                   <nav class="publish-steps" :aria-label="t('publishSteps')">
@@ -2037,8 +2183,8 @@ onBeforeUnmount(() => {
                       v-for="(label, index) in publishStepLabels"
                       :key="index"
                       :class="{ active: publishStep === index + 1, done: publishStep > index + 1 }"
-                      :disabled="publishStep <= index + 1"
-                      @click="moveToPublishStep((index + 1) as 1 | 2 | 3)"
+                      :disabled="publishStep === 4 || publishStep <= index + 1"
+                      @click="moveToPublishStep((index + 1) as PublishStep)"
                     >
                       <i>{{ index + 1 }}</i><span>{{ label }}</span>
                     </button>
@@ -2051,7 +2197,8 @@ onBeforeUnmount(() => {
                 </header>
 
                 <div class="publish-stage-body">
-                  <section v-if="publishStep === 1" class="publish-stage resource-review-stage">
+                  <fieldset class="publish-stage-fieldset" :disabled="publishOperationRunning">
+                    <section v-if="publishStep === 1" class="publish-stage resource-review-stage">
                     <div class="core-version-row">
                       <span><ActivityIcon :size="16" /></span>
                       <div><small>{{ t("comfyCoreVersion") }}</small><strong>{{ status?.comfyui_version || t("detecting") }}</strong></div>
@@ -2168,7 +2315,7 @@ onBeforeUnmount(() => {
                     </div>
                   </section>
 
-                  <section v-else class="publish-stage publish-review-stage">
+                    <section v-else-if="publishStep === 3" class="publish-stage publish-review-stage">
                     <div class="publish-review-summary">
                       <div><small>{{ t("repositoryLabel") }}</small><span><strong>{{ form.author && form.repository_name ? `${form.author}/${form.repository_name}` : "—" }}</strong></span></div>
                       <div><small>{{ t("workflowLabel") }}</small><span><strong>{{ form.name || "—" }}</strong><em>{{ form.category || "—" }}</em></span></div>
@@ -2186,21 +2333,51 @@ onBeforeUnmount(() => {
                     <div class="publish-review-notes"><small>{{ t("releaseNotes") }}</small><p>{{ form.changelog }}</p></div>
                     <p class="publish-final-warning"><AlertCircle :size="16" />{{ t("immutableReleaseWarning") }}</p>
                   </section>
+
+                  <section v-else class="publish-stage publish-complete-stage">
+                    <div class="publish-complete-hero">
+                      <span class="publish-complete-icon"><CheckCircle2 :size="34" /></span>
+                      <span class="eyebrow">{{ t("publishCompleteEyebrow") }}</span>
+                      <h1>{{ t("publishCompleteTitle") }}</h1>
+                      <p>{{ t("publishCompleteDescription", { name: publishCompletionName, version: publishCompletionVersion }) }}</p>
+                    </div>
+                    <div class="publish-complete-summary">
+                      <div><small>{{ t("publishCompleteRepository") }}</small><span><strong>{{ publishCompletionRepository }}</strong></span></div>
+                      <div><small>{{ t("workflowLabel") }}</small><span><strong>{{ publishCompletionName }}</strong><em>{{ publishCompletionWorkflowId }}</em></span></div>
+                      <div><small>{{ t("releaseVersion") }}</small><span><strong>v{{ publishCompletionVersion }}</strong></span></div>
+                      <div><small>{{ t("publishCompletePath") }}</small><span><strong>{{ publishCompletionRepositoryPath }}</strong></span></div>
+                      <div><small>{{ t("publishCompleteRelease") }}</small>
+                        <span v-if="publishCompletionReleaseUrl"><a class="publish-complete-link" :href="publishCompletionReleaseUrl" target="_blank" rel="noopener noreferrer">{{ t("openRelease") }}<ExternalLink :size="14" /></a></span>
+                        <span v-else><strong>{{ t("none") }}</strong></span>
+                      </div>
+                      <div><small>{{ t("publishCompleteTime") }}</small><span><strong>{{ publishCompletionTime }}</strong></span></div>
+                    </div>
+                    <div class="publish-complete-catalog-note"><CheckCircle2 :size="17" />{{ t("publishCompleteCatalogHint") }}</div>
+                    <div class="publish-complete-actions">
+                      <a v-if="publishCompletionReleaseUrl" class="secondary" :href="publishCompletionReleaseUrl" target="_blank" rel="noopener noreferrer"><ExternalLink :size="16" />{{ t("openRelease") }}</a>
+                      <button class="ghost" @click="drawer = true"><ActivityIcon :size="16" />{{ t("viewActivity") }}</button>
+                      <button class="secondary" @click="openPublishedManage"><FolderCog :size="16" />{{ t("goToManage") }}</button>
+                      <button class="primary" @click="startAnotherPublication"><UploadCloud :size="16" />{{ t("publishAnother") }}</button>
+                    </div>
+                  </section>
+                  </fieldset>
                 </div>
 
                 <footer class="publish-action-bar staged-actions">
-                  <span v-if="publishStep === 1"><CheckCircle2 v-if="canConfirmPublishResources" :size="16" /><AlertCircle v-else :size="16" />{{ canConfirmPublishResources
+                  <span v-if="publishOperationRunning"><LoaderCircle :size="16" class="dependency-task-spin" />{{ t("publishInProgress") }}</span>
+                  <span v-else-if="publishStep === 1"><CheckCircle2 v-if="canConfirmPublishResources" :size="16" /><AlertCircle v-else :size="16" />{{ canConfirmPublishResources
                     ? t("resourcesReady")
                     : (canvasWorkflowError || dependencyScanError || (resourceScanPending ? t("scanningResources") : t("resourceReviewFailed"))) }}</span>
                   <span v-else-if="publishStep === 2"><CheckCircle2 v-if="canFinalizePublish" :size="16" /><AlertCircle v-else :size="16" />{{ canFinalizePublish ? t("releaseDetailsComplete") : t("completeReleaseFields") }}</span>
-                  <span v-else><ShieldCheck :size="16" />{{ t("publishReviewReady") }}</span>
+                  <span v-else-if="publishStep === 3"><ShieldCheck :size="16" />{{ t("publishReviewReady") }}</span>
+                  <span v-else><CheckCircle2 :size="16" />{{ t("publishCompleteFooter") }}</span>
 
-                  <button v-if="publishStep > 1" class="ghost" :disabled="!!busy" @click="moveToPublishStep((publishStep - 1) as 1 | 2)"><ArrowLeft :size="15" />{{ t("back") }}</button>
-                  <button v-if="publishStep === 1" class="primary" :disabled="!!busy || !canConfirmPublishResources" @click="moveToPublishStep(2)">{{ t("confirmResourcesNext") }}<ArrowRight :size="16" /></button>
-                  <button v-else-if="publishStep === 2" class="primary" :disabled="!!busy || !canFinalizePublish" @click="moveToPublishStep(3)">{{ t("confirmDetailsNext") }}<ArrowRight :size="16" /></button>
-                  <template v-else>
-                    <button class="secondary" :disabled="!!busy || !canFinalizePublish" @click="validatePublish"><ShieldCheck :size="16" />{{ t("validate") }}</button>
-                    <button class="primary" :disabled="!!busy || !canFinalizePublish || !status?.github.authenticated" @click="publishNow"><UploadCloud :size="16" />{{ t("publishNow") }}</button>
+                  <button v-if="publishStep > 1 && publishStep < 4" class="ghost" :disabled="!!busy || publishOperationRunning" @click="moveToPublishStep((publishStep - 1) as 1 | 2 | 3)"><ArrowLeft :size="15" />{{ t("back") }}</button>
+                  <button v-if="publishStep === 1" class="primary" :disabled="!!busy || publishOperationRunning || !canConfirmPublishResources" @click="moveToPublishStep(2)">{{ t("confirmResourcesNext") }}<ArrowRight :size="16" /></button>
+                  <button v-else-if="publishStep === 2" class="primary" :disabled="!!busy || publishOperationRunning || !canFinalizePublish" @click="moveToPublishStep(3)">{{ t("confirmDetailsNext") }}<ArrowRight :size="16" /></button>
+                  <template v-else-if="publishStep === 3">
+                    <button class="secondary" :disabled="!!busy || publishOperationRunning || !canFinalizePublish" @click="validatePublish"><ShieldCheck :size="16" />{{ t("validate") }}</button>
+                    <button class="primary" :disabled="!!busy || publishOperationRunning || !canFinalizePublish || !status?.github.authenticated" @click="publishNow"><UploadCloud :size="16" />{{ t("publishNow") }}</button>
                   </template>
                 </footer>
               </section>

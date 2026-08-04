@@ -700,6 +700,7 @@ async def publish(
         "repository": f"{owner}/{repo}",
         "repository_path": committed.repository_path,
         "workflow_id": product.id,
+        "name": product.name,
         "version": version.version,
         "release_url": release["html_url"],
     }
@@ -736,6 +737,7 @@ async def resume_publication(
         "repository": f"{owner}/{repo}",
         "repository_path": committed.repository_path,
         "workflow_id": product.id,
+        "name": product.name,
         "version": product.versions[0].version,
         "release_url": record["release_url"],
     }

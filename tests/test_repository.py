@@ -187,6 +187,7 @@ class PublicationCommitTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertEqual(result["workflow_id"], product.id)
+            self.assertEqual(result["name"], product.name)
             self.assertFalse((storage.drafts_dir / draft_name).exists())
             self.assertEqual(await storage.read_json("pending_publications.json", []), [])
             version_files = commit.await_args.args[-1]
