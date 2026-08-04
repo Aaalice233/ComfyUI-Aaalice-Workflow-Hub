@@ -18,7 +18,7 @@
 
 ## 订阅源刷新失败
 
-订阅清单通过 GitHub Raw 读取；已有订阅会继续使用本地缓存。GitHub Raw 对默认分支内容可能有短暂 CDN 缓存，作者刚发布后请稍等几分钟再刷新。新订阅或刷新失败时，请确认仓库公开、根目录存在 `workflow-catalog.json`，并检查网络、VPN 或 TUN 模式。GitHub Raw 与发布管理使用不同的访问路径，订阅无需 GitHub 登录。
+订阅清单通过 GitHub Contents API 读取；已有订阅会保留本地缓存作为失败回退，但网页打开和手动刷新都会强制重新校验远端。新订阅或刷新失败时，请确认仓库公开、根目录存在 `workflow-catalog.json`，并检查网络、VPN 或 TUN 模式。订阅无需 GitHub 登录。
 
 ## 新仓库无法发布
 

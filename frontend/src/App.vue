@@ -54,7 +54,7 @@ import {
   type PublishRepository,
 } from "./repository-selection";
 
-type Source = { owner: string; repo: string; url: string; default_branch?: string; refreshed_at: string; error?: string };
+type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
 type ManagedVersion = { version: string; published_at: string; changelog: string; package: { size: number } };
 type ManagedProduct = {
   id: string; name: string; category: string; summary: string; description: string;
@@ -80,6 +80,10 @@ type Product = {
   cover?: { url: string; sha256: string } | null;
   versions: Version[]; downloaded_versions: string[]; source: { owner: string; repo: string };
   repository_path: string;
+};
+type CatalogRefreshResult = CatalogSnapshot<Source, Product> & {
+  changed: boolean;
+  failed: { owner: string; repo: string }[];
 };
 type Status = {
   plugin_version: string;
@@ -784,14 +788,6 @@ function humanBytes(value: number) {
 function isOperationActive(item: Operation) {
   return item.status === "running" || item.error_code === "dependencies.manager_result_unknown";
 }
-const catalogMutationKinds = new Set(["download", "publish", "publish-resume", "publisher-manage"]);
-function operationsChangedCatalogAfter(items: Operation[], savedAt: number) {
-  return items.some((item) => {
-    if (!catalogMutationKinds.has(item.kind) || item.status !== "success") return false;
-    const createdAt = new Date(item.created_at).getTime();
-    return Number.isFinite(createdAt) && createdAt > savedAt;
-  });
-}
 function publishResultText(operation: Operation | null, key: string) {
   const value = operation?.result?.[key];
   return typeof value === "string" && value ? value : "";
@@ -1030,8 +1026,12 @@ function applyCatalog(snapshot: CatalogSnapshot<Source, Product>) {
   }
 }
 
-function invalidateCatalogCache() {
+function invalidateCatalogRequests() {
   catalogRequests.invalidate();
+}
+
+function invalidateCatalogCache() {
+  invalidateCatalogRequests();
   const scope = status.value?.catalog_cache_scope;
   if (scope) clearCatalogCache(scope);
 }
@@ -1071,6 +1071,32 @@ function restoreCatalogCache(s: Status) {
   return cached;
 }
 
+let remoteCatalogRefreshInFlight: Promise<number> | null = null;
+function refreshRemoteCatalog(force = true): Promise<number> {
+  if (remoteCatalogRefreshInFlight) return remoteCatalogRefreshInFlight;
+  const task = (async () => {
+    catalogRefreshing.value = true;
+    try {
+      invalidateCatalogRequests();
+      const result = await post<CatalogRefreshResult>("/subscriptions/refresh-all", { force });
+      applyCatalog({ sources: result.sources, products: result.products });
+      if (!result.failed.length) {
+        const scope = status.value?.catalog_cache_scope;
+        if (scope) writeCatalogCache(scope, { sources: result.sources, products: result.products });
+      }
+      return result.failed.length;
+    } finally {
+      catalogRefreshing.value = false;
+    }
+  })();
+  remoteCatalogRefreshInFlight = task;
+  void task.then(
+    () => { if (remoteCatalogRefreshInFlight === task) remoteCatalogRefreshInFlight = null; },
+    () => { if (remoteCatalogRefreshInFlight === task) remoteCatalogRefreshInFlight = null; },
+  );
+  return task;
+}
+
 function load(): Promise<void> {
   if (loadInFlight) return loadInFlight;
   const task = (async () => {
@@ -1093,10 +1119,20 @@ function load(): Promise<void> {
         }
       }
       const cached = restoreCatalogCache(s);
-      const operationChangedCatalog = !!cached && operationsChangedCatalogAfter(ops.items, cached.savedAt);
-      if (cached) loading.value = false;
-      if (operationChangedCatalog) invalidateCatalogCache();
-      if (!cached || !cached.fresh || operationChangedCatalog) await refreshCatalog();
+      if (!cached || showInitialLoading) loading.value = true;
+      if (cached && !showInitialLoading) {
+        applyCatalog(cached);
+        loading.value = false;
+      }
+      let failedSources = 0;
+      try {
+        failedSources = await refreshRemoteCatalog(showInitialLoading);
+      } catch (reason) {
+        if (!cached) throw reason;
+        applyCatalog(cached);
+        error.value = errorMessage(reason);
+      }
+      if (failedSources) notice.value = t.value("someSourcesFailed", { count: failedSources });
       if (s.github.authenticated) {
         try {
           const [repos, pending] = await Promise.all([
@@ -1210,16 +1246,7 @@ async function refreshSource(item: Source) {
 }
 async function refreshAllSources() {
   await withBusy("refresh-all", async () => {
-    let failed = 0;
-    for (const item of sources.value) {
-      try {
-        await post(`/subscriptions/${item.owner}/${item.repo}/refresh`, {});
-      } catch {
-        failed += 1;
-      }
-    }
-    invalidateCatalogCache();
-    await refreshCatalog();
+    const failed = await refreshRemoteCatalog();
     notice.value = failed ? t.value("someSourcesFailed", { count: failed }) : t.value("allSourcesRefreshed");
   });
 }

@@ -711,6 +711,33 @@ async def _refresh_startup_sources(storage: UserStorage, *, force: bool = False)
     return {"items": updates, "catalog_changed": catalog_changed, "failed": failed}
 
 
+async def _refresh_catalog_sources(storage: UserStorage, *, force: bool = True) -> dict[str, Any]:
+    changed = False
+    failed: list[dict[str, str]] = []
+    for source in await list_subscriptions(storage):
+        if not isinstance(source, dict) or not source.get("owner") or not source.get("repo"):
+            continue
+        owner, repo = str(source["owner"]), str(source["repo"])
+        try:
+            result = await refresh_subscription(storage, owner, repo, force=force)
+            changed = changed or bool(result["changed"] or result["catalog_missing"])
+        except Exception:
+            failed.append({"owner": owner, "repo": repo})
+            await storage.update_json(
+                "subscriptions.json",
+                [],
+                lambda items: [
+                    {**item, "error": "subscription.refresh_failed"}
+                    if isinstance(item, dict)
+                    and str(item.get("owner", "")).casefold() == owner.casefold()
+                    and str(item.get("repo", "")).casefold() == repo.casefold()
+                    else item
+                    for item in items
+                ],
+            )
+    return {"changed": changed, "failed": failed}
+
+
 async def _read_update_settings(storage: UserStorage) -> dict[str, Any]:
     try:
         value = await storage.read_json(_SETTINGS_FILE, {})
@@ -916,6 +943,21 @@ def register_routes() -> None:
         data = await _json(request)
         item = await add_subscription(UserStorage.from_request(request), str(data.get("url", "")))
         return web.json_response(item, status=201)
+
+    @routes.post(f"{BASE}/subscriptions/refresh-all")
+    @endpoint
+    async def subscriptions_refresh_all(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        storage = UserStorage.from_request(request)
+        force = data.get("force", True)
+        if not isinstance(force, bool):
+            force = True
+        result = await _refresh_catalog_sources(storage, force=force)
+        return web.json_response({
+            **result,
+            "sources": await list_subscriptions(storage),
+            "products": await aggregate_catalog(storage),
+        })
 
     @routes.delete(f"{BASE}/subscriptions/{{owner}}/{{repo}}")
     @endpoint

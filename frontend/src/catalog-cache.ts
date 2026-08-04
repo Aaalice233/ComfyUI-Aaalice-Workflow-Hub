@@ -1,7 +1,7 @@
 export const CATALOG_CACHE_FRESH_MS = 30_000;
 export const CATALOG_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const CACHE_PREFIX = "aaalice-workflow-hub:catalog:";
 
 type StorageLike = Pick<Storage, "getItem" | "setItem" | "removeItem">;

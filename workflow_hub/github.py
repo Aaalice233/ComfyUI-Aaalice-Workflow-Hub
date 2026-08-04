@@ -4,7 +4,6 @@ import asyncio
 import base64
 import json
 import os
-import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -14,7 +13,6 @@ import aiohttp
 from .security import require_github_https
 
 API = "https://api.github.com"
-RAW = "https://raw.githubusercontent.com"
 DEVICE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 CLIENT_ID = os.getenv("WORKFLOW_HUB_GITHUB_CLIENT_ID", "Iv23likAV8HgkxJ6f6Rz")
@@ -176,57 +174,34 @@ class GitHubClient:
             if own:
                 await session.close()
 
-    async def get_default_branch(self, owner: str, repo: str) -> str:
-        data, _ = await self.request("GET", f"{API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}")
-        branch = str(data.get("default_branch") or "")
-        if not branch:
-            raise GitHubError("GitHub 仓库没有可用的默认分支", 409)
-        return branch
-
-    async def get_catalog(self, owner: str, repo: str, etag: str | None = None) -> ContentFile | None:
-        headers = {"If-None-Match": etag} if etag else {}
-        try:
-            data, response_headers = await self.request(
-                "GET", f"{API}/repos/{owner}/{repo}/contents/workflow-catalog.json", expected=(200, 304), headers=headers
-            )
-        except GitHubError as exc:
-            if exc.status == 404:
-                return None
-            raise
-        if not data:
-            return ContentFile(content=b"", sha="", etag=response_headers.get("ETag"), not_modified=True) if etag and response_headers.get("ETag") == etag else None
-        content = base64.b64decode(data["content"])
-        return ContentFile(content=content, sha=data["sha"], etag=response_headers.get("ETag"))
-
-    async def get_raw_catalog(
+    async def get_catalog(
         self,
         owner: str,
         repo: str,
         etag: str | None = None,
         *,
         force: bool = False,
-        ref: str = "HEAD",
     ) -> ContentFile | None:
-        headers = {"Accept": "text/plain"}
+        headers: dict[str, str] = {}
         if etag and not force:
             headers["If-None-Match"] = etag
-        encoded_ref = quote(ref, safe="/")
-        url = f"{RAW}/{quote(owner, safe='')}/{quote(repo, safe='')}/{encoded_ref}/workflow-catalog.json"
         if force:
-            # GitHub Raw can cache symbolic refs for several minutes; explicit refresh must observe a just-pushed catalog.
             headers["Cache-Control"] = "no-cache"
-            url = f"{url}?workflow_hub_refresh={time.time_ns()}"
         try:
-            data, response_headers = await self.request("GET", url, expected=(200, 304), headers=headers)
+            data, response_headers = await self.request(
+                "GET",
+                f"{API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/contents/workflow-catalog.json",
+                expected=(200, 304),
+                headers=headers,
+            )
         except GitHubError as exc:
             if exc.status == 404:
                 return None
             raise
         if data is None:
             return ContentFile(content=b"", sha="", etag=response_headers.get("ETag"), not_modified=True)
-        if not isinstance(data, bytes):
-            raise GitHubError("Raw 工作流清单响应不是文件内容", 502)
-        return ContentFile(content=data, sha="", etag=response_headers.get("ETag"))
+        content = base64.b64decode(data["content"])
+        return ContentFile(content=content, sha=data["sha"], etag=response_headers.get("ETag"))
 
     async def put_catalog(self, owner: str, repo: str, catalog: bytes, sha: str | None, message: str) -> str:
         payload: dict[str, Any] = {"message": message, "content": base64.b64encode(catalog).decode("ascii")}

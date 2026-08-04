@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
-from workflow_hub.api import _notification_check_due, _read_update_settings, _refresh_startup_source, _run_notification_check, _settings_payload
+from workflow_hub.api import _notification_check_due, _read_update_settings, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _settings_payload
 from workflow_hub.catalog import Catalog
 from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager, subscription_cache_path
 from workflow_hub.storage import UserStorage
@@ -208,6 +208,28 @@ class NotificationScheduleTests(IsolatedAsyncioTestCase):
             })
 
 
+class CatalogRefreshEndpointTests(IsolatedAsyncioTestCase):
+    async def test_refresh_all_uses_authoritative_forced_refreshes(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": '"old-etag"',
+                "refreshed_at": "",
+                "error": None,
+            }])
+            with patch(
+                "workflow_hub.api.refresh_subscription",
+                new=AsyncMock(return_value={"changed": True, "catalog_missing": False}),
+            ) as refresh:
+                result = await _refresh_catalog_sources(storage)
+
+            self.assertEqual(result, {"changed": True, "failed": []})
+            refresh.assert_awaited_once_with(storage, "owner", "repo", force=True)
+
+
 class SubscriptionStateTests(IsolatedAsyncioTestCase):
     async def test_not_modified_catalog_keeps_cached_workflows(self) -> None:
         with TemporaryDirectory() as folder:
@@ -224,7 +246,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             cache = subscription_cache_path(storage, "owner", "repo")
             cache.write_bytes(EXAMPLE.read_bytes())
             client = patch("workflow_hub.service.GitHubClient").start()
-            client.return_value.get_raw_catalog = AsyncMock(return_value=SimpleNamespace(not_modified=True, etag="etag"))
+            client.return_value.get_catalog = AsyncMock(return_value=SimpleNamespace(not_modified=True, etag="etag"))
             try:
                 result = await refresh_subscription(storage, "owner", "repo")
             finally:
@@ -249,12 +271,12 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             }])
             subscription_cache_path(storage, "owner", "repo").write_bytes(content)
             with patch("workflow_hub.service.GitHubClient") as client:
-                client.return_value.get_raw_catalog = AsyncMock(
+                client.return_value.get_catalog = AsyncMock(
                     return_value=SimpleNamespace(content=content, etag='"new-etag"', not_modified=False)
                 )
                 await refresh_subscription(storage, "owner", "repo", force=True)
-                client.return_value.get_raw_catalog.assert_awaited_once_with(
-                    "owner", "repo", None, force=True, ref="main"
+                client.return_value.get_catalog.assert_awaited_once_with(
+                    "owner", "repo", None, force=True
                 )
 
     async def test_refreshes_same_source_are_serialized(self) -> None:
@@ -276,7 +298,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             release = asyncio.Event()
             calls = 0
 
-            async def raw_catalog(*_args, **_kwargs):
+            async def catalog(*_args, **_kwargs):
                 nonlocal calls
                 calls += 1
                 if calls == 1:
@@ -285,7 +307,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
                 return SimpleNamespace(content=content, etag=f'"etag-{calls}"', not_modified=False)
 
             with patch("workflow_hub.service.GitHubClient") as client:
-                client.return_value.get_raw_catalog.side_effect = raw_catalog
+                client.return_value.get_catalog.side_effect = catalog
                 first = asyncio.create_task(refresh_subscription(storage, "owner", "repo"))
                 await started.wait()
                 second = asyncio.create_task(refresh_subscription(storage, "owner", "repo"))
@@ -296,7 +318,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
 
             self.assertEqual(calls, 2)
 
-    async def test_raw_catalog_hash_keeps_unchanged_catalog(self) -> None:
+    async def test_catalog_hash_keeps_unchanged_catalog(self) -> None:
         with TemporaryDirectory() as folder:
             storage = UserStorage(Path(folder))
             content = EXAMPLE.read_bytes()
@@ -313,8 +335,8 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             cache = subscription_cache_path(storage, "owner", "repo")
             cache.write_bytes(content)
             client = patch("workflow_hub.service.GitHubClient").start()
-            client.return_value.get_raw_catalog = AsyncMock(
-                return_value=SimpleNamespace(content=content, etag='"new-raw-etag"', not_modified=False)
+            client.return_value.get_catalog = AsyncMock(
+                return_value=SimpleNamespace(content=content, etag='"new-api-etag"', not_modified=False)
             )
             try:
                 result = await refresh_subscription(storage, "owner", "repo")
@@ -323,10 +345,10 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             self.assertFalse(result["changed"])
             self.assertFalse(result["catalog_missing"])
             subscriptions = await storage.read_json("subscriptions.json", [])
-            self.assertEqual(subscriptions[0]["etag"], '"new-raw-etag"')
+            self.assertEqual(subscriptions[0]["etag"], '"new-api-etag"')
             self.assertEqual(subscriptions[0]["catalog_hash"], hashlib.sha256(content).hexdigest())
 
-    async def test_replaces_same_version_catalog_and_migrates_branch(self) -> None:
+    async def test_replaces_same_version_catalog_from_authoritative_api(self) -> None:
         with TemporaryDirectory() as folder:
             storage = UserStorage(Path(folder))
             previous_content = EXAMPLE.read_bytes()
@@ -348,21 +370,19 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             }])
             subscription_cache_path(storage, "owner", "repo").write_bytes(previous_content)
             with patch("workflow_hub.service.GitHubClient") as client:
-                client.return_value.get_default_branch = AsyncMock(return_value="main")
-                client.return_value.get_raw_catalog = AsyncMock(
-                    return_value=SimpleNamespace(content=current_content, etag='"new-etag"', not_modified=False)
+                client.return_value.get_catalog = AsyncMock(
+                    return_value=SimpleNamespace(content=current_content, etag='"new-api-etag"', not_modified=False)
                 )
                 result = await refresh_subscription(storage, "owner", "repo", force=True)
 
             self.assertTrue(result["changed"])
             self.assertEqual(subscription_cache_path(storage, "owner", "repo").read_bytes(), current_content)
             subscriptions = await storage.read_json("subscriptions.json", [])
-            self.assertEqual(subscriptions[0]["default_branch"], "main")
-            self.assertEqual(subscriptions[0]["etag"], '"new-etag"')
+            self.assertNotIn("default_branch", subscriptions[0])
+            self.assertEqual(subscriptions[0]["etag"], '"new-api-etag"')
             self.assertEqual(subscriptions[0]["catalog_hash"], hashlib.sha256(current_content).hexdigest())
-            client.return_value.get_default_branch.assert_awaited_once_with("owner", "repo")
-            client.return_value.get_raw_catalog.assert_awaited_once_with(
-                "owner", "repo", None, force=True, ref="main"
+            client.return_value.get_catalog.assert_awaited_once_with(
+                "owner", "repo", None, force=True
             )
 
     async def test_removed_catalog_clears_cache_and_hides_old_workflows(self) -> None:
@@ -380,7 +400,7 @@ class SubscriptionStateTests(IsolatedAsyncioTestCase):
             cache = storage.cache_dir / "owner-repo.json"
             cache.write_bytes(EXAMPLE.read_bytes())
             client = patch("workflow_hub.service.GitHubClient").start()
-            client.return_value.get_raw_catalog = AsyncMock(return_value=None)
+            client.return_value.get_catalog = AsyncMock(return_value=None)
             try:
                 result = await refresh_subscription(storage, "owner", "repo")
             finally:

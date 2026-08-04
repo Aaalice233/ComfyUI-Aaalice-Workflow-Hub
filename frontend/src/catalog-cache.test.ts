@@ -75,6 +75,18 @@ describe("catalog cache", () => {
     expect(readCatalogCache("user-a", storage, now + CATALOG_CACHE_FRESH_MS + 1)?.products).toEqual(snapshot.products);
   });
 
+  it("discards snapshots from an older cache schema", () => {
+    const storage = new MemoryStorage();
+    storage.setItem("aaalice-workflow-hub:catalog:user-a", JSON.stringify({
+      version: 1,
+      saved_at: 100_000,
+      sources: [],
+      products: [{ id: "old-workflow" }],
+    }));
+
+    expect(readCatalogCache("user-a", storage, 100_000)).toBeNull();
+  });
+
   it("discards expired or malformed entries without affecting other scopes", () => {
     const storage = new MemoryStorage();
     const now = 100_000;

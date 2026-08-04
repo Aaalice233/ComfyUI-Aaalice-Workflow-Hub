@@ -171,8 +171,7 @@ def _valid_cached_catalog(path: Path) -> Catalog | None:
 async def add_subscription(storage: UserStorage, repository_url: str) -> dict[str, Any]:
     owner, repo = parse_public_repository(repository_url)
     client = GitHubClient()
-    default_branch = await client.get_default_branch(owner, repo)
-    remote = await client.get_raw_catalog(owner, repo, force=True, ref=default_branch)
+    remote = await client.get_catalog(owner, repo, force=True)
     if remote is None:
         raise ValueError("仓库根目录没有 workflow-catalog.json")
     catalog = validate_catalog_assets(Catalog.model_validate_json(remote.content))
@@ -180,7 +179,6 @@ async def add_subscription(storage: UserStorage, repository_url: str) -> dict[st
         "owner": owner,
         "repo": repo,
         "url": f"https://github.com/{owner}/{repo}",
-        "default_branch": default_branch,
         "etag": remote.etag,
         "catalog_hash": hashlib.sha256(remote.content).hexdigest(),
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -230,15 +228,11 @@ async def _refresh_subscription(
     if current is None:
         raise UserFacingError("subscription.not_found")
     client = GitHubClient()
-    default_branch = current.get("default_branch")
-    if not isinstance(default_branch, str) or not default_branch:
-        default_branch = await client.get_default_branch(owner, repo)
-    remote = await client.get_raw_catalog(
+    remote = await client.get_catalog(
         owner,
         repo,
         None if force else current.get("etag"),
         force=force,
-        ref=default_branch,
     )
     cache = subscription_cache_path(storage, owner, repo)
     canonical_cache, legacy_cache = _cache_paths(storage, owner, repo)
@@ -248,7 +242,7 @@ async def _refresh_subscription(
         raise UserFacingError("subscription.cache_unavailable") from exc
     unchanged = bool(remote and remote.not_modified and cached_catalog is not None)
     if remote and remote.not_modified and cached_catalog is None:
-        remote = await client.get_raw_catalog(owner, repo, ref=default_branch)
+        remote = await client.get_catalog(owner, repo, force=True)
         unchanged = bool(remote and remote.not_modified and cached_catalog is not None)
         if remote and remote.not_modified:
             remote = None
@@ -284,7 +278,7 @@ async def _refresh_subscription(
     def mutate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in items:
             if item["owner"].casefold() == owner.casefold() and item["repo"].casefold() == repo.casefold():
-                item["default_branch"] = default_branch
+                item.pop("default_branch", None)
                 if remote and not remote.not_modified:
                     item["etag"] = remote.etag
                     item["catalog_hash"] = catalog_hash
