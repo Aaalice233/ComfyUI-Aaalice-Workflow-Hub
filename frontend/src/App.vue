@@ -2494,9 +2494,9 @@ onBeforeUnmount(() => {
                         <span v-if="coverImage"><img class="review-cover-thumb" :src="coverImage.previewUrl" :alt="t('coverImage')" /><em>{{ coverImage.name }}</em></span>
                         <span v-else><strong>—</strong></span>
                       </div>
-                      <div><small>{{ t("comfyCore") }}</small><span><strong>{{ status?.comfyui_version || "—" }}</strong></span></div>
                     </div>
                     <div class="publish-review-resources">
+                      <span><ActivityIcon :size="16" /><strong>{{ status?.comfyui_version || "—" }}</strong><small>{{ t("comfyCore") }}</small></span>
                       <span><PackageOpen :size="16" /><strong>{{ customNodeCount }}</strong><small>{{ t("plugins") }}</small></span>
                       <span><FileUp :size="16" /><strong>{{ imageReferences.length }}</strong><small>{{ t("images") }}</small></span>
                     </div>
