@@ -14,7 +14,7 @@ A public workflow subscription, publishing, and version-management extension for
 
 ### Subscribe and download
 
-- Subscribe to public GitHub repositories containing `workflow-catalog.json`, then search, filter, and browse version history and release notes in one aggregated catalog. Catalog reads use GitHub Raw and a local cache, so they do not depend on the anonymous GitHub REST API quota.
+- Subscribe to public GitHub repositories containing `workflow-catalog.json`, then search, filter, and browse version history and release notes in one aggregated catalog. Catalog reads use GitHub Raw and a per-user local cache, so they do not depend on the anonymous GitHub REST API quota. Reopening the page reuses a recent catalog snapshot first, then revalidates silently only when needed to avoid duplicate loads and visual flicker.
 - Every workflow version lives on the default branch under a readable category/name/version path, so repository visitors can browse, back up, or download source files without searching through Releases.
 - Download and verify Release ZIPs by version. Each local version is stored as a separate workflow file, and its folder can be opened directly from the detail page.
 - The detail page shows core, plugin, and bundled-image status for each version; click a top status control to inspect full details. Changelogs support full GitHub Flavored Markdown rendering with sanitization, and long notes stay inside a dedicated scrollable area. Workflow packages never include LoRA dependencies.
@@ -68,7 +68,7 @@ workflows/Workflow Hub/{owner}-{repo}-{source-hash}/{workflow-id}/{name}-v{versi
 - [Troubleshooting](docs/troubleshooting.md)
 - [Workflow catalog and package protocol](docs/protocol.md)
 - [Security boundaries](docs/security.md)
-- Design and decisions: [project vision](docs/vision.md) · [implemented features](docs/features.md) · [terminology and domain context](docs/context.md) · [ADR directory](docs/adr/)
+- Design and decisions: [project vision](docs/vision.md) · [implemented features](docs/features.md) · [terminology and domain context](docs/context.md) · [catalog cache decision](docs/adr/0003-catalog-cache-and-startup-refresh.md) · [ADR directory](docs/adr/)
 
 ## License
 

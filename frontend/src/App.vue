@@ -38,6 +38,13 @@ import {
   X,
 } from "@lucide/vue";
 import { ApiError, api, post, remove } from "./api";
+import {
+  CatalogRequestCoordinator,
+  clearCatalogCache,
+  readCatalogCache,
+  writeCatalogCache,
+  type CatalogSnapshot,
+} from "./catalog-cache";
 import { renderMarkdown } from "./markdown";
 import { locale, t, type MessageKey } from "./i18n";
 import {
@@ -75,6 +82,7 @@ type Product = {
 };
 type Status = {
   plugin_version: string;
+  catalog_cache_scope?: string;
   comfyui_version: string;
   git: { available: boolean; source?: string };
   manager?: { available: boolean; compatible: boolean; version?: string; api?: string };
@@ -215,12 +223,18 @@ const dependencyPlanGeneration = reactive<Record<string, number>>({});
 const dependencyPlanLoading = reactive<Record<string, boolean>>({});
 const downloadPreflight = ref<DownloadPreflight | null>(null);
 const loading = ref(true);
+const catalogRefreshing = ref(false);
+const catalogRequests = new CatalogRequestCoordinator<CatalogSnapshot<Source, Product>>(() => Promise.all([
+  api<{ items: Source[] }>("/subscriptions"),
+  api<{ items: Product[] }>("/workflows"),
+]).then(([sub, flows]) => ({ sources: sub.items, products: flows.items })));
+let loadInFlight: Promise<void> | null = null;
+let loadAttempted = false;
 let operationPollInFlight = false;
 let managerSocket: WebSocket | null = null;
 let operationTimer = 0;
 let loginTimer = 0;
 let copiedTimer = 0;
-let startupRefreshTimer = 0;
 
 const operationStageMessages: Record<string, MessageKey> = {
   queued: "stageQueued",
@@ -758,6 +772,14 @@ function humanBytes(value: number) {
 function isOperationActive(item: Operation) {
   return item.status === "running" || item.error_code === "dependencies.manager_result_unknown";
 }
+const catalogMutationKinds = new Set(["download", "publish", "publish-resume", "publisher-manage"]);
+function operationsChangedCatalogAfter(items: Operation[], savedAt: number) {
+  return items.some((item) => {
+    if (!catalogMutationKinds.has(item.kind) || item.status !== "success") return false;
+    const createdAt = new Date(item.created_at).getTime();
+    return Number.isFinite(createdAt) && createdAt > savedAt;
+  });
+}
 function publishResultText(operation: Operation | null, key: string) {
   const value = operation?.result?.[key];
   return typeof value === "string" && value ? value : "";
@@ -896,6 +918,8 @@ function syncPublishOperation(items: Operation[]) {
     drawer.value = false;
     error.value = "";
     notice.value = "";
+    invalidateCatalogCache();
+    void refreshCatalog().catch((reason) => { error.value = errorMessage(reason); });
     return;
   }
   forgetPublishOperation();
@@ -981,69 +1005,123 @@ async function openSourceComposer() {
   await nextTick();
   sourceInput.value?.focus();
 }
-async function load() {
-  loading.value = true;
-  restorePublishOperation();
-  clearMessages();
-  try {
-    const [s, sub, flows, ops] = await Promise.all([
-      api<Status>("/status"),
-      api<{ items: Source[] }>("/subscriptions"),
-      api<{ items: Product[] }>("/workflows"),
-      api<{ items: Operation[] }>("/operations"),
-    ]);
-    status.value = s;
-    sources.value = sub.items;
-    products.value = flows.items;
-    updateOperations(ops.items);
-    syncPublishOperation(ops.items);
-    for (const operation of ops.items) {
-      if (operation.kind === "publisher-manage" && operation.status === "running") {
-        publisherManagementOperationIds[operation.id] = true;
-        publisherManagementOperationSynced[operation.id] = false;
-      }
-    }
-    if (s.github.authenticated) {
-      try {
-        const [repos, pending] = await Promise.all([
-          api<{ items: PublishRepository[] }>("/github/repositories"),
-          api<{ items: { tag: string }[] }>("/publisher/pending"),
-        ]);
-        repositories.value = repos.items;
-        let remembered = "";
-        try {
-          remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
-        } catch {
-          // Browser storage may be unavailable in hardened embedded views.
-        }
-        form.repository_url = resolvePublishRepositoryUrl(
-          repositories.value,
-          form.repository_url,
-          remembered
-        );
-        await applySelectedRepository();
-        pendingPublications.value = pending.items;
-      } catch (reason) {
-        if (!(reason instanceof ApiError && reason.status === 401)) throw reason;
-        status.value.github.authenticated = false;
-        repositories.value = [];
-        error.value = reason.message;
-      }
-    } else {
-      repositories.value = [];
-    }
-    if (selected.value) {
-      selected.value = products.value.find((item) =>
-        item.id === selected.value?.id
-        && item.source.owner === selected.value?.source.owner
-        && item.source.repo === selected.value?.source.repo
-      ) || null;
-    }
-  } catch (reason) {
-    error.value = errorMessage(reason);
-  } finally {
-    loading.value = false;
+function applyCatalog(snapshot: CatalogSnapshot<Source, Product>) {
+  sources.value = snapshot.sources;
+  products.value = snapshot.products;
+  if (selected.value) {
+    selected.value = snapshot.products.find((item) => productKey(item) === productKey(selected.value)) || null;
   }
+}
+
+function invalidateCatalogCache() {
+  catalogRequests.invalidate();
+  const scope = status.value?.catalog_cache_scope;
+  if (scope) clearCatalogCache(scope);
+}
+
+function requestCatalog() {
+  return catalogRequests.get();
+}
+
+let catalogRefreshInFlight: Promise<void> | null = null;
+function refreshCatalog(): Promise<void> {
+  if (catalogRefreshInFlight) return catalogRefreshInFlight;
+  const task = (async () => {
+    catalogRefreshing.value = true;
+    try {
+      let snapshot = await requestCatalog();
+      while (!catalogRequests.isCurrent()) snapshot = await requestCatalog();
+      applyCatalog(snapshot);
+      const scope = status.value?.catalog_cache_scope;
+      if (scope) writeCatalogCache(scope, snapshot);
+    } finally {
+      catalogRefreshing.value = false;
+    }
+  })();
+  catalogRefreshInFlight = task;
+  void task.then(
+    () => { if (catalogRefreshInFlight === task) catalogRefreshInFlight = null; },
+    () => { if (catalogRefreshInFlight === task) catalogRefreshInFlight = null; },
+  );
+  return task;
+}
+
+function restoreCatalogCache(s: Status) {
+  const scope = s.catalog_cache_scope;
+  if (!scope) return null;
+  const cached = readCatalogCache<Source, Product>(scope);
+  if (cached) applyCatalog(cached);
+  return cached;
+}
+
+function load(): Promise<void> {
+  if (loadInFlight) return loadInFlight;
+  const task = (async () => {
+    const showInitialLoading = !loadAttempted;
+    if (showInitialLoading) loading.value = true;
+    restorePublishOperation();
+    clearMessages();
+    try {
+      const [s, ops] = await Promise.all([
+        api<Status>("/status"),
+        api<{ items: Operation[] }>("/operations"),
+      ]);
+      status.value = s;
+      updateOperations(ops.items);
+      syncPublishOperation(ops.items);
+      for (const operation of ops.items) {
+        if (operation.kind === "publisher-manage" && operation.status === "running") {
+          publisherManagementOperationIds[operation.id] = true;
+          publisherManagementOperationSynced[operation.id] = false;
+        }
+      }
+      const cached = restoreCatalogCache(s);
+      const operationChangedCatalog = !!cached && operationsChangedCatalogAfter(ops.items, cached.savedAt);
+      if (cached) loading.value = false;
+      if (operationChangedCatalog) invalidateCatalogCache();
+      if (!cached || !cached.fresh || operationChangedCatalog) await refreshCatalog();
+      if (s.github.authenticated) {
+        try {
+          const [repos, pending] = await Promise.all([
+            api<{ items: PublishRepository[] }>("/github/repositories"),
+            api<{ items: { tag: string }[] }>("/publisher/pending"),
+          ]);
+          repositories.value = repos.items;
+          let remembered = "";
+          try {
+            remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
+          } catch {
+            // Browser storage may be unavailable in hardened embedded views.
+          }
+          form.repository_url = resolvePublishRepositoryUrl(
+            repositories.value,
+            form.repository_url,
+            remembered
+          );
+          await applySelectedRepository();
+          pendingPublications.value = pending.items;
+        } catch (reason) {
+          if (!(reason instanceof ApiError && reason.status === 401)) throw reason;
+          status.value.github.authenticated = false;
+          repositories.value = [];
+          error.value = reason.message;
+        }
+      } else {
+        repositories.value = [];
+      }
+    } catch (reason) {
+      error.value = errorMessage(reason);
+    } finally {
+      loading.value = false;
+      loadAttempted = true;
+    }
+  })();
+  loadInFlight = task;
+  void task.then(
+    () => { if (loadInFlight === task) loadInFlight = null; },
+    () => { if (loadInFlight === task) loadInFlight = null; },
+  );
+  return task;
 }
 async function withBusy(name: string, action: () => Promise<void>) {
   busy.value = name;
@@ -1057,13 +1135,15 @@ async function addSource() {
   await withBusy("add-source", async () => {
     await post("/subscriptions", { url: sourceUrl.value });
     sourceUrl.value = "";
-    await load();
+    invalidateCatalogCache();
+    await refreshCatalog();
   });
 }
 async function refreshSource(item: Source) {
   await withBusy(`refresh-${item.owner}-${item.repo}`, async () => {
     await post(`/subscriptions/${item.owner}/${item.repo}/refresh`, {});
-    await load();
+    invalidateCatalogCache();
+    await refreshCatalog();
   });
 }
 async function refreshAllSources() {
@@ -1076,7 +1156,8 @@ async function refreshAllSources() {
         failed += 1;
       }
     }
-    await load();
+    invalidateCatalogCache();
+    await refreshCatalog();
     notice.value = failed ? t.value("someSourcesFailed", { count: failed }) : t.value("allSourcesRefreshed");
   });
 }
@@ -1084,7 +1165,8 @@ async function removeSource(item: Source) {
   if (!confirm(t.value("confirmRemoveSource"))) return;
   await withBusy(`remove-${item.owner}-${item.repo}`, async () => {
     await remove(`/subscriptions/${item.owner}/${item.repo}`);
-    await load();
+    invalidateCatalogCache();
+    await refreshCatalog();
   });
 }
 function downloadNeedsPreflight(check: DownloadPreflight) {
@@ -1208,7 +1290,8 @@ async function deleteLocalVersion(item: Product, version: Version) {
     await remove("/workflows/local", {
       owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
     });
-    await load();
+    invalidateCatalogCache();
+    await refreshCatalog();
   });
 }
 async function revealLocalVersion(item: Product, version: Version) {
@@ -1415,6 +1498,10 @@ function scheduleOperationPoll() {
 async function pollOperations() {
   if (operationPollInFlight) return;
   operationPollInFlight = true;
+  const activeBefore = new Map(
+    operations.value.filter(isOperationActive).map((operation) => [operation.id, operation]),
+  );
+  let catalogReloaded = false;
   try {
     updateOperations((await api<{ items: Operation[] }>("/operations")).items);
     syncPublishOperation(operations.value);
@@ -1431,6 +1518,7 @@ async function pollOperations() {
       try {
         if (operation.status === "success") {
           await reloadAfterManage(target);
+          catalogReloaded = true;
           notice.value = t.value("operationCompleted", { operation: operationKindLabel(operation.kind, operation.metadata) });
         } else {
           if (target && manageRepositoryFullName().toLowerCase() === target.toLowerCase()) await loadManaged();
@@ -1476,19 +1564,17 @@ async function pollOperations() {
         try { await fetchDependencyPlan(selected.value, activeDetailVersion.value); } catch { /* manual check remains available */ }
       }
     }
-    if (operations.value.some(isOperationActive)) {
-      scheduleOperationPoll();
-    } else {
-      await Promise.all([
-        api<{ items: Product[] }>("/workflows").then((value) => {
-          products.value = value.items;
-          if (selected.value) {
-            selected.value = value.items.find((item) => productKey(item) === productKey(selected.value)) || selected.value;
-          }
-        }),
-        api<{ items: Source[] }>("/subscriptions").then((value) => sources.value = value.items),
-      ]);
+    const downloadCompleted = [...activeBefore.values()].some((previous) => {
+      if (previous.kind !== "download") return false;
+      const current = operations.value.find((operation) => operation.id === previous.id);
+      return current?.status === "success";
+    });
+    if (downloadCompleted && !catalogReloaded) {
+      invalidateCatalogCache();
+      await refreshCatalog();
+      catalogReloaded = true;
     }
+    if (operations.value.some(isOperationActive)) scheduleOperationPoll();
   } catch (reason) {
     error.value = errorMessage(reason);
     scheduleOperationPoll();
@@ -1496,6 +1582,18 @@ async function pollOperations() {
     operationPollInFlight = false;
   }
 }
+async function refreshStartupCatalog() {
+  try {
+    const result = await post<{ catalog_changed?: boolean }>("/update-notifications", {});
+    if (result.catalog_changed) {
+      invalidateCatalogCache();
+      await refreshCatalog();
+    }
+  } catch (reason) {
+    error.value = errorMessage(reason);
+  }
+}
+
 function requestCurrentCanvasWorkflow() {
   const message = { type: "AAALICE_WORKFLOW_HUB_REQUEST_CURRENT_WORKFLOW" };
   const targets = new Set<Window>();
@@ -1865,6 +1963,7 @@ async function reloadAfterManage(targetFullName = manageRepositoryFullName()) {
   if (target && manageRepositoryFullName().toLowerCase() === target) await loadManaged();
   const source = sources.value.find((item) => `${item.owner}/${item.repo}`.toLowerCase() === target);
   if (source) await post(`/subscriptions/${source.owner}/${source.repo}/refresh`, {});
+  invalidateCatalogCache();
   await load();
 }
 function openProductEditor(product: ManagedProduct) {
@@ -1968,9 +2067,7 @@ onMounted(async () => {
   try {
     await load();
     await pollOperations();
-    startupRefreshTimer = window.setTimeout(() => {
-      void post("/update-notifications", {}).then(() => load()).catch((reason) => { error.value = errorMessage(reason); });
-    }, 300);
+    void refreshStartupCatalog();
   } catch (reason) { error.value = errorMessage(reason); }
 });
 onBeforeUnmount(() => {
@@ -1979,7 +2076,6 @@ onBeforeUnmount(() => {
   clearTimeout(operationTimer);
   clearTimeout(loginTimer);
   clearTimeout(copiedTimer);
-  clearTimeout(startupRefreshTimer);
   managerSocket?.close();
 });
 </script>
@@ -2055,10 +2151,10 @@ onBeforeUnmount(() => {
                   <button v-for="item in (['all','downloaded','updates','archived'] as const)" :key="item"
                     :class="{ active: filter === item }" @click="filter = item">{{ t(item) }}</button>
                 </div>
-                <button class="toolbar-refresh" :disabled="!!busy || !sources.length" @click="refreshAllSources">
-                  <RefreshCw :size="16" :class="{ spinning: busy === 'refresh-all' }" /><span>{{ t("refreshAll") }}</span>
+                <button class="toolbar-refresh" :disabled="!!busy || catalogRefreshing || !sources.length" :aria-busy="catalogRefreshing" @click="refreshAllSources">
+                  <RefreshCw :size="16" :class="{ spinning: busy === 'refresh-all' || catalogRefreshing }" /><span>{{ t("refreshAll") }}</span>
                 </button>
-                <button class="source-toggle" :class="{ active: sourceComposerOpen }" @click="sourceComposerOpen ? sourceComposerOpen = false : openSourceComposer()">
+                <button class="source-toggle" :disabled="!!busy" :class="{ active: sourceComposerOpen }" @click="sourceComposerOpen ? sourceComposerOpen = false : openSourceComposer()">
                   <FolderGit2 :size="16" /><span>{{ t("sourcesLabel") }}</span><i>{{ sources.length }}</i>
                 </button>
               </div>
@@ -2068,7 +2164,7 @@ onBeforeUnmount(() => {
               <div class="source-form">
                 <GitBranch :size="18" />
                 <input ref="sourceInput" v-model.trim="sourceUrl" :placeholder="t('sourcePlaceholder')" @keyup.enter="addSource" />
-                <button class="primary" :disabled="!sourceUrl || !!busy" @click="addSource">
+                <button class="primary" :disabled="!sourceUrl || !!busy || catalogRefreshing" @click="addSource">
                   <Plus :size="17" />{{ t("add") }}
                 </button>
               </div>
@@ -2078,8 +2174,8 @@ onBeforeUnmount(() => {
               <div v-for="item in sources" :key="item.url" class="source-chip" :class="{ invalid: item.error }" :title="sourceErrorMessage(item)">
                 <AlertCircle v-if="item.error" :size="17" /><FolderGit2 v-else :size="17" />
                 <span>{{ item.owner }}/{{ item.repo }}</span>
-                <button :title="t('refresh')" :aria-label="t('refresh')" @click="refreshSource(item)"><RefreshCw :size="15" /></button>
-                <button :title="t('remove')" :aria-label="t('remove')" @click="removeSource(item)"><Trash2 :size="15" /></button>
+                <button :title="t('refresh')" :aria-label="t('refresh')" :disabled="!!busy || catalogRefreshing" @click="refreshSource(item)"><RefreshCw :size="15" /></button>
+                <button :title="t('remove')" :aria-label="t('remove')" :disabled="!!busy || catalogRefreshing" @click="removeSource(item)"><Trash2 :size="15" /></button>
                 <a class="source-chip-action" :href="item.url" target="_blank" rel="noopener"
                   :title="t('openSource')" :aria-label="`${t('openSource')}: ${item.owner}/${item.repo}`" @click.stop>
                   <ExternalLink :size="15" />

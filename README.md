@@ -14,7 +14,7 @@
 
 ### 订阅与下载
 
-- 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，在聚合目录中搜索、筛选并浏览历史版本和更新日志；目录通过 GitHub Raw 读取并使用本地缓存，不依赖匿名 GitHub REST API 限额。
+- 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，在聚合目录中搜索、筛选并浏览历史版本和更新日志；目录通过 GitHub Raw 读取并使用按用户隔离的本地缓存，不依赖匿名 GitHub REST API 限额。页面打开会优先复用近期目录快照，后台只在需要时静默重新验证，避免重复加载和页面闪烁。
 - 仓库默认分支按“类别 / 名称 / 版本”保存全部工作流文件，访问仓库即可浏览、备份或直接下载，不必逐个翻找 Release。
 - 按版本下载并校验 Release ZIP；每个本地版本保存为独立工作流文件，可从详情页直接打开所在目录。
 - 详情页按版本显示内核、插件和随包图片状态；点击顶部状态控件查看完整明细。更新日志支持完整 GitHub Flavored Markdown 渲染并经过安全过滤，长日志在独立滚动区域内显示，工作流包不包含 LoRA 依赖。
@@ -68,7 +68,7 @@ workflows/Workflow Hub/{owner}-{repo}-{source-hash}/{workflow-id}/{名称}-v{版
 - [故障排查](docs/troubleshooting.md)
 - [工作流目录与包协议](docs/protocol.md)
 - [安全边界](docs/security.md)
-- 设计与决策：[项目愿景](docs/vision.md) · [已实现功能](docs/features.md) · [术语与领域上下文](docs/context.md) · [ADR 目录](docs/adr/)
+- 设计与决策：[项目愿景](docs/vision.md) · [已实现功能](docs/features.md) · [术语与领域上下文](docs/context.md) · [目录缓存决策](docs/adr/0003-catalog-cache-and-startup-refresh.md) · [ADR 目录](docs/adr/)
 
 ## License
 

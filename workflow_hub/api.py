@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
@@ -45,7 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "web" / "app"
 MAX_JSON = 20 * 1024 * 1024
 _registered = False
-_startup_refresh_tasks: dict[str, asyncio.Task[list[dict[str, str]]]] = {}
+_startup_refresh_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 _startup_notifications_delivered: set[str] = set()
 
 
@@ -635,9 +636,20 @@ async def _run_dependency_operation(
         await _perform_dependency_operation(operation, actions, manager_origin)
 
 
-async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> list[dict[str, str]]:
+async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> tuple[list[dict[str, str]], bool]:
     cache = subscription_cache_path(storage, owner, repo)
+    previous_error = None
     try:
+        previous_source = next(
+            (
+                item for item in await list_subscriptions(storage)
+                if isinstance(item, dict)
+                and str(item.get("owner", "")).casefold() == owner.casefold()
+                and str(item.get("repo", "")).casefold() == repo.casefold()
+            ),
+            None,
+        )
+        previous_error = previous_source.get("error") if previous_source else None
         previous = None
         if cache.exists():
             try:
@@ -645,10 +657,17 @@ async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -
             except (OSError, ValidationError, ValueError):
                 clear_subscription_cache(storage, owner, repo)
         result = await refresh_subscription(storage, owner, repo)
+        catalog_changed = bool(
+            result["changed"]
+            or result["catalog_missing"]
+            or previous_error
+        )
+        if not catalog_changed:
+            return [], False
         if not result["changed"] or previous is None:
-            return []
+            return [], True
         current = Catalog.model_validate_json(subscription_cache_path(storage, owner, repo).read_bytes())
-        return find_catalog_updates(previous, current, owner, repo)
+        return find_catalog_updates(previous, current, owner, repo), True
     except Exception:
         def record_error(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for item in items:
@@ -657,19 +676,22 @@ async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -
             return items
 
         await storage.update_json("subscriptions.json", [], record_error)
-        return []
+        return [], True
 
 
-async def _refresh_startup_sources(storage: UserStorage) -> list[dict[str, str]]:
+async def _refresh_startup_sources(storage: UserStorage) -> dict[str, Any]:
     updates: list[dict[str, str]] = []
+    catalog_changed = False
     for source in await list_subscriptions(storage):
         if not isinstance(source, dict) or not source.get("owner") or not source.get("repo"):
             continue
-        updates.extend(await _refresh_startup_source(storage, str(source["owner"]), str(source["repo"])))
-    return updates
+        source_updates, source_changed = await _refresh_startup_source(storage, str(source["owner"]), str(source["repo"]))
+        updates.extend(source_updates)
+        catalog_changed = catalog_changed or source_changed
+    return {"items": updates, "catalog_changed": catalog_changed}
 
 
-def _startup_refresh(storage: UserStorage) -> asyncio.Task[list[dict[str, str]]]:
+def _startup_refresh(storage: UserStorage) -> asyncio.Task[dict[str, Any]]:
     task = _startup_refresh_tasks.get(storage.key)
     if task is None:
         task = asyncio.create_task(_refresh_startup_sources(storage))
@@ -717,6 +739,7 @@ def register_routes() -> None:
         return web.json_response(
             {
                 "plugin_version": "1.0.1",
+                "catalog_cache_scope": hashlib.sha256(storage.key.encode("utf-8")).hexdigest()[:32],
                 "minimum_frontend": "1.33.9",
                 "comfyui_version": current_comfyui_version(),
                 "git": local_git_status(),
@@ -735,11 +758,11 @@ def register_routes() -> None:
     async def update_notifications(request: web.Request) -> web.StreamResponse:
         await _json(request)
         storage = UserStorage.from_request(request)
-        updates = await _startup_refresh(storage)
+        result = await _startup_refresh(storage)
         if storage.key in _startup_notifications_delivered:
-            return web.json_response({"items": []})
+            return web.json_response({"items": [], "catalog_changed": False})
         _startup_notifications_delivered.add(storage.key)
-        return web.json_response({"items": updates})
+        return web.json_response(result)
 
     @routes.get(f"{BASE}/subscriptions")
     @endpoint

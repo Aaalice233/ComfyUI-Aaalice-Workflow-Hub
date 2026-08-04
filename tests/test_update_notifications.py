@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
+from workflow_hub.api import _refresh_startup_source
 from workflow_hub.catalog import Catalog
 from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager, subscription_cache_path
 from workflow_hub.storage import UserStorage
@@ -75,6 +76,46 @@ class UpdateNotificationTests(unittest.TestCase):
     def test_rejects_a_missing_downloaded_file(self) -> None:
         with self.assertRaisesRegex(ValueError, "本地工作流文件不存在"):
             reveal_in_file_manager(Path("missing-workflow.json"))
+
+
+class StartupRefreshStateTests(IsolatedAsyncioTestCase):
+    async def test_reports_catalog_changes_for_the_frontend_revalidation(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": "etag",
+                "refreshed_at": "",
+                "error": None,
+            }])
+            subscription_cache_path(storage, "owner", "repo").write_bytes(EXAMPLE.read_bytes())
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(return_value={"changed": True, "catalog_missing": False})):
+                updates, changed = await _refresh_startup_source(storage, "owner", "repo")
+            self.assertEqual(updates, [])
+            self.assertTrue(changed)
+
+    async def test_reports_removed_catalogs_and_refresh_failures(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            await storage.write_json("subscriptions.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "url": "https://github.com/owner/repo",
+                "etag": "etag",
+                "refreshed_at": "",
+                "error": None,
+            }])
+            subscription_cache_path(storage, "owner", "repo").write_bytes(EXAMPLE.read_bytes())
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(return_value={"changed": False, "catalog_missing": True})):
+                _, removed = await _refresh_startup_source(storage, "owner", "repo")
+            self.assertTrue(removed)
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(side_effect=RuntimeError("offline"))):
+                _, failed = await _refresh_startup_source(storage, "owner", "repo")
+            self.assertTrue(failed)
+            subscriptions = await storage.read_json("subscriptions.json", [])
+            self.assertEqual(subscriptions[0]["error"], "subscription.refresh_failed")
 
 
 class SubscriptionStateTests(IsolatedAsyncioTestCase):
