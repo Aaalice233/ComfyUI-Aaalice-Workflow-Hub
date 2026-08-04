@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
 from urllib.parse import urlparse
@@ -46,8 +47,12 @@ ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "web" / "app"
 MAX_JSON = 20 * 1024 * 1024
 _registered = False
-_startup_refresh_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
-_startup_notifications_delivered: set[str] = set()
+_SETTINGS_FILE = "settings.json"
+_UPDATE_CHECK_STATE = "update-notifications.json"
+_DEFAULT_UPDATE_SETTINGS = {"auto_update_check": True, "update_check_interval_hours": 24}
+_MIN_UPDATE_INTERVAL_HOURS = 1
+_MAX_UPDATE_INTERVAL_HOURS = 168
+_notification_check_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
 
 async def _json(request: web.Request) -> dict[str, Any]:
@@ -269,9 +274,11 @@ def _response_error(exc: Exception) -> web.Response:
 def endpoint(handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
     async def wrapped(request: web.Request) -> web.StreamResponse:
         try:
-            return await handler(request)
+            response = await handler(request)
         except Exception as exc:
-            return _response_error(exc)
+            response = _response_error(exc)
+        response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     return wrapped
 
@@ -636,7 +643,13 @@ async def _run_dependency_operation(
         await _perform_dependency_operation(operation, actions, manager_origin)
 
 
-async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -> tuple[list[dict[str, str]], bool]:
+async def _refresh_startup_source(
+    storage: UserStorage,
+    owner: str,
+    repo: str,
+    *,
+    force: bool = False,
+) -> tuple[list[dict[str, str]], bool, bool]:
     cache = subscription_cache_path(storage, owner, repo)
     previous_error = None
     try:
@@ -656,18 +669,18 @@ async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -
                 previous = Catalog.model_validate_json(cache.read_bytes())
             except (OSError, ValidationError, ValueError):
                 clear_subscription_cache(storage, owner, repo)
-        result = await refresh_subscription(storage, owner, repo)
+        result = await refresh_subscription(storage, owner, repo, force=force)
         catalog_changed = bool(
             result["changed"]
             or result["catalog_missing"]
             or previous_error
         )
         if not catalog_changed:
-            return [], False
+            return [], False, False
         if not result["changed"] or previous is None:
-            return [], True
+            return [], True, False
         current = Catalog.model_validate_json(subscription_cache_path(storage, owner, repo).read_bytes())
-        return find_catalog_updates(previous, current, owner, repo), True
+        return find_catalog_updates(previous, current, owner, repo), True, False
     except Exception:
         def record_error(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for item in items:
@@ -676,26 +689,117 @@ async def _refresh_startup_source(storage: UserStorage, owner: str, repo: str) -
             return items
 
         await storage.update_json("subscriptions.json", [], record_error)
-        return [], True
+        return [], True, True
 
 
-async def _refresh_startup_sources(storage: UserStorage) -> dict[str, Any]:
+async def _refresh_startup_sources(storage: UserStorage, *, force: bool = False) -> dict[str, Any]:
     updates: list[dict[str, str]] = []
     catalog_changed = False
+    failed = False
     for source in await list_subscriptions(storage):
         if not isinstance(source, dict) or not source.get("owner") or not source.get("repo"):
             continue
-        source_updates, source_changed = await _refresh_startup_source(storage, str(source["owner"]), str(source["repo"]))
+        source_updates, source_changed, source_failed = await _refresh_startup_source(
+            storage,
+            str(source["owner"]),
+            str(source["repo"]),
+            force=force,
+        )
         updates.extend(source_updates)
         catalog_changed = catalog_changed or source_changed
-    return {"items": updates, "catalog_changed": catalog_changed}
+        failed = failed or source_failed
+    return {"items": updates, "catalog_changed": catalog_changed, "failed": failed}
 
 
-def _startup_refresh(storage: UserStorage) -> asyncio.Task[dict[str, Any]]:
-    task = _startup_refresh_tasks.get(storage.key)
-    if task is None:
-        task = asyncio.create_task(_refresh_startup_sources(storage))
-        _startup_refresh_tasks[storage.key] = task
+async def _read_update_settings(storage: UserStorage) -> dict[str, Any]:
+    try:
+        value = await storage.read_json(_SETTINGS_FILE, {})
+    except (OSError, ValueError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    enabled = value.get("auto_update_check")
+    interval = value.get("update_check_interval_hours")
+    return {
+        "auto_update_check": enabled if isinstance(enabled, bool) else _DEFAULT_UPDATE_SETTINGS["auto_update_check"],
+        "update_check_interval_hours": interval
+        if isinstance(interval, int) and not isinstance(interval, bool) and _MIN_UPDATE_INTERVAL_HOURS <= interval <= _MAX_UPDATE_INTERVAL_HOURS
+        else _DEFAULT_UPDATE_SETTINGS["update_check_interval_hours"],
+    }
+
+
+async def _settings_payload(storage: UserStorage) -> dict[str, Any]:
+    settings = await _read_update_settings(storage)
+    try:
+        state = await storage.read_json(_UPDATE_CHECK_STATE, {})
+    except (OSError, ValueError):
+        state = {}
+    last_checked_at = state.get("last_checked_at") if isinstance(state, dict) else None
+    return {**settings, "last_checked_at": last_checked_at if isinstance(last_checked_at, str) else None}
+
+
+def _notification_check_due(state: Any, now: datetime, interval_hours: int) -> bool:
+    if not isinstance(state, dict):
+        return True
+    value = state.get("last_checked_at")
+    if not isinstance(value, str) or not value:
+        return True
+    try:
+        checked_at = datetime.fromisoformat(value)
+    except ValueError:
+        return True
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    return now - checked_at >= timedelta(hours=interval_hours)
+
+
+async def _run_notification_check(storage: UserStorage) -> dict[str, Any]:
+    settings = await _read_update_settings(storage)
+    if not settings["auto_update_check"]:
+        return {"items": [], "catalog_changed": False, "checked": False, "enabled": False, "next_check_at": None}
+    now = datetime.now(timezone.utc)
+    try:
+        state = await storage.read_json(_UPDATE_CHECK_STATE, {})
+    except (OSError, ValueError):
+        state = {}
+    if not _notification_check_due(state, now, settings["update_check_interval_hours"]):
+        checked_at = datetime.fromisoformat(state["last_checked_at"])
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=timezone.utc)
+        next_check = checked_at + timedelta(hours=settings["update_check_interval_hours"])
+        return {
+            "items": [],
+            "catalog_changed": False,
+            "checked": False,
+            "enabled": True,
+            "next_check_at": next_check.isoformat(),
+        }
+
+    result = await _refresh_startup_sources(storage, force=True)
+    if not result["failed"]:
+        checked_at = datetime.now(timezone.utc)
+        await storage.write_json(_UPDATE_CHECK_STATE, {"last_checked_at": checked_at.isoformat()})
+        next_check = checked_at + timedelta(hours=settings["update_check_interval_hours"])
+    else:
+        next_check = datetime.now(timezone.utc) + timedelta(minutes=5)
+    return {
+        **result,
+        "checked": not result["failed"],
+        "enabled": True,
+        "next_check_at": next_check.isoformat(),
+    }
+
+
+def _notification_check(storage: UserStorage) -> asyncio.Task[dict[str, Any]]:
+    task = _notification_check_tasks.get(storage.key)
+    if task is None or task.done():
+        task = asyncio.create_task(_run_notification_check(storage))
+        _notification_check_tasks[storage.key] = task
+        task.add_done_callback(
+            lambda completed: _notification_check_tasks.pop(storage.key, None)
+            if _notification_check_tasks.get(storage.key) is completed
+            else None
+        )
     return task
 
 
@@ -733,7 +837,6 @@ def register_routes() -> None:
     @endpoint
     async def status(request: web.Request) -> web.StreamResponse:
         storage = UserStorage.from_request(request)
-        _startup_refresh(storage)
         credential = await tokens.get_record(storage.key)
         github_user = credential.get("user") if credential and isinstance(credential.get("user"), dict) else None
         return web.json_response(
@@ -742,6 +845,7 @@ def register_routes() -> None:
                 "catalog_cache_scope": hashlib.sha256(storage.key.encode("utf-8")).hexdigest()[:32],
                 "minimum_frontend": "1.33.9",
                 "comfyui_version": current_comfyui_version(),
+                "settings": await _settings_payload(storage),
                 "git": local_git_status(),
                 "manager": local_manager_status(),
                 "github": {
@@ -753,16 +857,53 @@ def register_routes() -> None:
             }
         )
 
+    @routes.post(f"{BASE}/settings")
+    @endpoint
+    async def settings_update(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        updates: dict[str, Any] = {}
+        if "auto_update_check" in data:
+            if type(data["auto_update_check"]) is not bool:
+                raise UserFacingError(
+                    "settings.invalid",
+                    {"minimum": _MIN_UPDATE_INTERVAL_HOURS, "maximum": _MAX_UPDATE_INTERVAL_HOURS},
+                )
+            updates["auto_update_check"] = data["auto_update_check"]
+        if "update_check_interval_hours" in data:
+            interval = data["update_check_interval_hours"]
+            if (
+                type(interval) is not int
+                or not _MIN_UPDATE_INTERVAL_HOURS <= interval <= _MAX_UPDATE_INTERVAL_HOURS
+            ):
+                raise UserFacingError(
+                    "settings.invalid",
+                    {"minimum": _MIN_UPDATE_INTERVAL_HOURS, "maximum": _MAX_UPDATE_INTERVAL_HOURS},
+                )
+            updates["update_check_interval_hours"] = interval
+        if not updates:
+            raise UserFacingError(
+                "settings.invalid",
+                {"minimum": _MIN_UPDATE_INTERVAL_HOURS, "maximum": _MAX_UPDATE_INTERVAL_HOURS},
+            )
+        storage = UserStorage.from_request(request)
+        previous = await _read_update_settings(storage)
+
+        def mutate(value: Any) -> dict[str, Any]:
+            settings = dict(value) if isinstance(value, dict) else {}
+            settings.update(updates)
+            return settings
+
+        await storage.update_json(_SETTINGS_FILE, {}, mutate)
+        if updates.get("auto_update_check") is True and not previous["auto_update_check"]:
+            await storage.write_json(_UPDATE_CHECK_STATE, {})
+        return web.json_response(await _settings_payload(storage))
+
     @routes.post(f"{BASE}/update-notifications")
     @endpoint
     async def update_notifications(request: web.Request) -> web.StreamResponse:
         await _json(request)
         storage = UserStorage.from_request(request)
-        result = await _startup_refresh(storage)
-        if storage.key in _startup_notifications_delivered:
-            return web.json_response({"items": [], "catalog_changed": False})
-        _startup_notifications_delivered.add(storage.key)
-        return web.json_response(result)
+        return web.json_response(await _notification_check(storage))
 
     @routes.get(f"{BASE}/subscriptions")
     @endpoint

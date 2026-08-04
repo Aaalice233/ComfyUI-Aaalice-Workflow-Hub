@@ -18,6 +18,7 @@ describe("api", () => {
 
     const [, options] = fetchMock.mock.calls[0];
     expect(options.body).toBe("{}");
+    expect(options.cache).toBe("no-store");
     expect(options.headers.get("Content-Type")).toBe("application/json");
   });
 

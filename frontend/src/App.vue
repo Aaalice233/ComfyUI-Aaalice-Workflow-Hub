@@ -31,6 +31,7 @@ import {
   Plus,
   RefreshCw,
   Search as SearchIcon,
+  Settings as SettingsIcon,
   ShieldCheck,
   Trash2,
   TriangleAlert,
@@ -84,6 +85,11 @@ type Status = {
   plugin_version: string;
   catalog_cache_scope?: string;
   comfyui_version: string;
+  settings?: {
+    auto_update_check: boolean;
+    update_check_interval_hours: number;
+    last_checked_at?: string | null;
+  };
   git: { available: boolean; source?: string };
   manager?: { available: boolean; compatible: boolean; version?: string; api?: string };
   github: { configured: boolean; authenticated: boolean; user?: { login: string; avatar_url: string }; persistent_credentials: boolean };
@@ -173,6 +179,11 @@ const busy = ref("");
 const error = ref("");
 const notice = ref("");
 const drawer = ref(false);
+const settingsOpen = ref(false);
+const settingsSaving = ref(false);
+const settingsSaved = ref(false);
+const settingsError = ref("");
+const settingsDraft = reactive({ auto_update_check: true, update_check_interval_hours: 24 });
 const operations = ref<Operation[]>([]);
 const repositories = ref<PublishRepository[]>([]);
 const createRepositoryName = ref("");
@@ -328,6 +339,7 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "subscription.refresh_failed": "subscriptionRefreshFailed",
   "subscription.cache_unavailable": "subscriptionCacheUnavailable",
   "subscription.cache_migration_conflict": "subscriptionCacheMigrationConflict",
+  "settings.invalid": "settingsInvalid",
 };
 
 const form = reactive({
@@ -990,6 +1002,8 @@ function handleWorkspaceShortcut(event: KeyboardEvent) {
   if (event.key === "/" && !editing && tab.value === "subscribe") {
     event.preventDefault();
     searchInput.value?.focus();
+  } else if (event.key === "Escape" && settingsOpen.value) {
+    closeSettings();
   } else if (event.key === "Escape" && resourceDialog.value) {
     closeResourceDialog();
   } else if (event.key === "Escape" && document.activeElement === searchInput.value && search.value) {
@@ -1131,6 +1145,51 @@ async function withBusy(name: string, action: () => Promise<void>) {
   clearMessages();
   try { await action(); } catch (reason) { error.value = errorMessage(reason); }
   finally { busy.value = ""; }
+}
+function openSettings() {
+  const current = status.value?.settings;
+  settingsDraft.auto_update_check = current?.auto_update_check ?? true;
+  settingsDraft.update_check_interval_hours = current?.update_check_interval_hours ?? 24;
+  settingsError.value = "";
+  settingsSaved.value = false;
+  settingsOpen.value = true;
+}
+function closeSettings() {
+  if (settingsSaving.value) return;
+  settingsOpen.value = false;
+  settingsError.value = "";
+}
+function notifyHostSettingsChanged() {
+  const targets = new Set<Window>();
+  if (window.parent !== window) targets.add(window.parent);
+  if (window.opener && !window.opener.closed) targets.add(window.opener);
+  for (const target of targets) target.postMessage({ type: "AAALICE_WORKFLOW_HUB_SETTINGS_CHANGED" }, window.location.origin);
+}
+async function saveSettings() {
+  const interval = Number(settingsDraft.update_check_interval_hours);
+  if (!Number.isInteger(interval) || interval < 1 || interval > 168) {
+    settingsError.value = t.value("updateCheckIntervalInvalid", { minimum: 1, maximum: 168 });
+    settingsSaved.value = false;
+    return;
+  }
+  settingsSaving.value = true;
+  settingsError.value = "";
+  settingsSaved.value = false;
+  try {
+    const saved = await post<NonNullable<Status["settings"]>>("/settings", {
+      auto_update_check: settingsDraft.auto_update_check,
+      update_check_interval_hours: interval,
+    });
+    settingsDraft.auto_update_check = saved.auto_update_check;
+    settingsDraft.update_check_interval_hours = saved.update_check_interval_hours;
+    if (status.value) status.value.settings = saved;
+    settingsSaved.value = true;
+    notifyHostSettingsChanged();
+  } catch (reason) {
+    settingsError.value = errorMessage(reason);
+  } finally {
+    settingsSaving.value = false;
+  }
 }
 async function addSource() {
   sourceUrl.value = sourceUrl.value.trim();
@@ -2114,6 +2173,9 @@ onBeforeUnmount(() => {
 
       <div class="rail-spacer" />
       <div class="rail-actions">
+        <button class="rail-action" :title="t('settings')" :aria-label="t('settings')" :disabled="settingsSaving" @click="openSettings">
+          <SettingsIcon :size="17" /><span>{{ t("settings") }}</span>
+        </button>
         <button class="rail-action" :title="t('activities')" :aria-label="t('activities')" @click="drawer = !drawer">
           <ActivityIcon :size="17" /><span>{{ t("activities") }}</span>
           <i v-if="operations.some(isOperationActive)" class="pulse" />
@@ -2899,6 +2961,44 @@ onBeforeUnmount(() => {
         <div class="manage-dialog-actions">
           <button class="ghost" @click="editingChangelog = null">{{ t("cancel") }}</button>
           <button class="primary" :disabled="!!busy || publisherManagementOperationRunning || !editingChangelog.text.trim()" @click="saveChangelogEditor">{{ t("save") }}</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="settingsOpen" class="backdrop" @click.self="closeSettings">
+      <section class="settings-dialog" role="dialog" aria-modal="true" :aria-label="t('settings')">
+        <div class="settings-dialog-head">
+          <div class="settings-dialog-title"><span class="section-icon"><SettingsIcon :size="18" /></span><h2>{{ t("settings") }}</h2></div>
+          <button class="icon-button" :title="t('close')" :aria-label="t('close')" :disabled="settingsSaving" @click="closeSettings"><X :size="18" /></button>
+        </div>
+        <div class="settings-dialog-body">
+          <label class="settings-toggle-row">
+            <span class="settings-toggle-copy">
+              <strong>{{ t("autoUpdateCheck") }}</strong>
+              <small>{{ t("autoUpdateCheckHint") }}</small>
+            </span>
+            <input v-model="settingsDraft.auto_update_check" type="checkbox" @change="settingsSaved = false" />
+          </label>
+          <label class="settings-field">
+            <span>{{ t("updateCheckInterval") }}</span>
+            <div class="settings-number-input">
+              <input v-model.number="settingsDraft.update_check_interval_hours" type="number" min="1" max="168" step="1" :disabled="!settingsDraft.auto_update_check" @input="settingsSaved = false" />
+              <span>{{ t("hours") }}</span>
+            </div>
+            <small>{{ t("updateCheckIntervalHint", { hours: settingsDraft.update_check_interval_hours }) }}</small>
+          </label>
+          <p v-if="settingsError" class="settings-inline-error"><AlertCircle :size="16" />{{ settingsError }}</p>
+          <p v-else-if="settingsSaved" class="settings-inline-success"><CheckCircle2 :size="16" />{{ t("settingsSaved") }}</p>
+          <p v-if="status?.settings?.last_checked_at" class="settings-last-check">
+            {{ t("lastUpdateCheck", { time: operationTimeLabel(status.settings.last_checked_at) }) }}
+          </p>
+        </div>
+        <div class="settings-dialog-actions">
+          <button class="ghost" :disabled="settingsSaving" @click="closeSettings">{{ t("cancel") }}</button>
+          <button class="primary" :disabled="settingsSaving" @click="saveSettings">
+            <LoaderCircle v-if="settingsSaving" :size="16" class="dependency-task-spin" />
+            <Check v-else :size="16" />{{ t("save") }}
+          </button>
         </div>
       </section>
     </div>

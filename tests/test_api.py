@@ -1,7 +1,9 @@
 import json
 import unittest
 
-from workflow_hub.api import _guarded_github_call, _json, _response_error, _run
+from aiohttp import web
+
+from workflow_hub.api import _guarded_github_call, _json, _response_error, _run, endpoint
 from workflow_hub.errors import UserFacingError
 from workflow_hub.github import GitHubError, tokens
 from workflow_hub.operations import Operation
@@ -18,6 +20,15 @@ class RequestStub:
 
     async def read(self) -> bytes:
         return self._body
+
+
+class EndpointHeaderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_api_responses_are_not_cached(self) -> None:
+        async def handler(_request):
+            return web.json_response({"ok": True})
+
+        response = await endpoint(handler)(object())
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
 
 
 class JsonRequestTests(unittest.IsolatedAsyncioTestCase):

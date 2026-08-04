@@ -5058,6 +5058,147 @@ pre {
   font-weight: 650;
 }
 
+.settings-dialog {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: grid;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  border-radius: 16px;
+  background: #17181b;
+  box-shadow: 0 24px 64px rgb(0 0 0 / 45%), inset 0 1px rgb(255 255 255 / 5%);
+  transform: translate(-50%, -50%);
+}
+
+.settings-dialog-head,
+.settings-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-dialog-head {
+  padding: 18px 18px 14px;
+}
+
+.settings-dialog-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.settings-dialog-title h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.settings-dialog-body {
+  display: grid;
+  padding: 0 18px 18px;
+  gap: 18px;
+}
+
+.settings-toggle-row {
+  display: flex;
+  min-height: 58px;
+  padding: 13px 14px;
+  border-radius: 11px;
+  align-items: center;
+  justify-content: space-between;
+  background: rgb(var(--theme-rgb) / 8%);
+  cursor: pointer;
+  gap: 16px;
+}
+
+.settings-toggle-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.settings-toggle-copy strong,
+.settings-field > span {
+  color: var(--text-soft);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-toggle-copy small,
+.settings-field small,
+.settings-last-check {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-toggle-row input {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.settings-field {
+  display: grid;
+  gap: 7px;
+}
+
+.settings-number-input {
+  display: flex;
+  width: 170px;
+  min-height: 42px;
+  border-radius: 9px;
+  align-items: center;
+  background: rgb(0 0 0 / 18%);
+  gap: 8px;
+}
+
+.settings-number-input input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 0 10px 12px;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+}
+
+.settings-number-input span {
+  padding-right: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.settings-inline-error,
+.settings-inline-success {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  font-size: 13px;
+  line-height: 1.5;
+  gap: 7px;
+}
+
+.settings-inline-error {
+  color: var(--danger);
+}
+
+.settings-inline-success {
+  color: var(--success);
+}
+
+.settings-dialog-actions {
+  padding: 14px 18px 18px;
+  justify-content: flex-end;
+}
+
 .manage-dialog textarea {
   resize: vertical;
 }

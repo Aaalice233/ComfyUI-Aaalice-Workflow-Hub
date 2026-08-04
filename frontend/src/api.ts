@@ -19,7 +19,13 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const isWrite = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
   if (isWrite && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const body = isWrite && options.body === undefined ? "{}" : options.body;
-  const response = await fetch(`${BASE}${path}`, { ...options, body, headers, credentials: "same-origin" });
+  const response = await fetch(`${BASE}${path}`, {
+    ...options,
+    body,
+    headers,
+    credentials: "same-origin",
+    cache: options.cache ?? "no-store",
+  });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new ApiError(

@@ -5,6 +5,7 @@ const PAGE = "/workflow-hub";
 const ICON_CLASS = "aaalice-workflow-hub-icon";
 const ICON_STYLE_ID = "aaalice-workflow-hub-icon-style";
 const MODAL_ID = "aaalice-workflow-hub-modal";
+let workflowUpdateTimer = 0;
 const LIBRARY_BIG_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="18" x="3" y="3" rx="1"/><path d="M7 3v18"/><path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z"/></svg>`;
 
 function getComfyLocale() {
@@ -34,15 +35,31 @@ function handleLocaleChange(event) {
   );
 }
 
+function scheduleWorkflowUpdateCheck(nextCheckAt) {
+  window.clearTimeout(workflowUpdateTimer);
+  workflowUpdateTimer = 0;
+  if (!nextCheckAt) return;
+  const timestamp = Date.parse(nextCheckAt);
+  if (Number.isNaN(timestamp)) return;
+  const delay = Math.max(30_000, timestamp - Date.now());
+  workflowUpdateTimer = window.setTimeout(() => {
+    workflowUpdateTimer = 0;
+    void notifyWorkflowUpdates();
+  }, delay);
+}
+
 async function notifyWorkflowUpdates() {
   try {
     const response = await fetch("/workflow-hub/api/v1/update-notifications", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
       body: "{}",
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const { items } = await response.json();
+    const result = await response.json();
+    scheduleWorkflowUpdateCheck(result.next_check_at);
+    const { items } = result;
     if (!Array.isArray(items) || items.length === 0) return;
 
     const visible = items.slice(0, 3).map((item) => `${item.name} v${item.version}`);
@@ -57,6 +74,7 @@ async function notifyWorkflowUpdates() {
       life: 5000,
     });
   } catch (error) {
+    scheduleWorkflowUpdateCheck(new Date(Date.now() + 5 * 60 * 1000).toISOString());
     console.warn("[Aaalice Workflow Hub] Failed to check workflow updates.", error);
   }
 }
@@ -143,6 +161,10 @@ function closeHub() {
 
 function handleHubMessage(event) {
   if (event.origin !== window.location.origin) return;
+  if (event.data?.type === "AAALICE_WORKFLOW_HUB_SETTINGS_CHANGED") {
+    void notifyWorkflowUpdates();
+    return;
+  }
   if (event.data?.type === "AAALICE_WORKFLOW_HUB_CLOSE") {
     closeHub();
     return;
