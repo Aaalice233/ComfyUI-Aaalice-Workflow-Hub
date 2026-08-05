@@ -1,7 +1,7 @@
 import base64
 import unittest
 
-from workflow_hub.github import BranchState, GitHubClient, GitTreeFile, TokenStore
+from workflow_hub.github import BranchState, GitHubClient, GitHubError, GitTreeFile, TokenStore
 
 
 class NotModifiedResponse:
@@ -73,6 +73,27 @@ class CatalogClient(GitHubClient):
         return {"content": base64.b64encode(b"{}").decode(), "sha": "blob-sha"}, {"ETag": '"api-etag"'}
 
 
+class RateLimitedCatalogClient(GitHubClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    async def request(self, method: str, url: str, **kwargs):
+        self.calls.append((method, url, kwargs))
+        if url.startswith("https://api.github.com/"):
+            raise GitHubError(
+                "API rate limit exceeded for 192.0.2.1",
+                403,
+                {"message": "API rate limit exceeded for 192.0.2.1"},
+            )
+        return b"{}", {"ETag": 'W/"raw-etag"'}
+
+
+class ForbiddenCatalogClient(GitHubClient):
+    async def request(self, method: str, url: str, **kwargs):
+        raise GitHubError("Repository access blocked", 403, {"message": "Repository access blocked"})
+
+
 class WriteOnlyKeyring:
     def set_password(self, *_args):
         return None
@@ -117,6 +138,23 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.not_modified)
         self.assertEqual(result.etag, '"catalog-etag"')
+
+    async def test_catalog_rate_limit_falls_back_to_forced_raw_request(self):
+        client = RateLimitedCatalogClient()
+
+        result = await client.get_catalog("owner", "repo", force=True)
+
+        self.assertEqual(result.content, b"{}")
+        self.assertEqual(result.etag, 'W/"raw-etag"')
+        self.assertEqual(len(client.calls), 2)
+        self.assertTrue(client.calls[0][1].startswith("https://api.github.com/repos/owner/repo/contents/"))
+        raw_call = client.calls[1]
+        self.assertTrue(raw_call[1].startswith("https://raw.githubusercontent.com/owner/repo/HEAD/workflow-catalog.json?"))
+        self.assertEqual(raw_call[2]["headers"], {"Cache-Control": "no-cache"})
+
+    async def test_catalog_forbidden_error_does_not_fall_back_to_raw(self):
+        with self.assertRaisesRegex(GitHubError, "Repository access blocked"):
+            await ForbiddenCatalogClient().get_catalog("owner", "repo")
 
     async def test_forced_catalog_refresh_bypasses_conditional_cache(self):
         client = CatalogClient()

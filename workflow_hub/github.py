@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -24,6 +25,15 @@ class GitHubError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.data = data
+
+
+def _is_rate_limit_error(error: GitHubError) -> bool:
+    if error.status not in {403, 429}:
+        return False
+    message = str(error)
+    if isinstance(error.data, dict):
+        message = f"{message} {error.data.get('message', '')}"
+    return "rate limit" in message.casefold()
 
 
 class TokenStore:
@@ -197,11 +207,42 @@ class GitHubClient:
         except GitHubError as exc:
             if exc.status == 404:
                 return None
-            raise
+            if not _is_rate_limit_error(exc):
+                raise
+            return await self._get_catalog_from_raw(owner, repo, etag, force=force)
         if data is None:
             return ContentFile(content=b"", sha="", etag=response_headers.get("ETag"), not_modified=True)
         content = base64.b64decode(data["content"])
         return ContentFile(content=content, sha=data["sha"], etag=response_headers.get("ETag"))
+
+    async def _get_catalog_from_raw(
+        self,
+        owner: str,
+        repo: str,
+        etag: str | None,
+        *,
+        force: bool,
+    ) -> ContentFile | None:
+        headers: dict[str, str] = {}
+        url = f"https://raw.githubusercontent.com/{quote(owner, safe='')}/{quote(repo, safe='')}/HEAD/workflow-catalog.json"
+        if etag and not force:
+            headers["If-None-Match"] = etag
+        if force:
+            # The raw endpoint is CDN-backed. A unique query keeps an explicit refresh
+            # from reusing a response that was cached before the publisher's commit.
+            url = f"{url}?workflow_hub_refresh={uuid.uuid4().hex}"
+            headers["Cache-Control"] = "no-cache"
+        try:
+            data, response_headers = await self.request("GET", url, expected=(200, 304), headers=headers)
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if data is None:
+            return ContentFile(content=b"", sha="", etag=response_headers.get("ETag"), not_modified=True)
+        if not isinstance(data, bytes):
+            raise GitHubError("GitHub 清单响应格式无效")
+        return ContentFile(content=data, sha="", etag=response_headers.get("ETag"))
 
     async def put_catalog(self, owner: str, repo: str, catalog: bytes, sha: str | None, message: str) -> str:
         payload: dict[str, Any] = {"message": message, "content": base64.b64encode(catalog).decode("ascii")}
