@@ -390,6 +390,8 @@ class GitHubClient:
             raise GitHubError("下载 Release 资源失败", response.status)
         total = int(response.headers.get("Content-Length", "0"))
         received = 0
+        if operation and total:
+            operation.progress = {"received": 0, "total": total}
         with open(destination, "wb") as stream:
             async for chunk in response.content.iter_chunked(1024 * 256):
                 received += len(chunk)

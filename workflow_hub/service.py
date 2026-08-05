@@ -33,7 +33,7 @@ from .catalog import (
 from .errors import UserFacingError
 from .github import BranchState, GitHubClient, GitHubError, GitTreeFile
 from .operations import Operation
-from .packages import build_package_files, install_workflow, read_package_files, write_package
+from .packages import build_package_files, install_workflow, inspect_package, read_package_files, write_package
 from .repository import build_projection_files, build_repository_files, json_bytes, render_workflows_readme
 from .security import ensure_within, parse_public_repository, repository_storage_key, require_github_https, safe_filename
 from .storage import UserStorage
@@ -417,19 +417,19 @@ async def download_version(
     try:
         operation.stage = "downloading"
         await GitHubClient().download(str(version.package.url), temp_path, operation)
+        operation.progress = None
         operation.stage = "verifying"
+        inspected = inspect_package(temp_path, version.package.sha256)
+        operation.stage = "installing_workflow"
         async with _workflow_install_lock:
             target, content_hash = install_workflow(
                 temp_path,
                 storage.workflows_root,
-                owner,
-                repo,
-                product.id,
                 product.name,
                 version.version,
                 version.package.sha256,
                 Path(_folder_paths().get_input_directory()),
-                f"Workflow Hub/{hashlib.sha256(storage.key.encode('utf-8')).hexdigest()[:20]}",
+                inspected=inspected,
             )
             record = {
                 "owner": owner,
@@ -465,9 +465,6 @@ async def download_version(
                 if state.exists():
                     state.replace(state.with_name(f"installed.corrupt-{uuid.uuid4().hex}.json"))
                 await storage.write_json("installed.json", [record])
-            operation.stage = "complete"
-            operation.status = "success"
-            operation.result = record
             return record
     finally:
         temp_path.unlink(missing_ok=True)

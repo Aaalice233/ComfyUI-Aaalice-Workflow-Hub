@@ -10,8 +10,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .assets import IMAGE_LOADER_TYPES, _image_widget_indexes, _ui_nodes
-from .security import ensure_within, repository_storage_key, safe_filename, validate_zip_name
+from .errors import UserFacingError
+from .security import ensure_within, safe_filename, validate_zip_name
 
 MAX_PACKAGE = 256 * 1024 * 1024
 MAX_ENTRY = 64 * 1024 * 1024
@@ -97,6 +97,7 @@ def inspect_package(path: Path, expected_sha256: str | None = None) -> dict[str,
         bundled_names = {name for name in names if name.startswith("inputs/")}
         if declared_names != bundled_names:
             raise ValueError("manifest.inputs 与包内图像不一致")
+        sources: set[str] = set()
         for item in declared:
             if (
                 not isinstance(item, dict)
@@ -110,6 +111,11 @@ def inspect_package(path: Path, expected_sha256: str | None = None) -> dict[str,
                 or item["size"] > MAX_ENTRY
             ):
                 raise ValueError("manifest.inputs 条目无效")
+            source_path = _input_relative_path(item["source"])
+            source_key = os.path.normcase(source_path.as_posix())
+            if source_key in sources:
+                raise ValueError(f"manifest.inputs 不得重复声明图像: {item['source']}")
+            sources.add(source_key)
             content = archive.read(item["archive"])
             if len(content) != item["size"] or hashlib.sha256(content).hexdigest() != item["sha256"]:
                 raise ValueError(f"包内图像校验失败: {item['archive']}")
@@ -178,65 +184,66 @@ def read_package_files(path: Path, expected_sha256: str | None = None) -> dict[s
         return {item.filename: archive.read(item.filename) for item in archive.infolist()}
 
 
+def _input_relative_path(source: str) -> PurePosixPath:
+    normalized = source.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if (
+        not source.strip()
+        or normalized.startswith("/")
+        or normalized.endswith("/")
+        or path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
+    ):
+        raise ValueError(f"输入图像引用不是有效的相对路径: {source}")
+    return path
+
+
 def install_workflow(
     package_path: Path,
     workflows_root: Path,
-    owner: str,
-    repo: str,
-    workflow_id: str,
     display_name: str,
     version: str,
     expected_sha256: str,
     input_root: Path | None = None,
-    input_namespace: str = "Workflow Hub",
+    *,
+    inspected: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
-    inspected = inspect_package(package_path, expected_sha256)
-    source_label = safe_filename(f"{owner}-{repo}")
-    source_name = f"{source_label[:98].rstrip(' .')}-{repository_storage_key(owner, repo)}"
-    workflow_directory = safe_filename(str(workflow_id))
-    if workflow_directory != str(workflow_id):
-        workflow_directory = f"{workflow_directory}-{hashlib.sha256(str(workflow_id).encode('utf-8')).hexdigest()[:8]}"
-    directory = ensure_within(workflows_root, workflows_root / source_name / workflow_directory)
-    directory.mkdir(parents=True, exist_ok=True)
+    inspected = inspected or inspect_package(package_path, expected_sha256)
+    workflows_root = workflows_root.resolve()
+    workflows_root.mkdir(parents=True, exist_ok=True)
     separator = inspected["manifest"].get("filename_separator", "-")
     if separator not in FILENAME_SEPARATORS:
         separator = "-"
-    target = ensure_within(directory, directory / f"{safe_filename(display_name)}{separator}v{version}.json")
-    workflow = inspected["workflow"]
+    target = ensure_within(
+        workflows_root,
+        workflows_root / f"{safe_filename(display_name)}{separator}v{safe_filename(version)}.json",
+    )
     inputs = inspected["manifest"].get("inputs", [])
-    pending_inputs: list[tuple[Path, bytes]] = []
+    pending_inputs: list[tuple[Path, bytes, str]] = []
     if inputs:
         if input_root is None:
             raise ValueError("工作流包包含输入图像，但 ComfyUI input 目录不可用")
         input_root = input_root.resolve()
-        namespace = Path(input_namespace.replace("\\", "/"))
-        if namespace.is_absolute() or ".." in namespace.parts:
-            raise ValueError("输入图像目录无效")
-        input_directory = ensure_within(
-            input_root,
-            input_root / namespace / source_name / workflow_directory,
-        )
-        input_directory.mkdir(parents=True, exist_ok=True)
-        replacements: dict[str, str] = {}
+        input_root.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(package_path) as archive:
             for item in inputs:
-                filename = Path(str(item["archive"])).name
-                image_target = ensure_within(input_directory, input_directory / filename)
+                relative = _input_relative_path(str(item["source"]))
+                image_target = ensure_within(input_root, input_root.joinpath(*relative.parts))
                 content_bytes = archive.read(str(item["archive"]))
-                if image_target.exists() and hashlib.sha256(image_target.read_bytes()).hexdigest() != item["sha256"]:
-                    raise ValueError(f"同名输入图像内容不一致，已拒绝覆盖: {filename}")
-                if not image_target.exists():
-                    pending_inputs.append((image_target, content_bytes))
-                relative = image_target.relative_to(input_root).as_posix()
-                replacements[str(item["source"])] = relative
-        _replace_load_image_references(workflow, replacements)
-    content = json.dumps(workflow, ensure_ascii=False, indent=2) + "\n"
+                if image_target.exists():
+                    if not image_target.is_file() or hashlib.sha256(image_target.read_bytes()).hexdigest() != item["sha256"]:
+                        raise UserFacingError("subscription.input_file_conflict", {"path": relative.as_posix()})
+                else:
+                    pending_inputs.append((image_target, content_bytes, relative.as_posix()))
+    content = json.dumps(inspected["workflow"], ensure_ascii=False, indent=2) + "\n"
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     def write_pending_inputs() -> list[Path]:
         created: list[Path] = []
         try:
-            for image_target, content_bytes in pending_inputs:
+            for image_target, content_bytes, relative in pending_inputs:
+                image_target.parent.mkdir(parents=True, exist_ok=True)
                 descriptor, temp_name = tempfile.mkstemp(prefix=".input-", suffix=".tmp", dir=image_target.parent)
                 try:
                     with os.fdopen(descriptor, "wb") as stream:
@@ -247,8 +254,12 @@ def install_workflow(
                         os.link(temp_name, image_target)
                         created.append(image_target)
                     except FileExistsError:
-                        if hashlib.sha256(image_target.read_bytes()).digest() != hashlib.sha256(content_bytes).digest():
-                            raise ValueError(f"同名输入图像内容不一致，已拒绝覆盖: {image_target.name}")
+                        if (
+                            not image_target.is_file()
+                            or hashlib.sha256(image_target.read_bytes()).hexdigest()
+                            != hashlib.sha256(content_bytes).hexdigest()
+                        ):
+                            raise UserFacingError("subscription.input_file_conflict", {"path": relative})
                 finally:
                     if os.path.exists(temp_name):
                         os.unlink(temp_name)
@@ -259,14 +270,14 @@ def install_workflow(
         return created
 
     if target.exists():
-        if hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
-            raise ValueError("同版本本地文件内容不一致，已拒绝覆盖")
+        if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
+            raise UserFacingError("subscription.workflow_file_conflict", {"path": target.name})
         write_pending_inputs()
         return target, content_hash
     created_inputs = write_pending_inputs()
     temp_name = ""
     try:
-        descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-", suffix=".tmp", dir=directory)
+        descriptor, temp_name = tempfile.mkstemp(prefix=".workflow-", suffix=".tmp", dir=workflows_root)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
             stream.flush()
@@ -274,8 +285,8 @@ def install_workflow(
         try:
             os.link(temp_name, target)
         except FileExistsError:
-            if hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
-                raise ValueError("同版本本地文件内容不一致，已拒绝覆盖")
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
+                raise UserFacingError("subscription.workflow_file_conflict", {"path": target.name})
     except BaseException:
         for image_target in created_inputs:
             image_target.unlink(missing_ok=True)
@@ -284,24 +295,3 @@ def install_workflow(
         if os.path.exists(temp_name):
             os.unlink(temp_name)
     return target, content_hash
-
-
-def _replace_load_image_references(workflow: dict[str, Any], replacements: dict[str, str]) -> None:
-    for node in _ui_nodes(workflow):
-        values = node.get("widgets_values")
-        if not isinstance(values, list):
-            continue
-        for index in _image_widget_indexes(node):
-            if index < len(values) and isinstance(values[index], str) and values[index] in replacements:
-                values[index] = replacements[values[index]]
-    for node in workflow.values():
-        if not isinstance(node, dict) or not isinstance(node.get("class_type"), str):
-            continue
-        inputs = node.get("inputs")
-        if not isinstance(inputs, dict):
-            continue
-        names = {"image"} if node.get("class_type") in IMAGE_LOADER_TYPES else set()
-        names.update(key for key in inputs if str(key).casefold() in {"image", "images", "image_file", "image_path"})
-        for key in names:
-            if isinstance(inputs.get(key), str) and inputs[key] in replacements:
-                inputs[key] = replacements[inputs[key]]

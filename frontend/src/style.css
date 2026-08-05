@@ -465,6 +465,22 @@ p {
   box-shadow: inset 3px 0 var(--warning), var(--shadow-sm);
 }
 
+.message-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.message .message-action-button {
+  width: auto;
+  min-height: 34px;
+  padding: 0 11px;
+  gap: 7px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
 .message button,
 .icon-button {
   display: grid;
@@ -4230,6 +4246,15 @@ pre {
 }
 
 @media (max-width: 720px) {
+  .message.download-completion {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .download-completion .message-actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+
   .detail {
     width: 100vw;
   }

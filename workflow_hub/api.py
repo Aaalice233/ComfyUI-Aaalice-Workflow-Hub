@@ -1004,7 +1004,13 @@ def register_routes() -> None:
         operation = await operations.create(
             "download",
             storage,
-            {"owner": data["owner"], "repo": data["repo"], "workflow_id": data["workflow_id"], "version": data["version"]},
+            {
+                "owner": data["owner"],
+                "repo": data["repo"],
+                "workflow_id": data["workflow_id"],
+                "version": data["version"],
+                "name": product.name,
+            },
         )
         asyncio.create_task(_run(operation, download_version(storage, data["owner"], data["repo"], product, version, operation)))
         return web.json_response({"operation_id": operation.id}, status=202)

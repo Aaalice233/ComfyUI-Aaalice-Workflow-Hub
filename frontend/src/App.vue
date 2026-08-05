@@ -218,6 +218,7 @@ const publishOperationId = ref("");
 const publishSourceName = ref("");
 const publishDraft = ref<PublishDraft | null>(null);
 const publishCompletion = ref<Operation | null>(null);
+const downloadCompletion = ref<Operation | null>(null);
 const device = ref<{ user_code: string; verification_uri: string; interval: number } | null>(null);
 const deviceCodeCopied = ref(false);
 const dependencyPlans = reactive<Record<string, DependencyPlan[]>>({});
@@ -255,6 +256,7 @@ const operationStageMessages: Record<string, MessageKey> = {
   queued: "stageQueued",
   checking_network: "stageCheckingNetwork",
   installing: "stageInstalling",
+  installing_workflow: "stageInstallingWorkflow",
   downloading: "stageDownloading",
   verifying: "stageVerifying",
   validating: "stageValidating",
@@ -274,6 +276,7 @@ const publishProgressStages = [
   "publishing_release",
   "updating_repository",
 ] as const;
+const downloadProgressStages = ["queued", "downloading", "verifying", "installing_workflow"] as const;
 const managementDefaultProgressStages = ["validating", "updating_repository"] as const;
 const managementProgressStages: Record<string, readonly string[]> = {
   edit_metadata: managementDefaultProgressStages,
@@ -329,6 +332,8 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "subscription.catalog_invalid": "subscriptionCatalogInvalid",
   "subscription.local_version_not_found": "subscriptionLocalVersionNotFound",
   "subscription.local_file_missing": "subscriptionLocalFileMissing",
+  "subscription.workflow_file_conflict": "subscriptionWorkflowFileConflict",
+  "subscription.input_file_conflict": "subscriptionInputFileConflict",
   "dependencies.invalid_plan": "dependenciesInvalidPlan",
   "dependencies.confirmation_required": "dependenciesConfirmationRequired",
   "dependencies.plan_changed": "dependenciesPlanChanged",
@@ -465,6 +470,8 @@ const publishCompletionWorkflowId = computed(() => publishResultText(publishComp
 const publishCompletionRepositoryPath = computed(() => publishResultText(publishCompletion.value, "repository_path") || t.value("none"));
 const publishCompletionReleaseUrl = computed(() => publishResultText(publishCompletion.value, "release_url"));
 const publishCompletionTime = computed(() => publishCompletion.value ? operationTimeLabel(publishCompletion.value.created_at) : "");
+const downloadCompletionName = computed(() => publishResultText(downloadCompletion.value, "name") || String(downloadCompletion.value?.metadata?.name || t.value("workflowLabel")));
+const downloadCompletionVersion = computed(() => publishResultText(downloadCompletion.value, "version") || String(downloadCompletion.value?.metadata?.version || t.value("none")));
 const dependencyTaskStateKeys: Record<DependencyTaskState, MessageKey> = {
   queued: "installTaskQueued",
   installing: "installTaskInstalling",
@@ -804,6 +811,7 @@ function isPublishOperation(item: Operation) {
   return item.kind === "publish" || item.kind === "publish-resume";
 }
 function operationProgressStages(item: Operation) {
+  if (item.kind === "download") return downloadProgressStages;
   if (isPublishOperation(item)) return publishProgressStages;
   if (item.kind === "publisher-manage") {
     return managementProgressStages[String(item.metadata?.action || "")] || managementDefaultProgressStages;
@@ -1303,11 +1311,12 @@ async function inspectDownloadReadiness(item: Product, version: Version): Promis
   };
 }
 async function startDownload(item: Product, version: Version) {
+  downloadCompletion.value = null;
   const result = await post<{ operation_id: string }>("/workflows/download", {
     owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
   });
   downloadOperationIds[downloadKey(item, version)] = result.operation_id;
-  notice.value = `${t.value("activities")}: ${result.operation_id}`;
+  notice.value = t.value("downloadStarted");
   drawer.value = true;
   await pollOperations();
 }
@@ -1381,6 +1390,28 @@ async function deleteLocalVersion(item: Product, version: Version) {
     });
     invalidateCatalogCache();
     await refreshCatalog();
+  });
+}
+function downloadOperationTarget(operation: Operation | null) {
+  const metadata = operation?.metadata || {};
+  const owner = String(metadata.owner || "");
+  const repo = String(metadata.repo || "");
+  const workflowId = String(metadata.workflow_id || "");
+  const version = String(metadata.version || "");
+  return owner && repo && workflowId && version ? { owner, repo, workflow_id: workflowId, version } : null;
+}
+function dismissDownloadCompletion() {
+  downloadCompletion.value = null;
+}
+async function revealDownloadCompletion() {
+  const target = downloadOperationTarget(downloadCompletion.value);
+  if (!target) {
+    error.value = t.value("operationFailed");
+    return;
+  }
+  await withBusy("reveal-download", async () => {
+    await post("/workflows/local/reveal", target);
+    notice.value = t.value("workflowFolderOpened");
   });
 }
 async function revealLocalVersion(item: Product, version: Version) {
@@ -1590,6 +1621,7 @@ async function pollOperations() {
   const activeBefore = new Map(
     operations.value.filter(isOperationActive).map((operation) => [operation.id, operation]),
   );
+  const trackedDownloadIds = new Set(Object.values(downloadOperationIds));
   let catalogReloaded = false;
   try {
     updateOperations((await api<{ items: Operation[] }>("/operations")).items);
@@ -1653,16 +1685,22 @@ async function pollOperations() {
         try { await fetchDependencyPlan(selected.value, activeDetailVersion.value); } catch { /* manual check remains available */ }
       }
     }
-    const downloadCompleted = [...activeBefore.values()].some((previous) => {
-      if (previous.kind !== "download") return false;
-      const current = operations.value.find((operation) => operation.id === previous.id);
-      return current?.status === "success";
-    });
-    if (downloadCompleted && !catalogReloaded) {
-      invalidateCatalogCache();
-      await refreshCatalog();
-      catalogReloaded = true;
+    const finishedDownloads = operations.value.filter((operation) =>
+      operation.kind === "download"
+      && operation.status !== "running"
+      && (activeBefore.has(operation.id) || trackedDownloadIds.has(operation.id))
+    );
+    const completedDownload = finishedDownloads.find((operation) => operation.status === "success");
+    const failedDownload = finishedDownloads.find((operation) => operation.status === "failed");
+    if (completedDownload) {
+      downloadCompletion.value = completedDownload;
+      if (!catalogReloaded) {
+        invalidateCatalogCache();
+        await refreshCatalog();
+        catalogReloaded = true;
+      }
     }
+    if (failedDownload) error.value = operationErrorMessage(failedDownload) || t.value("operationFailed");
     if (operations.value.some(isOperationActive)) scheduleOperationPoll();
   } catch (reason) {
     error.value = errorMessage(reason);
@@ -2231,6 +2269,14 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="notice" class="message success">
           <CheckCircle2 :size="18" /><span>{{ notice }}</span><button :title="t('close')" :aria-label="t('close')" @click="notice = ''"><X :size="17" /></button>
+        </div>
+        <div v-if="downloadCompletion" class="message success download-completion">
+          <CheckCircle2 :size="18" />
+          <span>{{ t("downloadComplete", { name: downloadCompletionName, version: downloadCompletionVersion }) }}</span>
+          <div class="message-actions">
+            <button class="secondary message-action-button" :disabled="!!busy" @click="revealDownloadCompletion"><FolderOpen :size="15" />{{ t("openWorkflowFolder") }}</button>
+            <button class="icon-button" :title="t('close')" :aria-label="t('close')" @click="dismissDownloadCompletion"><X :size="17" /></button>
+          </div>
         </div>
         <div v-if="status && !status.git.available && tab === 'publish'" class="message warning">
           <TriangleAlert :size="18" /><span>{{ t("gitUnavailable") }}</span>
@@ -3089,7 +3135,7 @@ onBeforeUnmount(() => {
             </div>
             <small class="progress-copy stage-progress-copy">{{ stageProgressLabel(item) }}</small>
           </template>
-          <template v-else-if="item.progress?.total">
+          <template v-if="item.progress?.total">
             <div class="operation-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
               :aria-valuenow="Math.round(progressPercent(item.progress))">
               <i :style="{ width: `${progressPercent(item.progress)}%` }" />

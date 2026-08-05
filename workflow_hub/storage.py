@@ -71,7 +71,7 @@ class UserStorage:
 
     @property
     def workflows_root(self) -> Path:
-        path = self.root / "workflows" / "Workflow Hub"
+        path = self.root / "workflows"
         path.mkdir(parents=True, exist_ok=True)
         return path
 

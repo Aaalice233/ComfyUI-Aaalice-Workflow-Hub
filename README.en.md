@@ -17,7 +17,7 @@ A public workflow subscription, publishing, and version-management extension for
 - Subscribe to public GitHub repositories containing `workflow-catalog.json`, then search, filter, and browse version history and release notes in one aggregated catalog. Catalog contents are read from the GitHub Contents API and stored in a per-user local cache. The first display after each ComfyUI startup completes forced remote validation before showing the catalog; later openings may show the recent snapshot first while validation continues. Manual refreshes also request the authoritative remote content so newly published, deleted, or changelog-edited content becomes visible promptly.
 - Settings can disable automatic update checks or configure the native ComfyUI workflow-update notification interval from 1 to 168 hours. Notification checks are independent of the page catalog cache, and network failures do not consume the scheduled check window.
 - Every workflow version lives on the default branch under a readable category/name/version path, so repository visitors can browse, back up, or download source files without searching through Releases.
-- Download and verify Release ZIPs by version. Each local version is stored as a separate workflow file, and its folder can be opened directly from the detail page.
+- Download and verify Release ZIPs by version. Each local version is stored as a separate workflow file under `user/<current-user>/workflows/`; the workflow folder can be opened from the detail page or the download-complete prompt.
 - The detail page shows core, plugin, and bundled-image status for each version; click a top status control to inspect full details. Changelogs support full GitHub Flavored Markdown rendering with sanitization, and long notes stay inside a dedicated scrollable area. Workflow packages never include LoRA dependencies.
 - Before downloading, the UI checks the ComfyUI core and plugin dependencies. A mismatch, missing plugin, or version difference opens a clear preflight dialog; users may skip it or synchronize automatable plugins and recheck. Workflow Hub never changes the ComfyUI core automatically.
 - Plugin dependencies produce a read-only plan. Completion first checks network access; new Git dependencies use the ComfyUI environment's Git and may clone/fetch/checkout in parallel at the locked commit, with each plugin's Python `requirements.txt` step counted and logged. Legacy Registry dependencies use ComfyUI-Manager. Both paths show source badges, progress, plugin status, install logs, and errors in one persistent view. Downloads still work when completion is unavailable.
@@ -51,10 +51,11 @@ Requires ComfyUI Frontend `1.33.9+`; ComfyUI-Manager `3.0+` is supported, `4.2.1
 2. Subscriptions do not require GitHub sign-in. Publishing uses Device Flow when prompted.
 3. Before their first publish, authors must install the public [Aaalice Workflow Hub Publisher](https://github.com/apps/aaalice-workflow-hub-publisher) GitHub App on the target repository — see the [publisher guide](docs/publisher-guide.en.md).
 
-Runtime data is written to `workflow_hub/` inside the current ComfyUI user-data directory. Downloaded workflows are stored under:
+Runtime state is written to `workflow_hub/` inside the current ComfyUI user-data directory. Downloaded workflows are written directly to the current user's `workflows/` directory (the default user is `user/default/workflows/`); bundled images are written to ComfyUI's root `input/` directory and workflow image references stay unchanged.
 
 ```text
-workflows/Workflow Hub/{owner}-{repo}-{source-hash}/{workflow-id}/{name}-v{version}.json
+user/<current-user>/workflows/<name>-v<version>.json
+input/<original-workflow-image-reference>
 ```
 
 ## Boundaries

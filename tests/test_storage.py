@@ -9,6 +9,11 @@ from workflow_hub.service import aggregate_catalog
 
 
 class StorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_workflows_root_is_the_current_user_workflows_directory(self):
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            self.assertEqual(storage.workflows_root, Path(folder).resolve() / "workflows")
+
     async def test_atomic_update_and_user_isolation(self):
         with TemporaryDirectory() as folder:
             first = UserStorage(Path(folder) / "one")
