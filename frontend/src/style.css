@@ -5276,6 +5276,108 @@ pre {
   line-height: 1.6;
 }
 
+.dependency-pin-dialog {
+  width: min(640px, calc(100vw - 48px));
+  gap: 10px;
+}
+
+.dependency-pin-head {
+  display: grid;
+  gap: 4px;
+}
+
+.dependency-pin-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dependency-pin-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dependency-pin-toolbar small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dependency-pin-loading {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  gap: 8px;
+}
+
+.dependency-pin-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 8px;
+  list-style: none;
+}
+
+.dependency-pin-list > li {
+  display: grid;
+  padding: 10px 11px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 3%);
+  gap: 8px;
+}
+
+.dependency-pin-identity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.dependency-pin-identity strong,
+.dependency-pin-identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dependency-pin-identity strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.dependency-pin-identity small {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.dependency-pin-identity .dependency-pin-current {
+  color: var(--muted);
+}
+
+.dependency-pin-picker {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.dependency-pin-picker .select-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.dependency-pin-picker select {
+  width: 100%;
+  font-family: inherit;
+}
+
+.dependency-pin-error {
+  color: var(--warning);
+  font-size: 12px;
+}
+
 .empty svg.spinning {
   animation: spin 1s linear infinite;
 }

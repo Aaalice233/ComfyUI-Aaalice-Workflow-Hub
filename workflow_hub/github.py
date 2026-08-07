@@ -405,6 +405,43 @@ class GitHubClient:
     async def delete_release(self, owner: str, repo: str, release_id: int) -> None:
         await self.request("DELETE", f"{API}/repos/{owner}/{repo}/releases/{release_id}", expected=(204,))
 
+    async def delete_release_asset(self, owner: str, repo: str, asset_id: int) -> None:
+        await self.request("DELETE", f"{API}/repos/{owner}/{repo}/releases/assets/{asset_id}", expected=(204,))
+
+    async def list_recent_commits(self, owner: str, repo: str, per_page: int = 20) -> list[dict[str, Any]]:
+        data, _ = await self.request(
+            "GET",
+            f"{API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits?per_page={per_page}",
+        )
+        commits = []
+        for item in data if isinstance(data, list) else []:
+            sha = str(item.get("sha") or "")
+            info = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+            message = str(info.get("message") or "").splitlines()[0] if info.get("message") else ""
+            committer = info.get("committer") if isinstance(info.get("committer"), dict) else {}
+            commits.append(
+                {
+                    "sha": sha,
+                    "message": message,
+                    "committed_at": str(committer.get("date") or ""),
+                    "url": str(item.get("html_url") or ""),
+                }
+            )
+        return commits
+
+    async def get_commit(self, owner: str, repo: str, sha: str) -> bool:
+        """校验 commit 是否真实存在于仓库中。"""
+        try:
+            await self.request(
+                "GET",
+                f"{API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits/{quote(sha, safe='')}",
+            )
+            return True
+        except GitHubError as exc:
+            if exc.status in (404, 422):
+                return False
+            raise
+
     async def delete_tag(self, owner: str, repo: str, tag: str) -> None:
         try:
             await self.request(

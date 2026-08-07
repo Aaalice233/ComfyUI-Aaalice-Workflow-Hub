@@ -55,7 +55,12 @@ import {
 } from "./repository-selection";
 
 type Source = { owner: string; repo: string; url: string; refreshed_at: string; error?: string };
-type ManagedVersion = { version: string; published_at: string; changelog: string; package: { size: number } };
+type ManagedVersion = { version: string; published_at: string; changelog: string; package: { size: number }; custom_nodes?: NodeDependencyInfo[] };
+type DependencyCommitOption = { sha: string; message: string; committed_at: string; url: string };
+type DependencyPinEntry = {
+  key: string; name: string; source_url: string; current: string; selected: string; latest: string;
+  commits: DependencyCommitOption[]; error: string;
+};
 type ManagedProduct = {
   id: string; name: string; category: string; summary: string; description: string;
   tags: string[]; archived: boolean; cover?: { url: string } | null; versions: ManagedVersion[];
@@ -200,6 +205,10 @@ const manageExpanded = ref<string[]>([]);
 const editingProduct = ref<ManagedProduct | null>(null);
 const editForm = reactive({ name: "", category: "", summary: "", description: "", tags: "" });
 const editingChangelog = ref<{ product: ManagedProduct; version: ManagedVersion; text: string } | null>(null);
+const dependencyPinEditor = ref<{
+  product: ManagedProduct; version: ManagedVersion;
+  entries: DependencyPinEntry[]; readonlyCount: number; loading: boolean;
+} | null>(null);
 const workflow = ref<Record<string, unknown> | null>(null);
 const workflowSourceName = ref("");
 const canvasWorkflowError = ref("");
@@ -283,6 +292,7 @@ const managementProgressStages: Record<string, readonly string[]> = {
   archive: managementDefaultProgressStages,
   unarchive: managementDefaultProgressStages,
   edit_changelog: ["validating", "updating_release", "updating_repository"],
+  update_dependencies: ["validating", "updating_release", "updating_repository"],
   delete_version: ["validating", "deleting_release", "updating_repository"],
   delete_workflow: ["validating", "deleting_release", "updating_repository"],
 };
@@ -338,6 +348,8 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.confirmation_required": "dependenciesConfirmationRequired",
   "dependencies.plan_changed": "dependenciesPlanChanged",
   "publisher.lora_forbidden": "loraPublishForbidden",
+  "publisher.dependency_update_invalid": "publisherDependencyUpdateInvalid",
+  "publisher.dependency_commit_missing": "publisherDependencyCommitMissing",
   "publisher.confirmation_required": "publisherConfirmationRequired",
   "publisher.product_invalid": "publisherProductInvalid",
   "publisher.repository_invalid": "publisherRepositoryInvalid",
@@ -864,6 +876,7 @@ function operationKindLabel(kind: string, metadata?: Record<string, unknown>) {
       archive: "operationArchive",
       unarchive: "operationUnarchive",
       edit_changelog: "operationEditChangelog",
+      update_dependencies: "operationUpdateDependencies",
       delete_version: "operationDeleteVersion",
       delete_workflow: "operationDeleteWorkflow",
     };
@@ -2168,6 +2181,83 @@ async function saveChangelogEditor() {
   ));
   if (started) editingChangelog.value = null;
 }
+function normalizeGitSourceUrl(value: string) {
+  return value.trim().replace(/\/+$/, "").replace(/\.git$/, "").toLowerCase();
+}
+function versionGitDependencies(version: ManagedVersion) {
+  return (version.custom_nodes || []).filter((dep) => dep.source_url && dep.commit);
+}
+function dependencyPinLatest(entry: DependencyPinEntry) {
+  return entry.latest;
+}
+const dependencyPinChanges = computed(() =>
+  (dependencyPinEditor.value?.entries || []).filter((entry) => entry.selected && entry.selected !== entry.current)
+);
+function dependencyPinOptionLabel(option: DependencyCommitOption) {
+  const date = option.committed_at ? new Date(option.committed_at).toLocaleDateString() : "";
+  return [option.sha.slice(0, 7), date, option.message].filter(Boolean).join(" · ");
+}
+async function openDependencyPinEditor(product: ManagedProduct, version: ManagedVersion) {
+  const gitDependencies = versionGitDependencies(version);
+  const entries: DependencyPinEntry[] = gitDependencies.map((dep) => ({
+    key: dependencyIdentity(dep),
+    name: dep.name,
+    source_url: String(dep.source_url),
+    current: String(dep.commit),
+    selected: String(dep.commit),
+    latest: "",
+    commits: [],
+    error: "",
+  }));
+  dependencyPinEditor.value = {
+    product,
+    version,
+    entries,
+    readonlyCount: (version.custom_nodes || []).length - gitDependencies.length,
+    loading: true,
+  };
+  try {
+    const result = await post<{ items: Array<{ source_url: string; commits: DependencyCommitOption[]; error?: string }> }>(
+      "/publisher/dependency-commits",
+      { sources: gitDependencies.map((dep) => String(dep.source_url)) },
+    );
+    const editor = dependencyPinEditor.value;
+    if (!editor || editor.version !== version) return;
+    const remote = new Map(result.items.map((item) => [normalizeGitSourceUrl(item.source_url), item]));
+    for (const entry of editor.entries) {
+      const item = remote.get(normalizeGitSourceUrl(entry.source_url));
+      entry.commits = item?.commits || [];
+      entry.latest = entry.commits[0]?.sha || "";
+      if (entry.current && !entry.commits.some((option) => option.sha === entry.current)) {
+        entry.commits.unshift({ sha: entry.current, message: t.value("dependencyPinCurrent"), committed_at: "", url: "" });
+      }
+      entry.error = item?.error || (entry.commits.length > 1 ? "" : t.value("dependencyPinNoCommits"));
+    }
+  } catch (reason) {
+    dependencyPinEditor.value = null;
+    error.value = errorMessage(reason);
+    return;
+  }
+  if (dependencyPinEditor.value) dependencyPinEditor.value.loading = false;
+}
+function useLatestDependencyCommit(entry: DependencyPinEntry) {
+  const latest = dependencyPinLatest(entry);
+  if (latest) entry.selected = latest;
+}
+function useAllLatestDependencyCommits() {
+  for (const entry of dependencyPinEditor.value?.entries || []) useLatestDependencyCommit(entry);
+}
+async function saveDependencyPinEditor() {
+  const editor = dependencyPinEditor.value;
+  if (!editor) return;
+  const updates = dependencyPinChanges.value.map((entry) => ({ source_url: entry.source_url, commit: entry.selected }));
+  if (!updates.length) return;
+  const started = await startPublisherManagementOperation("update-dependencies", () => post<{ operation_id: string }>(
+    `${managedWorkflowPath(editor.product.id, editor.version.version)}/dependencies`,
+    { confirmed: true, updates },
+  ));
+  if (started) dependencyPinEditor.value = null;
+}
 async function startLogin() {
   await withBusy("login", async () => {
     window.clearTimeout(loginTimer);
@@ -2705,6 +2795,7 @@ onBeforeUnmount(() => {
                         <p>{{ version.changelog }}</p>
                         <span class="manage-version-actions">
                           <button class="ghost compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="openChangelogEditor(product, version)">{{ t("editChangelog") }}</button>
+                          <button v-if="versionGitDependencies(version).length" class="ghost compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="openDependencyPinEditor(product, version)"><FolderGit2 :size="13" />{{ t("updateDependencies") }}</button>
                           <button class="ghost compact-action danger-action" :disabled="!!busy || publisherManagementOperationRunning" @click="deleteManagedVersion(product, version)"><Trash2 :size="13" />{{ t("deleteVersion") }}</button>
                         </span>
                       </div>
@@ -3083,6 +3174,49 @@ onBeforeUnmount(() => {
         <div class="manage-dialog-actions">
           <button class="ghost" @click="editingChangelog = null">{{ t("cancel") }}</button>
           <button class="primary" :disabled="!!busy || publisherManagementOperationRunning || !editingChangelog.text.trim()" @click="saveChangelogEditor">{{ t("save") }}</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="dependencyPinEditor" class="backdrop" @click.self="dependencyPinEditor = null">
+      <section class="manage-dialog dependency-pin-dialog" role="dialog" aria-modal="true" :aria-label="t('updateDependencies')">
+        <div class="dependency-pin-head">
+          <h2>{{ t("dependencyPinTitle", { version: dependencyPinEditor.version.version }) }}</h2>
+          <p>{{ t("dependencyPinDescription") }}</p>
+        </div>
+        <div class="dependency-pin-toolbar">
+          <small v-if="dependencyPinEditor.readonlyCount">{{ t("dependencyPinReadonly", { count: dependencyPinEditor.readonlyCount }) }}</small>
+          <span v-else></span>
+          <button
+            class="ghost compact-action"
+            :disabled="dependencyPinEditor.loading || !!busy || publisherManagementOperationRunning || !dependencyPinEditor.entries.some((entry) => dependencyPinLatest(entry))"
+            @click="useAllLatestDependencyCommits"
+          ><RefreshCw :size="14" />{{ t("dependencyPinAllLatest") }}</button>
+        </div>
+        <div v-if="dependencyPinEditor.loading" class="dependency-pin-loading"><LoaderCircle :size="16" class="dependency-task-spin" /><span>{{ t("dependencyPinLoading") }}</span></div>
+        <ul class="dependency-pin-list">
+          <li v-for="entry in dependencyPinEditor.entries" :key="entry.key">
+            <span class="dependency-pin-identity">
+              <strong>{{ entry.name }}</strong>
+              <small :title="entry.source_url">{{ entry.source_url }}</small>
+              <small class="dependency-pin-current">{{ t("dependencyPinCurrent") }}: {{ entry.current.slice(0, 7) }}</small>
+            </span>
+            <span class="dependency-pin-picker">
+              <span class="select-control">
+                <select v-model="entry.selected" :disabled="dependencyPinEditor.loading || !entry.commits.length" :aria-label="`${t('dependencyPinSelectCommit')}: ${entry.name}`">
+                  <option v-if="!entry.commits.length" :value="entry.current">{{ t("dependencyPinNoCommits") }}</option>
+                  <option v-for="option in entry.commits" :key="option.sha" :value="option.sha">{{ dependencyPinOptionLabel(option) }}</option>
+                </select>
+                <span class="select-chevron" aria-hidden="true"><ChevronDown :size="14" :stroke-width="2.4" /></span>
+              </span>
+              <button class="ghost compact-action" :disabled="!dependencyPinLatest(entry) || entry.selected === dependencyPinLatest(entry)" @click="useLatestDependencyCommit(entry)">{{ t("dependencyPinUseLatest") }}</button>
+            </span>
+            <small v-if="entry.error && !dependencyPinEditor.loading" class="dependency-pin-error">{{ entry.error }}</small>
+          </li>
+        </ul>
+        <div class="manage-dialog-actions">
+          <button class="ghost" @click="dependencyPinEditor = null">{{ t("cancel") }}</button>
+          <button class="primary" :disabled="!!busy || publisherManagementOperationRunning || dependencyPinEditor.loading || !dependencyPinChanges.length" @click="saveDependencyPinEditor">{{ t("dependencyPinConfirm", { count: dependencyPinChanges.length }) }}</button>
         </div>
       </section>
     </div>

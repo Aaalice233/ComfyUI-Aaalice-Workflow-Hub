@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import importlib
+import json
 import os
 import re
 import subprocess
@@ -999,6 +1000,146 @@ async def update_version_changelog(
                 state,
                 build_projection_files(updated, product),
                 f"更新 {existing.name} v{target.version} 更新日志",
+            )
+            return versions[position].model_dump(mode="json")
+        except GitHubError as exc:
+            if attempt == 0 and exc.status in (409, 422):
+                continue
+            raise
+    raise RuntimeError("仓库并发更新失败")
+
+
+def _normalize_git_source(value: str) -> str:
+    return value.strip().rstrip("/").removesuffix(".git").casefold()
+
+
+async def update_version_dependencies(
+    storage: UserStorage,
+    token: str,
+    owner: str,
+    repo: str,
+    workflow_id: str,
+    version_number: str,
+    updates: list[dict[str, Any]],
+    operation: Operation | None = None,
+) -> dict[str, Any]:
+    """更新已发布版本锁定的 Git 插件依赖 commit，并保持 Release 包内 manifest 一致。"""
+    requests: dict[str, str] = {}
+    for item in updates:
+        source = str(item.get("source_url") or "").strip()
+        commit = str(item.get("commit") or "").strip().lower()
+        try:
+            dep_owner, dep_repo = parse_public_repository(source)
+        except ValueError:
+            raise UserFacingError("publisher.dependency_update_invalid") from None
+        if not re.fullmatch(r"[a-f0-9]{40}", commit):
+            raise UserFacingError("publisher.dependency_update_invalid")
+        requests[_normalize_git_source(source)] = commit
+    if not requests:
+        raise UserFacingError("publisher.dependency_update_invalid")
+
+    client = GitHubClient(token)
+    for attempt in range(2):
+        if operation is not None:
+            operation.stage = "validating"
+        state = await client.get_branch_state(owner, repo)
+        catalog = await _catalog_at_state(client, owner, repo, state, {})
+        index = next((i for i, item in enumerate(catalog.workflows) if item.id == workflow_id), None)
+        if index is None:
+            raise ValueError("工作流产品不存在")
+        existing = catalog.workflows[index]
+        position = next((i for i, item in enumerate(existing.versions) if item.version == version_number), None)
+        if position is None:
+            raise ValueError("版本不存在")
+        target = existing.versions[position]
+        git_dependencies = [item for item in target.custom_nodes if item.source_url and item.commit]
+        changed: dict[str, str] = {}
+        for dependency in git_dependencies:
+            key = _normalize_git_source(str(dependency.source_url))
+            requested = requests.get(key)
+            if requested is None:
+                continue
+            if requested == dependency.commit:
+                continue
+            changed[key] = requested
+        unknown = [key for key in requests if key not in {_normalize_git_source(str(item.source_url)) for item in git_dependencies}]
+        if unknown or not changed:
+            raise UserFacingError("publisher.dependency_update_invalid")
+
+        # 防止写入不存在或未推送的 commit，避免订阅者永远装不上
+        for dependency in git_dependencies:
+            key = _normalize_git_source(str(dependency.source_url))
+            commit = changed.get(key)
+            if commit is None:
+                continue
+            dep_owner, dep_repo = parse_public_repository(str(dependency.source_url))
+            if not await client.get_commit(dep_owner, dep_repo, commit):
+                raise UserFacingError(
+                    "publisher.dependency_commit_missing",
+                    {"name": dependency.name, "commit": commit[:12]},
+                )
+
+        release = await client.get_release_by_tag(owner, repo, target.release_tag)
+        if release is None:
+            raise ValueError("版本对应的 Release 不存在")
+
+        if operation is not None:
+            operation.stage = "updating_release"
+        package_name = str(target.package.url).rsplit("/", 1)[-1]
+        download_path = storage.drafts_dir / f".repack-{uuid.uuid4().hex}.zip"
+        rebuilt_path = storage.drafts_dir / f".repack-{uuid.uuid4().hex}.zip"
+        try:
+            await client.download(str(target.package.url), download_path)
+            package_files = read_package_files(download_path, target.package.sha256)
+            manifest = json.loads(package_files["manifest.json"].decode("utf-8-sig"))
+            manifest_dependencies = manifest.get("custom_nodes")
+            if not isinstance(manifest_dependencies, list):
+                raise ValueError("包内 manifest 缺少 custom_nodes")
+            for entry in manifest_dependencies:
+                if not isinstance(entry, dict) or not entry.get("source_url"):
+                    continue
+                commit = changed.get(_normalize_git_source(str(entry["source_url"])))
+                if commit is not None:
+                    entry["commit"] = commit
+            package_files["manifest.json"] = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode()
+            rebuilt = write_package(rebuilt_path, package_files)
+            package_bytes = rebuilt_path.read_bytes()
+        finally:
+            download_path.unlink(missing_ok=True)
+            rebuilt_path.unlink(missing_ok=True)
+
+        old_asset = next((item for item in release.get("assets", []) if item.get("name") == package_name), None)
+        if old_asset is not None:
+            await client.delete_release_asset(owner, repo, int(old_asset["id"]))
+        asset = await client.upload_asset(str(release["upload_url"]), package_name, package_bytes, "application/zip")
+        new_size = int(asset.get("size") or rebuilt["size"])
+        digest = str(asset.get("digest") or "")
+        new_sha = digest.removeprefix("sha256:") if digest.startswith("sha256:") else rebuilt["sha256"]
+
+        version_payload = target.model_dump(mode="json")
+        for entry in version_payload["custom_nodes"]:
+            commit = changed.get(_normalize_git_source(str(entry.get("source_url") or "")))
+            if commit is not None:
+                entry["commit"] = commit
+        version_payload["package"]["size"] = new_size
+        version_payload["package"]["sha256"] = new_sha
+        versions = list(existing.versions)
+        versions[position] = WorkflowVersion.model_validate(version_payload)
+        product = existing.model_copy(update={"versions": versions})
+        items = list(catalog.workflows)
+        items[index] = product
+        updated = Catalog.model_validate(catalog.model_copy(update={"workflows": items}).model_dump(mode="json"))
+        try:
+            if operation is not None:
+                operation.stage = "updating_repository"
+            writes = build_projection_files(updated, product)
+            writes[f"{target.repository_path}/manifest.json"] = package_files["manifest.json"]
+            await client.commit_files(
+                owner,
+                repo,
+                state,
+                writes,
+                f"更新 {existing.name} v{target.version} 插件依赖版本",
             )
             return versions[position].model_dump(mode="json")
         except GitHubError as exc:

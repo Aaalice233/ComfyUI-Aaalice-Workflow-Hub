@@ -41,6 +41,7 @@ from .service import (
     subscription_cache_path,
     update_product,
     update_version_changelog,
+    update_version_dependencies,
 )
 from .storage import UserStorage
 
@@ -1522,6 +1523,74 @@ def register_routes() -> None:
                 workflow_id,
                 version,
                 str(data.get("changelog", "")),
+                operation=operation,
+            ),
+        )
+
+    @routes.post(f"{BASE}/publisher/dependency-commits")
+    @endpoint
+    async def publisher_dependency_commits(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        sources = data.get("sources")
+        if not isinstance(sources, list) or not sources or len(sources) > 100:
+            raise UserFacingError("request.invalid_payload")
+        storage = UserStorage.from_request(request)
+        token = await _github_token(storage)
+        client = GitHubClient(token)
+
+        async def load(raw: Any) -> dict[str, Any]:
+            source = str(raw or "").strip()
+            try:
+                dep_owner, dep_repo = parse_public_repository(source)
+            except ValueError:
+                raise UserFacingError("publisher.repository_invalid") from None
+            canonical = f"https://github.com/{dep_owner}/{dep_repo}"
+            try:
+                commits = await client.list_recent_commits(dep_owner, dep_repo)
+            except (GitHubError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                detail = exc.message if isinstance(exc, GitHubError) else str(exc) or exc.__class__.__name__
+                return {"source_url": canonical, "commits": [], "error": detail}
+            return {"source_url": canonical, "commits": commits}
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def bounded(raw: Any) -> dict[str, Any]:
+            async with semaphore:
+                return await load(raw)
+
+        return web.json_response({"items": await asyncio.gather(*(bounded(item) for item in sources))})
+
+    @routes.post(f"{BASE}/publisher/workflows/{{owner}}/{{repo}}/{{workflow_id}}/versions/{{version}}/dependencies")
+    @endpoint
+    async def publisher_version_dependencies(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        if data.get("confirmed") is not True:
+            raise UserFacingError("publisher.confirmation_required")
+        updates = data.get("updates")
+        if not isinstance(updates, list) or not updates:
+            raise UserFacingError("request.invalid_payload")
+        owner = request.match_info["owner"]
+        repo = request.match_info["repo"]
+        workflow_id = request.match_info["workflow_id"]
+        version = request.match_info["version"]
+        storage = UserStorage.from_request(request)
+        return await _start_publisher_management_operation(
+            request,
+            {
+                "action": "update_dependencies",
+                "owner": owner,
+                "repo": repo,
+                "workflow_id": workflow_id,
+                "version": version,
+            },
+            lambda token, operation: update_version_dependencies(
+                storage,
+                token,
+                owner,
+                repo,
+                workflow_id,
+                version,
+                updates,
                 operation=operation,
             ),
         )
