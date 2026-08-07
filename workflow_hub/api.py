@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
@@ -1239,7 +1240,7 @@ def register_routes() -> None:
         data = await poll_device_flow(flow["device_code"])
         if "error" in data:
             return web.json_response({"pending": data["error"] in {"authorization_pending", "slow_down"}, "error": data["error"]})
-        data["created_at"] = int(__import__("time").time())
+        data["created_at"] = int(time.time())
         try:
             user, _ = await GitHubClient(str(data["access_token"])).request("GET", "https://api.github.com/user")
             data["user"] = {"login": user["login"], "avatar_url": user["avatar_url"]}
