@@ -16,6 +16,10 @@
 
 已存储的 token 过期或被撤销（例如在 GitHub 设置中取消了授权）。插件在 GitHub 返回 401 时会自动清除失效凭据并按未登录处理，重新登录即可。订阅与下载不使用该凭据，不受登录态影响。
 
+## 通过 HTTP 代理访问 GitHub
+
+插件的 GitHub 请求（登录、发布、订阅刷新、下载）和 ComfyUI-Manager 请求都会读取系统代理环境变量（`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`）。使用代理时请在启动 ComfyUI 前设置好环境变量。
+
 ## 订阅源刷新失败
 
 订阅清单优先通过 GitHub Contents API 读取；公共 API 限流时会自动回退到带强制刷新参数的 GitHub Raw 只读地址。已有订阅会保留本地缓存作为失败回退，但网页打开和手动刷新都会强制重新校验远端。新订阅或刷新仍失败时，请确认仓库公开、根目录存在 `workflow-catalog.json`，并检查网络、VPN 或 TUN 模式。订阅无需 GitHub 登录。
