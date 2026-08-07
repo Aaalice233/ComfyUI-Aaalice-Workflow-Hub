@@ -56,6 +56,20 @@ _MAX_UPDATE_INTERVAL_HOURS = 168
 _notification_check_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
 
+def _plugin_version() -> str:
+    try:
+        for line in (ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "version":
+                return value.strip().strip('"')
+    except OSError:
+        pass
+    return "unknown"
+
+
+PLUGIN_VERSION = _plugin_version()
+
+
 async def _json(request: web.Request) -> dict[str, Any]:
     origin = request.headers.get("Origin")
     if origin:
@@ -871,7 +885,7 @@ def register_routes() -> None:
         github_user = credential.get("user") if credential and isinstance(credential.get("user"), dict) else None
         return web.json_response(
             {
-                "plugin_version": "1.0.1",
+                "plugin_version": PLUGIN_VERSION,
                 "catalog_cache_scope": hashlib.sha256(storage.key.encode("utf-8")).hexdigest()[:32],
                 "minimum_frontend": "1.33.9",
                 "comfyui_version": current_comfyui_version(),

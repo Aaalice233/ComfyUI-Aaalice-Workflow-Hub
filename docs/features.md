@@ -69,6 +69,7 @@
 - 用户确认后只执行勾选的安装或版本切换；Git 依赖按锁定 commit 执行，Manager 依赖交给兼容的 ComfyUI-Manager 队列处理，手动依赖和冲突不会自动执行。
 - 点击执行后先检查 GitHub/Comfy Registry 网络连通性；失败会在同一进度条和日志中提示检查网络、VPN 或 TUN 模式。
 - Git clone/fetch/checkout 可安全并行执行，Python `requirements.txt` 安装按插件完成后串行执行并计入进度；Manager 的 post-install 依赖处理由 Manager 执行并回传结果。两种路径共用同一个异步安装操作、逐插件状态、实时日志和持久化历史，完成后提示重启 ComfyUI。
+- 依赖弹窗的安装按钮、进度条和逐插件日志固定在插件列表上方；进度展示只跟随本次面板会话中启动的安装操作，历史已完成或失败的操作不会在重开面板后残留显示，手动重新检查依赖时同步清除已结束的执行展示。
 - 内核版本只做兼容性检测与提示（详情页顶部状态控件和详情弹窗展示当前版本、工作流要求和对齐状态），不自动切换 ComfyUI 内核；版本未声明或无法可靠比较时明确显示未知状态。
 - Manager 不可用时仍允许下载工作流。
 - 自动扫描并打包画布节点、子图和侧边栏图像控件引用的本地图像（包括 `LoadImage`、`LoadImageMask`、`LoadImageOutput` 及兼容的 image widget），安装时按原引用写入 ComfyUI 根 `input/` 目录，不改写工作流引用；工作流文件直接写入当前用户的 `workflows/` 目录。

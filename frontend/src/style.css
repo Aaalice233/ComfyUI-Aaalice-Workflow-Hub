@@ -3740,6 +3740,7 @@ code {
 .dependency-plan-actions {
   display: grid;
   margin-top: 8px;
+  margin-bottom: 12px;
   gap: 6px;
 }
 
@@ -3813,7 +3814,10 @@ code {
 .dependency-execution {
   display: grid;
   margin-top: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
   gap: 10px;
+  box-shadow: inset 0 -1px rgb(255 255 255 / 6%);
 }
 
 .dependency-progress-head {

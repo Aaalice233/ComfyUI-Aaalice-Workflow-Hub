@@ -1434,7 +1434,16 @@ async function loadLocalVersion(item: Product, version: Version) {
     notice.value = t.value("workflowLoaded");
   });
 }
+function clearFinishedDependencyExecution(key: string) {
+  const operationId = dependencyOperationIds[key];
+  if (!operationId) return;
+  const operation = operations.value.find((item) => item.id === operationId);
+  if (operation && isOperationActive(operation)) return;
+  delete dependencyOperationIds[key];
+  delete dependencyOperationSynced[key];
+}
 async function planDependencies(item: Product, version: Version) {
+  clearFinishedDependencyExecution(dependencyKey(item, version));
   await withBusy("dependency-plan", async () => { await fetchDependencyPlan(item, version); });
 }
 async function fetchDependencyPlan(item: Product, version: Version): Promise<DependencyPlan[]> {
@@ -1469,6 +1478,7 @@ async function fetchDependencyPlan(item: Product, version: Version): Promise<Dep
 async function toggleDependencyAlignment(item: Product, version: Version, enabled: boolean) {
   const key = dependencyKey(item, version);
   dependencyAlignment[key] = enabled;
+  clearFinishedDependencyExecution(key);
   await withBusy("dependency-plan", async () => { await fetchDependencyPlan(item, version); });
 }
 async function autoPlanDependencies(item: Product | null, version: Version | null) {
@@ -1667,9 +1677,9 @@ async function pollOperations() {
         syncManagerResults(operation, updates);
       }
       const workflowKey = typeof operation.metadata?.workflow_key === "string" ? operation.metadata.workflow_key : "";
-      if (operation.kind === "dependencies" && workflowKey && !dependencyOperationIds[workflowKey]) {
+      if (operation.kind === "dependencies" && workflowKey && isOperationActive(operation) && !dependencyOperationIds[workflowKey]) {
         dependencyOperationIds[workflowKey] = operation.id;
-        dependencyOperationSynced[workflowKey] = !isOperationActive(operation);
+        dependencyOperationSynced[workflowKey] = false;
       }
     }
     for (const [key, operationId] of Object.entries(dependencyOperationIds)) {
@@ -2868,6 +2878,38 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
             <div v-if="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] === false" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlignmentDisabledWarning") }}</span></div>
+            <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && dependencyChangeCount(dependencyKey(selected, activeDetailVersion))" class="dependency-plan-actions">
+              <button class="primary wide"
+                :disabled="!dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)) || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
+                @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("oneClickInstall") }}</button>
+            </div>
+            <div v-if="activeDependencyExecution" class="dependency-execution">
+              <div class="dependency-progress-head">
+                <span>{{ t("installProgress", { done: activeDependencyExecution.done, total: activeDependencyExecution.total }) }}</span>
+                <div class="dependency-progress"><div class="dependency-progress-bar" :style="{ width: `${Math.round((activeDependencyExecution.done / Math.max(activeDependencyExecution.total, 1)) * 100)}%` }"></div></div>
+              </div>
+              <ul class="dependency-tasks">
+                <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
+                  <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="15" class="dependency-task-spin" />
+                  <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
+                  <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
+                  <Clock v-else :size="15" />
+                  <span class="dependency-task-name"><strong>{{ task.name }}</strong><small v-if="task.version">{{ task.version }}</small></span>
+                  <span class="dependency-task-state">{{ t(dependencyTaskStateKeys[task.state]) }}</span>
+                  <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
+                </li>
+              </ul>
+              <details v-if="activeDependencyExecution.logs.length" class="dependency-logs" open>
+                <summary>{{ t("installLogs", { count: activeDependencyExecution.logs.length }) }}</summary>
+                <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
+              </details>
+              <div v-if="activeDependencyExecution.finished" class="dependency-result">
+                <span v-if="dependencyExecutionFailures">{{ t("installFinishedWithFailures", { count: dependencyExecutionFailures }) }}</span>
+                <span v-else>{{ t("installFinished") }}</span>
+                <span v-if="!dependencyExecutionFailures">{{ t("restartToApply") }}</span>
+                <pre v-if="dependencyExecutionFailures && activeDependencyOperation?.error_code">{{ operationErrorMessage(activeDependencyOperation) }}</pre>
+              </div>
+            </div>
             <template v-for="node in activeDetailVersion.custom_nodes" :key="node.source_url || node.registry_id || node.name">
               <template v-for="entry in [dependencyPlanEntry(node)]" :key="`plan-${node.source_url || node.registry_id || node.name}`">
                 <div class="asset-row plugin-asset-row" :class="{ 'has-selection': entry && dependencyActionRequiresSelection(entry.action), 'dependency-selected': entry && dependencyActionRequiresSelection(entry.action) && dependencyActionSelected(dependencyKey(selected, activeDetailVersion), entry) }" @click="toggleDependencyRow(dependencyKey(selected, activeDetailVersion), entry)">
@@ -2901,39 +2943,7 @@ onBeforeUnmount(() => {
                 </div>
               </template>
             </template>
-            <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && dependencyChangeCount(dependencyKey(selected, activeDetailVersion))" class="dependency-plan-actions">
-              <button class="primary wide"
-                :disabled="!dependencySelectedChangeCount(dependencyKey(selected, activeDetailVersion)) || !selectedDependencyActions[dependencyKey(selected, activeDetailVersion)]?.every((id) => dependencyActionAvailable(dependencyKey(selected, activeDetailVersion), id)) || !!busy || dependencyOperationRunning || dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)]"
-                @click="executeDependencyPlan(selected, activeDetailVersion)">{{ t("oneClickInstall") }}</button>
-            </div>
             <div v-if="!dependencyPlanLoading[dependencyKey(selected, activeDetailVersion)] && !dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="dependency-inline-state dependency-inline-state-muted"><TriangleAlert :size="15" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
-            <div v-if="activeDependencyExecution" class="dependency-execution">
-              <div class="dependency-progress-head">
-                <span>{{ t("installProgress", { done: activeDependencyExecution.done, total: activeDependencyExecution.total }) }}</span>
-                <div class="dependency-progress"><div class="dependency-progress-bar" :style="{ width: `${Math.round((activeDependencyExecution.done / Math.max(activeDependencyExecution.total, 1)) * 100)}%` }"></div></div>
-              </div>
-              <ul class="dependency-tasks">
-                <li v-for="task in activeDependencyExecution.tasks" :key="task.registryId" :data-state="task.state">
-                  <LoaderCircle v-if="task.state === 'installing' || task.state === 'python_installing'" :size="15" class="dependency-task-spin" />
-                  <CheckCircle2 v-else-if="task.state === 'success'" :size="15" />
-                  <AlertCircle v-else-if="task.state === 'failed'" :size="15" />
-                  <Clock v-else :size="15" />
-                  <span class="dependency-task-name"><strong>{{ task.name }}</strong><small v-if="task.version">{{ task.version }}</small></span>
-                  <span class="dependency-task-state">{{ t(dependencyTaskStateKeys[task.state]) }}</span>
-                  <small v-if="task.message" class="dependency-task-message">{{ task.message }}</small>
-                </li>
-              </ul>
-              <details v-if="activeDependencyExecution.logs.length" class="dependency-logs" open>
-                <summary>{{ t("installLogs", { count: activeDependencyExecution.logs.length }) }}</summary>
-                <pre>{{ activeDependencyExecution.logs.join("\n") }}</pre>
-              </details>
-              <div v-if="activeDependencyExecution.finished" class="dependency-result">
-                <span v-if="dependencyExecutionFailures">{{ t("installFinishedWithFailures", { count: dependencyExecutionFailures }) }}</span>
-                <span v-else>{{ t("installFinished") }}</span>
-                <span v-if="!dependencyExecutionFailures">{{ t("restartToApply") }}</span>
-                <pre v-if="dependencyExecutionFailures && activeDependencyOperation?.error_code">{{ operationErrorMessage(activeDependencyOperation) }}</pre>
-              </div>
-            </div>
           </section>
           <div v-else class="dependency-empty"><CheckCircle2 :size="17" /><span>{{ t("pluginStatusNoDependenciesDetail") }}</span></div>
         </div>
