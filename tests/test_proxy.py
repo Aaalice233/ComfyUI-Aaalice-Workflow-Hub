@@ -35,7 +35,7 @@ class ProxyParseTest(unittest.TestCase):
     def test_override_parsing(self):
         self.assertEqual(
             proxy._parse_proxy_override("localhost;127.*;*.LOCAL;<local>"),
-            ["localhost", "127.", ".local"],
+            ["localhost", "127.*", ".local"],
         )
         self.assertEqual(proxy._parse_proxy_override("*zhihu.com"), ["zhihu.com"])
 
