@@ -18,7 +18,11 @@
 
 ## 通过 HTTP 代理访问 GitHub
 
-插件的 GitHub 请求（登录、发布、订阅刷新、下载）和 ComfyUI-Manager 请求都会读取系统代理环境变量（`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`）。使用代理时请在启动 ComfyUI 前设置好环境变量。
+插件启动时会自动继承 Windows 系统代理（“设置 → 网络 → 代理”中启用的代理服务器，Clash/v2ray 等工具开启“系统代理”即属于此类），Git 克隆、pip 依赖安装、GitHub 请求（登录、发布、订阅刷新、下载）和 ComfyUI-Manager 请求都会经过该代理，无需开启 TUN 模式。注入的 `NO_PROXY` 始终包含本机回环地址，本机请求不受影响。
+
+如需使用与系统代理不同的配置，可在启动 ComfyUI 前设置 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量；只要任一代理环境变量已存在，插件就不会读取系统代理，完全遵循环境变量。启动日志中的 `System proxy applied: ...` 可确认系统代理是否生效（凭据会被打码）。
+
+注意：暂不支持 PAC 自动配置脚本；系统代理关闭时插件不会注入任何代理。代理指向的加速工具必须正在运行，否则连接会失败。
 
 ## 订阅源刷新失败
 

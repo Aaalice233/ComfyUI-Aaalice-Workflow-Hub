@@ -22,6 +22,7 @@ from .legacy_manager import ManagerAdapter, local_manager_status
 from .dependency_policy import is_ignored_dependency
 from .manager import GitAdapter, local_git_status
 from .operations import Operation, operations
+from .proxy import apply_system_proxy, proxy_status
 from .security import ensure_within, parse_public_repository
 from .service import (
     add_subscription,
@@ -855,6 +856,9 @@ def register_routes() -> None:
         from server import PromptServer
     except ImportError:
         return
+    proxy = apply_system_proxy()
+    if proxy["enabled"] and proxy["source"] == "system":
+        print(f"[Aaalice Workflow Hub] System proxy applied: {proxy['proxies']}")
     routes = PromptServer.instance.routes
 
     @routes.get("/workflow-hub")
@@ -886,6 +890,7 @@ def register_routes() -> None:
         return web.json_response(
             {
                 "plugin_version": PLUGIN_VERSION,
+                "proxy": proxy_status(),
                 "catalog_cache_scope": hashlib.sha256(storage.key.encode("utf-8")).hexdigest()[:32],
                 "minimum_frontend": "1.33.9",
                 "comfyui_version": current_comfyui_version(),
