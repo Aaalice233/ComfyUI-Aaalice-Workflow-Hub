@@ -280,7 +280,9 @@ async def _scan_repositories() -> list[GitRepository]:
 
 
 def _requested_commit(item: dict[str, Any]) -> str | None:
-    commit = str(item.get("commit") or "").strip().casefold()
+    # 执行阶段收到的是 plan() 输出的字典，提交记录在 requested 字段；
+    # 原始清单依赖使用 commit，历史清单可能把 SHA 放在 version。
+    commit = str(item.get("commit") or item.get("requested") or "").strip().casefold()
     if _is_commit(commit):
         return commit
     legacy_version = str(item.get("version") or "").strip().casefold()

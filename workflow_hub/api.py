@@ -447,12 +447,14 @@ async def _perform_dependency_operation(
             (item for item in results if str(item.get("task_id") or item.get("registry_id") or item.get("source_url") or item.get("name") or "") == key),
             None,
         )
+        previous_state = existing.get("state") if existing is not None else None
         if existing is None:
             results.append(result)
         else:
             existing.update(result)
         operation.result = {"tasks": list(results)}
-        if result.get("state") == "failed":
+        # Git 阶段和 requirements 阶段会对同一失败任务各发一次结果，只记录首次失败
+        if result.get("state") == "failed" and previous_state != "failed":
             code = result.get("error_code") or "dependencies.git_command_failed"
             params = result.get("error_params") or {}
             await add_log(f"{result.get('name', '')}: {code} {params}")
@@ -1140,9 +1142,9 @@ def register_routes() -> None:
             version_policy,
             manager_origin,
         )
-        selected_keys = {_dependency_key(item) for item in selected}
         fresh_by_key = {str(item.get("task_id")): item for item in fresh_plan}
         actions: list[dict[str, Any]] = []
+        appended_keys: set[str] = set()
         for selected_item in selected:
             key = _dependency_key(selected_item)
             fresh = fresh_by_key.get(key)
@@ -1151,7 +1153,9 @@ def register_routes() -> None:
                     "dependencies.plan_changed",
                     {"name": str(selected_item.get("name") or selected_item.get("registry_id") or selected_item.get("source_url") or key)},
                 )
-            if key in selected_keys:
+            # 前端可能提交重复条目，同一个依赖只执行一次
+            if key not in appended_keys:
+                appended_keys.add(key)
                 actions.append(fresh)
         metadata = dict(data.get("metadata") or {})
         metadata["actions"] = [

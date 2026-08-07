@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from workflow_hub import manager as manager_module
 from workflow_hub.dependency_policy import is_ignored_dependency
 from workflow_hub.legacy_manager import ManagerAdapter
-from workflow_hub.manager import GitAdapter, GitRepository, _canonical_source, local_git_status
+from workflow_hub.manager import GitAdapter, GitRepository, _canonical_source, _requested_commit, local_git_status
 
 
 COMMIT_A = "a" * 40
@@ -75,6 +75,15 @@ class GitSourceTests(IsolatedAsyncioTestCase):
             result = self._run_plan(dependencies)
         self.assertEqual(result, [])
         scan.assert_not_awaited()
+
+    def test_requested_commit_accepts_plan_output_field(self):
+        # execute 收到的是 plan() 输出的字典，提交记录在 requested 字段
+        self.assertEqual(_requested_commit({"requested": COMMIT_A}), COMMIT_A)
+        self.assertEqual(_requested_commit({"commit": COMMIT_A}), COMMIT_A)
+        self.assertEqual(_requested_commit({"commit": COMMIT_A.upper()}), COMMIT_A)
+        self.assertEqual(_requested_commit({"version": COMMIT_A}), COMMIT_A)
+        self.assertIsNone(_requested_commit({"requested": "1.0.0"}))
+        self.assertIsNone(_requested_commit({}))
 
     def test_ignored_dependency_matches_source_and_identifier(self):
         self.assertTrue(is_ignored_dependency({"source_url": MANAGER_SOURCE}))
