@@ -2380,6 +2380,13 @@ select:focus {
   white-space: nowrap;
 }
 
+.publish-resource-row em .dependency-source-link {
+  width: 22px;
+  height: 22px;
+  margin-left: 6px;
+  vertical-align: -6px;
+}
+
 .resource-row-icon {
   display: grid;
   width: 28px;
@@ -3790,6 +3797,25 @@ code {
   background: rgb(145 86 255 / 18%);
 }
 
+.dependency-source-link {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  flex: none;
+  place-items: center;
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.18s ease, background-color 0.18s ease;
+}
+
+.dependency-source-link:hover,
+.dependency-source-link:focus-visible {
+  color: var(--accent);
+  background: rgb(255 255 255 / 6%);
+  outline: none;
+}
+
 .confirm-row {
   display: flex;
   margin: 9px 0;
@@ -5015,7 +5041,13 @@ pre {
   gap: 10px;
 }
 
-.download-check-dependency > span {
+.download-check-dependency-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.download-check-dependency > span:not(.download-check-dependency-meta) {
   display: grid;
   min-width: 0;
   grid-template-columns: auto minmax(0, 1fr);
@@ -5023,7 +5055,7 @@ pre {
   gap: 2px 7px;
 }
 
-.download-check-dependency > span svg {
+.download-check-dependency > span:not(.download-check-dependency-meta) > svg {
   grid-row: span 2;
   color: var(--warning);
 }

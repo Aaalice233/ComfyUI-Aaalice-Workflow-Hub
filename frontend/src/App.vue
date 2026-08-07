@@ -768,6 +768,12 @@ function dependencyIdentity(item: { task_id?: string; source_url?: string | null
   if (item.registry_id) return `manager:${item.registry_id.trim().toLowerCase()}`;
   return `name:${String(item.name || "").trim().toLowerCase()}`;
 }
+function dependencySourceUrl(item: { source_url?: string | null; registry_id?: string | null }) {
+  const source = (item.source_url || "").trim();
+  if (/^https:\/\//i.test(source)) return source;
+  const registryId = (item.registry_id || "").trim();
+  return registryId ? `https://registry.comfy.org/nodes/${encodeURIComponent(registryId)}` : "";
+}
 const dependencyChangeActions = new Set<DependencyPlan["action"]>(["install", "upgrade", "downgrade"]);
 function dependencyActionRequiresSelection(action: DependencyPlan["action"]) {
   return dependencyChangeActions.has(action);
@@ -2481,7 +2487,16 @@ onBeforeUnmount(() => {
                         />
                         <span class="resource-row-icon"><PackageOpen :size="15" /></span>
                         <span><strong>{{ item.name }}</strong><small :title="pluginSourceLabel(item)">{{ pluginSourceLabel(item) }}</small></span>
-                        <em><b class="dependency-installer-badge" :data-installer="item.installer">{{ item.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ pluginVersionLabel(item) }}</em>
+                        <em><b class="dependency-installer-badge" :data-installer="item.installer">{{ item.installer === "manager" ? t("installerManager") : t("installerGit") }}</b> {{ pluginVersionLabel(item) }}<a
+                          v-if="dependencySourceUrl(item)"
+                          class="dependency-source-link"
+                          :href="dependencySourceUrl(item)"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          :title="t('openPluginSource')"
+                          :aria-label="`${t('openPluginSource')}: ${item.name}`"
+                          @click.stop
+                        ><ExternalLink :size="14" /></a></em>
                       </label>
                       <div v-if="!resourceScanPending && !dependencyScanError && !scannedPluginDependencies.length" class="publish-resource-empty"><CheckCircle2 :size="18" /><span><strong>{{ t("noExtraPlugins") }}</strong><small>{{ t("environmentReady") }}</small></span></div>
                     </div>
@@ -2939,6 +2954,16 @@ onBeforeUnmount(() => {
                       class="dependency-status"
                       :data-tone="entry.action === 'keep' ? 'ok' : entry.action === 'install' ? 'missing' : entry.action === 'upgrade' || entry.action === 'downgrade' || entry.action === 'conflict' ? 'warn' : 'muted'"
                     >{{ t(dependencyActionLabels[entry.action]) }}</b>
+                    <a
+                      v-if="dependencySourceUrl(node)"
+                      class="dependency-source-link"
+                      :href="dependencySourceUrl(node)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      :title="t('openPluginSource')"
+                      :aria-label="`${t('openPluginSource')}: ${node.name}`"
+                      @click.stop
+                    ><ExternalLink :size="15" /></a>
                   </span>
                 </div>
               </template>
@@ -3009,7 +3034,18 @@ onBeforeUnmount(() => {
           </div>
           <div v-for="entry in preflightDependencyIssues" :key="`download-check-${dependencyActionKey(entry)}`" class="download-check-dependency">
             <span><PackageOpen :size="15" /><strong>{{ entry.name }}</strong><small>{{ entry.installed || t("notInstalled") }} → {{ entry.requested || t("gitRevisionUnavailable") }}</small></span>
-            <b class="dependency-status" :data-tone="dependencyActionTone(entry.action)">{{ t(dependencyActionLabels[entry.action]) }}</b>
+            <span class="download-check-dependency-meta">
+              <b class="dependency-status" :data-tone="dependencyActionTone(entry.action)">{{ t(dependencyActionLabels[entry.action]) }}</b>
+              <a
+                v-if="dependencySourceUrl(entry)"
+                class="dependency-source-link"
+                :href="dependencySourceUrl(entry)"
+                target="_blank"
+                rel="noopener noreferrer"
+                :title="t('openPluginSource')"
+                :aria-label="`${t('openPluginSource')}: ${entry.name}`"
+              ><ExternalLink :size="15" /></a>
+            </span>
           </div>
           <p v-if="preflightSyncableDependencies.length" class="download-check-hint">{{ t("downloadCheckSyncHint", { count: preflightSyncableDependencies.length }) }}</p>
           <p v-else class="download-check-hint">{{ t("downloadCheckManualPluginHint") }}</p>
