@@ -33,6 +33,7 @@ import {
   Search as SearchIcon,
   Settings as SettingsIcon,
   ShieldCheck,
+  SquarePen,
   Trash2,
   TriangleAlert,
   UploadCloud,
@@ -2794,7 +2795,7 @@ onBeforeUnmount(() => {
                         <span class="manage-version-meta"><strong>v{{ version.version }}</strong><small>{{ new Date(version.published_at).toLocaleDateString() }} · {{ humanBytes(version.package.size) }}</small></span>
                         <p>{{ version.changelog }}</p>
                         <span class="manage-version-actions">
-                          <button class="ghost compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="openChangelogEditor(product, version)">{{ t("editChangelog") }}</button>
+                          <button class="ghost compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="openChangelogEditor(product, version)"><SquarePen :size="13" />{{ t("editChangelog") }}</button>
                           <button v-if="versionGitDependencies(version).length" class="ghost compact-action" :disabled="!!busy || publisherManagementOperationRunning" @click="openDependencyPinEditor(product, version)"><FolderGit2 :size="13" />{{ t("updateDependencies") }}</button>
                           <button class="ghost compact-action danger-action" :disabled="!!busy || publisherManagementOperationRunning" @click="deleteManagedVersion(product, version)"><Trash2 :size="13" />{{ t("deleteVersion") }}</button>
                         </span>
