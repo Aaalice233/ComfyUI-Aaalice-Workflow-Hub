@@ -22,7 +22,19 @@ class UserStorage:
         from server import PromptServer
 
         manager = PromptServer.instance.user_manager
-        marker = Path(manager.get_request_user_filepath(request, "workflow_hub/.root"))
+        marker: Path | None = None
+        try:
+            resolved = manager.get_request_user_filepath(request, "workflow_hub/.root")
+            if resolved is not None:
+                marker = Path(resolved)
+        except KeyError:
+            # 多用户模式下未携带 comfy-user 身份的请求会被 UserManager 拒绝；
+            # 回退到磁盘上的 default 用户目录，与单用户模式语义一致。
+            marker = None
+        if marker is None:
+            import folder_paths
+
+            marker = Path(folder_paths.get_user_directory()) / "default" / "workflow_hub" / ".root"
         return cls(marker.parent.parent)
 
     @property

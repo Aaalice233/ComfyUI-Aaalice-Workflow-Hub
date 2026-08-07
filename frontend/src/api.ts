@@ -1,5 +1,16 @@
 const BASE = "/workflow-hub/api/v1";
 
+// 多用户 ComfyUI 下宿主前端把当前用户存在 localStorage，请求必须透传该身份，
+// 否则后端无法定位用户目录（Unknown user: default）。
+function comfyUserHeader(): Record<string, string> {
+  try {
+    const user = window.localStorage.getItem("Comfy.userId");
+    return user ? { "Comfy-User": user } : {};
+  } catch {
+    return {};
+  }
+}
+
 type ApiErrorParams = Record<string, string | number>;
 
 export class ApiError extends Error {
@@ -15,6 +26,8 @@ export class ApiError extends Error {
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
+  const comfyUser = comfyUserHeader();
+  if (comfyUser["Comfy-User"] && !headers.has("Comfy-User")) headers.set("Comfy-User", comfyUser["Comfy-User"]);
   const method = (options.method || "GET").toUpperCase();
   const isWrite = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
   if (isWrite && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");

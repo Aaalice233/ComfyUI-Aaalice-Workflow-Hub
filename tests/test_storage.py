@@ -45,3 +45,32 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
 
             installed = await storage.read_json("installed.json", [])
             self.assertEqual([item["workflow_id"] for item in installed], ["one"])
+
+
+class FromRequestTests(unittest.TestCase):
+    def _fake_server(self, manager):
+        import sys
+        from unittest import mock
+
+        server = mock.ModuleType("server")
+        server.PromptServer = type("PromptServer", (), {"instance": type("Inst", (), {"user_manager": manager})()})
+        return mock.patch.dict(sys.modules, {"server": server})
+
+    def test_unknown_user_falls_back_to_default_directory(self):
+        with TemporaryDirectory() as folder:
+            manager = type("Manager", (), {"get_request_user_filepath": lambda *args, **kwargs: (_ for _ in ()).throw(KeyError("Unknown user: default"))})()
+            folder_paths = type("FolderPaths", (), {"get_user_directory": staticmethod(lambda: folder)})()
+            import sys
+            from unittest import mock
+
+            with self._fake_server(manager), mock.patch.dict(sys.modules, {"folder_paths": folder_paths}):
+                storage = UserStorage.from_request(object())
+            self.assertEqual(storage.root, (Path(folder) / "default").resolve())
+
+    def test_known_user_uses_manager_path(self):
+        with TemporaryDirectory() as folder:
+            target = Path(folder) / "alice" / "workflow_hub" / ".root"
+            manager = type("Manager", (), {"get_request_user_filepath": lambda *args, **kwargs: str(target)})()
+            with self._fake_server(manager):
+                storage = UserStorage.from_request(object())
+            self.assertEqual(storage.root, (Path(folder) / "alice").resolve())

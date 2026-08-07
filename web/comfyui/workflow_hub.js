@@ -48,12 +48,21 @@ function scheduleWorkflowUpdateCheck(nextCheckAt) {
   }, delay);
 }
 
+function comfyUserHeaders() {
+  try {
+    const user = window.localStorage.getItem("Comfy.userId");
+    return user ? { "Comfy-User": user } : {};
+  } catch {
+    return {};
+  }
+}
+
 async function notifyWorkflowUpdates() {
   try {
     const response = await fetch("/workflow-hub/api/v1/update-notifications", {
       method: "POST",
       cache: "no-store",
-      headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-cache", ...comfyUserHeaders() },
       body: "{}",
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);

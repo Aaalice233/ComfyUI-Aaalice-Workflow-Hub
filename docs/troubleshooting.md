@@ -12,6 +12,10 @@
 
 检查 GitHub App Client ID 是否已配置。可使用环境变量 `WORKFLOW_HUB_GITHUB_CLIENT_ID` 覆盖内置值，修改后重启 ComfyUI。Device Flow 授权过期时重新开始。
 
+## 提示“请求无效： Unknown user: default”
+
+ComfyUI 以 `--multi-user` 多用户模式运行时，请求必须携带当前用户身份。插件面板和宿主扩展会自动透传 ComfyUI 前端已登录的用户；早期版本缺少该透传时会报此错误，升级插件即可。若仍未解决，请确认已在 ComfyUI 界面中选择用户，或移除 `--multi-user` 参数使用单用户模式。
+
 ## 提示“GitHub 登录已失效，请重新登录”
 
 已存储的 token 过期或被撤销（例如在 GitHub 设置中取消了授权）。插件在 GitHub 返回 401 时会自动清除失效凭据并按未登录处理，重新登录即可。订阅与下载不使用该凭据，不受登录态影响。
