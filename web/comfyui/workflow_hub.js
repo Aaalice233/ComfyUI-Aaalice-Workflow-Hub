@@ -272,7 +272,7 @@ app.registerExtension({
   ],
   aboutPageBadges: [
     {
-      label: "Aaalice Workflow Hub v1.0.0",
+      label: "Aaalice Workflow Hub v1.0.1",
       url: "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub",
       icon: "pi pi-box",
     },

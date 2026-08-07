@@ -77,7 +77,7 @@ def inspect_package(path: Path, expected_sha256: str | None = None) -> dict[str,
             names.add(name)
         if not REQUIRED.issubset(names):
             raise ValueError(f"工作流包缺少必需文件: {', '.join(sorted(REQUIRED - names))}")
-        if {"preview.png", "preview.webp"}.issubset(names):
+        if sum(1 for name in names if name.startswith("preview.")) > 1:
             raise ValueError("预览图最多一个")
         try:
             manifest = json.loads(archive.read("manifest.json"))

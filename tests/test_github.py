@@ -1,7 +1,33 @@
 import base64
 import unittest
+import unittest.mock
 
+from workflow_hub import github
 from workflow_hub.github import BranchState, GitHubClient, GitHubError, GitTreeFile, TokenStore
+
+
+class TokenRefreshResponse:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return None
+
+    async def json(self):
+        return {"access_token": "new-token", "refresh_token": "new-refresh"}
+
+
+class TokenRefreshSession:
+    def post(self, *_args, **_kwargs):
+        return TokenRefreshResponse()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return None
 
 
 class NotModifiedResponse:
@@ -103,6 +129,12 @@ class WriteOnlyKeyring:
 
 
 class GitHubTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_access_token_stamps_created_at(self):
+        with unittest.mock.patch.object(github.aiohttp, "ClientSession", TokenRefreshSession):
+            data = await github.refresh_access_token("old-refresh")
+        self.assertEqual(data["access_token"], "new-token")
+        self.assertIsInstance(data["created_at"], int)
+
     async def test_expected_not_modified_response_is_not_treated_as_redirect(self):
         data, headers = await GitHubClient(session=NotModifiedSession()).request(
             "GET",

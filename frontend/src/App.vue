@@ -2221,7 +2221,7 @@ onBeforeUnmount(() => {
     <aside class="nav-rail">
       <div class="brand">
         <span class="brand-mark"><LibraryBig :size="19" /></span>
-        <span class="brand-copy"><strong>{{ t("title") }}</strong><small>v1.0.0</small></span>
+        <span class="brand-copy"><strong>{{ t("title") }}</strong><small>v1.0.1</small></span>
       </div>
 
       <nav class="primary-nav" :aria-label="t('primaryNavigation')">

@@ -91,6 +91,18 @@ class PackageTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     inspect_package(path)
 
+    def test_multiple_preview_files_are_rejected(self):
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "previews.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("manifest.json", "{}")
+                archive.writestr("CHANGELOG.md", "# change")
+                archive.writestr("workflow.json", "{}")
+                archive.writestr("preview.png", b"png")
+                archive.writestr("preview.jpg", b"jpg")
+            with self.assertRaisesRegex(ValueError, "预览图"):
+                inspect_package(path)
+
     def test_hash_mismatch_is_rejected(self):
         with TemporaryDirectory() as folder:
             path = Path(folder) / "package.zip"

@@ -164,6 +164,8 @@ async def _run_git(
         process.kill()
         await process.communicate()
         raise GitCommandError("git command timed out") from exc
+    # 管道 EOF 不代表子进程退出状态已就绪，必须先 wait 再读 returncode
+    await process.wait()
     if process.returncode:
         detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
         raise GitCommandError(detail)
@@ -222,6 +224,8 @@ async def _install_python_requirements(
         process.kill()
         await process.communicate()
         raise PythonDependencyError("pip install timed out") from exc
+    # 管道 EOF 不代表子进程退出状态已就绪，必须先 wait 再读 returncode
+    await process.wait()
     if process.returncode:
         detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
         raise PythonDependencyError(detail)
