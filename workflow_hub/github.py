@@ -146,7 +146,7 @@ class GitHubClient:
     ) -> tuple[Any, aiohttp.typedefs.LooseHeaders]:
         require_github_https(url)
         own = self._session is None
-        session = self._session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
+        session = self._session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), trust_env=True)
         try:
             headers = self.headers(**kwargs.pop("headers", {}))
             for attempt in range(3):
@@ -417,7 +417,7 @@ class GitHubClient:
 
     async def download(self, url: str, destination: Any, operation: Any | None = None) -> None:
         require_github_https(url)
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300), trust_env=True) as session:
             async with session.get(url, headers=self.headers(), allow_redirects=False) as response:
                 if 300 <= response.status < 400:
                     location = response.headers.get("Location", "")
@@ -447,7 +447,7 @@ class GitHubClient:
 async def start_device_flow() -> dict[str, Any]:
     if not CLIENT_ID:
         raise GitHubError("GitHub App Client ID 尚未配置")
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
             DEVICE_URL,
             headers={"Accept": "application/json"},
@@ -462,7 +462,7 @@ async def start_device_flow() -> dict[str, Any]:
 async def poll_device_flow(device_code: str) -> dict[str, Any]:
     if not CLIENT_ID:
         raise GitHubError("GitHub App Client ID 尚未配置")
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
             TOKEN_URL,
             headers={"Accept": "application/json"},
@@ -481,7 +481,7 @@ async def poll_device_flow(device_code: str) -> dict[str, Any]:
 async def refresh_access_token(refresh_token: str) -> dict[str, Any]:
     if not CLIENT_ID:
         raise GitHubError("GitHub App Client ID 尚未配置")
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=True) as session:
         async with session.post(
             TOKEN_URL,
             headers={"Accept": "application/json"},

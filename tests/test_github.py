@@ -20,6 +20,9 @@ class TokenRefreshResponse:
 
 
 class TokenRefreshSession:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
     def post(self, *_args, **_kwargs):
         return TokenRefreshResponse()
 

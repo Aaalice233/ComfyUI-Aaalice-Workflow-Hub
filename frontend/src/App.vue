@@ -2154,6 +2154,7 @@ async function saveChangelogEditor() {
 }
 async function startLogin() {
   await withBusy("login", async () => {
+    window.clearTimeout(loginTimer);
     const started = await post<{ user_code: string; verification_uri: string; interval: number }>("/github/device/start", {});
     device.value = started;
     deviceCodeCopied.value = false;
@@ -2193,6 +2194,8 @@ async function pollLogin() {
   error.value = result.error || t.value("githubLoginFailed");
 }
 async function logout() {
+  window.clearTimeout(loginTimer);
+  device.value = null;
   await post("/github/logout", {});
   await load();
 }
