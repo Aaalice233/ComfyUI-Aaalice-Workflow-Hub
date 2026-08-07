@@ -138,9 +138,14 @@ class OperationStore:
             await self._persist_owner(storage, operation.owner_key)
 
     async def _monitor(self, operation: Operation) -> None:
+        snapshot: tuple[Any, ...] | None = None
         while operation.status == "running":
             await asyncio.sleep(0.5)
-            await self.persist(operation)
+            # 仅在可见状态变化时落盘；无条件重写会在长时间安装中造成持续的无变化 IO
+            current = (operation.stage, len(operation.logs), repr(operation.progress), repr(operation.result))
+            if current != snapshot:
+                snapshot = current
+                await self.persist(operation)
         await self.persist(operation)
 
     def _trim_order(self, owner_key: str) -> None:

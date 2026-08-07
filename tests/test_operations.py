@@ -30,6 +30,34 @@ class OperationStoreTests(IsolatedAsyncioTestCase):
             self.assertEqual(items[0]["metadata"]["workflow_key"], "demo")
             self.assertEqual(await restored.list(second), [])
 
+    async def test_monitor_persists_state_changes_and_final_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = UserStorage(Path(directory))
+            store = OperationStore()
+            operation = await store.create("download", storage)
+            persisted = 0
+
+            async def counting_persist(item):
+                nonlocal persisted
+                persisted += 1
+                await OperationStore.persist(store, item)
+
+            store.persist = counting_persist  # type: ignore[method-assign]
+            await asyncio.sleep(0.6)
+            idle_writes = persisted
+            operation.stage = "downloading"
+            operation.logs.append("started")
+            await asyncio.sleep(0.6)
+            self.assertGreater(persisted, idle_writes)
+            operation.status = "success"
+            operation.stage = "complete"
+            await asyncio.sleep(0.6)
+
+            restored = OperationStore()
+            items = await restored.list(storage)
+            self.assertEqual(items[0]["status"], "success")
+            self.assertEqual(items[0]["logs"], ["started"])
+
     async def test_running_operation_is_marked_interrupted_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = UserStorage(Path(directory))
