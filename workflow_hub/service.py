@@ -32,7 +32,7 @@ from .catalog import (
     version_repository_path,
 )
 from .errors import UserFacingError
-from .github import BranchState, GitHubClient, GitHubError, GitTreeFile
+from .github import BranchState, GitHubClient, GitHubError, GitTreeFile, tokens
 from .operations import Operation
 from .packages import build_package_files, install_workflow, inspect_package, read_package_files, write_package
 from .repository import build_projection_files, build_repository_files, json_bytes, render_workflows_readme
@@ -171,8 +171,13 @@ def _valid_cached_catalog(path: Path) -> Catalog | None:
 
 async def add_subscription(storage: UserStorage, repository_url: str) -> dict[str, Any]:
     owner, repo = parse_public_repository(repository_url)
-    client = GitHubClient()
-    remote = await client.get_catalog(owner, repo, force=True)
+    client = GitHubClient(await tokens.get(storage.key))
+    try:
+        remote = await client.get_catalog(owner, repo, force=True)
+    except GitHubError as exc:
+        if exc.status != 401:
+            raise
+        remote = await GitHubClient().get_catalog(owner, repo, force=True)
     if remote is None:
         raise ValueError("仓库根目录没有 workflow-catalog.json")
     catalog = validate_catalog_assets(Catalog.model_validate_json(remote.content))
@@ -228,13 +233,25 @@ async def _refresh_subscription(
     )
     if current is None:
         raise UserFacingError("subscription.not_found")
-    client = GitHubClient()
-    remote = await client.get_catalog(
-        owner,
-        repo,
-        None if force else current.get("etag"),
-        force=force,
-    )
+    client = GitHubClient(await tokens.get(storage.key))
+    try:
+        remote = await client.get_catalog(
+            owner,
+            repo,
+            None if force else current.get("etag"),
+            force=force,
+        )
+    except GitHubError as exc:
+        # 已存储凭据被吊销时对公开仓库回退匿名访问，不让订阅刷新硬失败
+        if exc.status != 401:
+            raise
+        client = GitHubClient()
+        remote = await client.get_catalog(
+            owner,
+            repo,
+            None if force else current.get("etag"),
+            force=force,
+        )
     cache = subscription_cache_path(storage, owner, repo)
     canonical_cache, legacy_cache = _cache_paths(storage, owner, repo)
     try:

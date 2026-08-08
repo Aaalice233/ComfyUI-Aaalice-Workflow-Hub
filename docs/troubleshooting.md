@@ -30,7 +30,7 @@ ComfyUI 以 `--multi-user` 多用户模式运行时，请求必须携带当前�
 
 ## 订阅源刷新失败
 
-订阅清单优先通过 GitHub Contents API 读取；公共 API 限流时会自动回退到带强制刷新参数的 GitHub Raw 只读地址。已有订阅会保留本地缓存作为失败回退，但网页打开和手动刷新都会强制重新校验远端。新订阅或刷新仍失败时，请确认仓库公开、根目录存在 `workflow-catalog.json`，并检查网络、VPN 或 TUN 模式。订阅无需 GitHub 登录。
+订阅清单优先通过 GitHub Contents API 读取，已登录 GitHub 时使用用户 token 避免匿名配额耗尽（凭据失效时自动回退匿名）；公共 API 限流时会自动回退到带强制刷新参数的 GitHub Raw 只读地址。已有订阅会保留本地缓存作为失败回退，但网页打开和手动刷新都会强制重新校验远端。新订阅或刷新仍失败时，请确认仓库公开、根目录存在 `workflow-catalog.json`，并检查网络、VPN 或 TUN 模式。订阅无需 GitHub 登录。
 
 ## 新仓库无法发布
 

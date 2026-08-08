@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 from workflow_hub.api import _notification_check_due, _read_update_settings, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _settings_payload
 from workflow_hub.catalog import Catalog
+from workflow_hub.github import ContentFile, GitHubError
 from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager, subscription_cache_path
 from workflow_hub.storage import UserStorage
 
@@ -78,6 +79,50 @@ class UpdateNotificationTests(unittest.TestCase):
     def test_rejects_a_missing_downloaded_file(self) -> None:
         with self.assertRaisesRegex(ValueError, "本地工作流文件不存在"):
             reveal_in_file_manager(Path("missing-workflow.json"))
+
+
+class SubscriptionTokenTests(IsolatedAsyncioTestCase):
+    async def _storage_with_subscription(self, folder: str) -> UserStorage:
+        storage = UserStorage(Path(folder))
+        await storage.write_json("subscriptions.json", [{
+            "owner": "owner",
+            "repo": "repo",
+            "url": "https://github.com/owner/repo",
+            "etag": "etag",
+            "refreshed_at": "",
+            "error": None,
+        }])
+        subscription_cache_path(storage, "owner", "repo").write_bytes(EXAMPLE.read_bytes())
+        return storage
+
+    async def test_refresh_uses_the_stored_github_token(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            updated = with_version(load_catalog(), "9.9").model_dump_json().encode()
+            client = SimpleNamespace(get_catalog=AsyncMock(return_value=ContentFile(content=updated, sha="", etag="new-etag")))
+            factory = unittest.mock.Mock(return_value=client)
+            with (
+                patch("workflow_hub.service.tokens.get", new=AsyncMock(return_value="stored-token")),
+                patch("workflow_hub.service.GitHubClient", new=factory),
+            ):
+                result = await refresh_subscription(storage, "owner", "repo", force=True)
+            factory.assert_called_once_with("stored-token")
+            self.assertTrue(result["changed"])
+
+    async def test_refresh_falls_back_to_anonymous_on_401(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            updated = with_version(load_catalog(), "9.9").model_dump_json().encode()
+            authed = SimpleNamespace(get_catalog=AsyncMock(side_effect=GitHubError("bad credentials", 401)))
+            anonymous = SimpleNamespace(get_catalog=AsyncMock(return_value=ContentFile(content=updated, sha="", etag="new-etag")))
+            clients = iter([authed, anonymous])
+            with (
+                patch("workflow_hub.service.tokens.get", new=AsyncMock(return_value="revoked-token")),
+                patch("workflow_hub.service.GitHubClient", side_effect=lambda token=None: next(clients)),
+            ):
+                result = await refresh_subscription(storage, "owner", "repo", force=True)
+            self.assertTrue(result["changed"])
+            anonymous.get_catalog.assert_awaited_once()
 
 
 class StartupRefreshStateTests(IsolatedAsyncioTestCase):
