@@ -57,6 +57,29 @@ function comfyUserHeaders() {
   }
 }
 
+let pendingUpdateCount = 0;
+let badgeAttempts = 0;
+
+function updatePendingBadge(count) {
+  pendingUpdateCount = count;
+  badgeAttempts = 0;
+  applyPendingBadge();
+}
+
+function applyPendingBadge() {
+  const button = document.querySelector(`button[aria-label="${TOOLTIP}"]`);
+  if (!button) {
+    // The action bar button renders asynchronously after extension setup
+    if (badgeAttempts < 30) {
+      badgeAttempts += 1;
+      window.setTimeout(applyPendingBadge, 1000);
+    }
+    return;
+  }
+  if (pendingUpdateCount > 0) button.setAttribute("data-update-count", String(pendingUpdateCount));
+  else button.removeAttribute("data-update-count");
+}
+
 async function notifyWorkflowUpdates() {
   try {
     const response = await fetch("/workflow-hub/api/v1/update-notifications", {
@@ -68,6 +91,7 @@ async function notifyWorkflowUpdates() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json();
     scheduleWorkflowUpdateCheck(result.next_check_at);
+    updatePendingBadge(Array.isArray(result.pending) ? result.pending.length : 0);
     const { items } = result;
     if (!Array.isArray(items) || items.length === 0) return;
 
@@ -96,6 +120,7 @@ function installIconStyle() {
   style.id = ICON_STYLE_ID;
   style.textContent = `
     button[aria-label="${TOOLTIP}"] {
+      position: relative;
       padding: 6px;
       border: 1px solid transparent;
       border-radius: 4px;
@@ -105,6 +130,25 @@ function installIconStyle() {
 
     button[aria-label="${TOOLTIP}"]:hover {
       background-color: var(--primary-hover-bg) !important;
+    }
+
+    button[aria-label="${TOOLTIP}"][data-update-count]::after {
+      content: attr(data-update-count);
+      position: absolute;
+      top: -5px;
+      right: -6px;
+      min-width: 17px;
+      height: 17px;
+      padding: 0 4px;
+      box-sizing: border-box;
+      border-radius: 9px;
+      background: #d9485f;
+      color: #fff;
+      font-size: 12px;
+      line-height: 17px;
+      text-align: center;
+      box-shadow: 0 1px 4px rgb(0 0 0 / 40%);
+      pointer-events: none;
     }
 
     .${ICON_CLASS} {
@@ -170,7 +214,7 @@ function closeHub() {
 
 function handleHubMessage(event) {
   if (event.origin !== window.location.origin) return;
-  if (event.data?.type === "AAALICE_WORKFLOW_HUB_SETTINGS_CHANGED") {
+  if (event.data?.type === "AAALICE_WORKFLOW_HUB_SETTINGS_CHANGED" || event.data?.type === "AAALICE_WORKFLOW_HUB_UPDATES_CHANGED") {
     void notifyWorkflowUpdates();
     return;
   }

@@ -14,7 +14,7 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from .assets import scan_workflow_assets
-from .catalog import Catalog, WorkflowProduct, prepare_publish_product
+from .catalog import Catalog, WorkflowProduct, normalize_version, prepare_publish_product
 from .compatibility import current_comfyui_version, stamp_product_comfyui_version
 from .errors import UserFacingError
 from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refresh_access_token, start_device_flow, tokens
@@ -53,9 +53,10 @@ MAX_JSON = 20 * 1024 * 1024
 _registered = False
 _SETTINGS_FILE = "settings.json"
 _UPDATE_CHECK_STATE = "update-notifications.json"
-_DEFAULT_UPDATE_SETTINGS = {"auto_update_check": True, "update_check_interval_hours": 24}
+_DEFAULT_UPDATE_SETTINGS = {"auto_update_check": True, "update_check_interval_hours": 4}
 _MIN_UPDATE_INTERVAL_HOURS = 1
 _MAX_UPDATE_INTERVAL_HOURS = 168
+_REMINDER_INTERVAL = timedelta(days=7)
 _notification_check_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
 
@@ -813,14 +814,87 @@ def _notification_check_due(state: Any, now: datetime, interval_hours: int) -> b
     return now - checked_at >= timedelta(hours=interval_hours)
 
 
+async def _pending_updates(storage: UserStorage) -> list[dict[str, str]]:
+    """基于本地缓存与下载记录计算「远端有但用户未下载」的最新版本，供角标与通知去重使用。"""
+    pending: list[dict[str, str]] = []
+    for product in await aggregate_catalog(storage):
+        if product.get("archived"):
+            continue
+        versions = [item for item in product.get("versions") or [] if isinstance(item, dict) and item.get("version")]
+        if not versions:
+            continue
+        latest = max(versions, key=lambda item: normalize_version(str(item["version"])))
+        version = str(latest["version"])
+        downloaded = {str(value) for value in product.get("downloaded_versions") or []}
+        if version in downloaded:
+            continue
+        source = product.get("source") or {}
+        pending.append({
+            "owner": str(source.get("owner", "")),
+            "repo": str(source.get("repo", "")),
+            "workflow_id": str(product.get("id", "")),
+            "name": str(product.get("name", "")),
+            "version": version,
+        })
+    return pending
+
+
+def _select_toast_items(
+    detected: list[dict[str, str]],
+    pending: list[dict[str, str]],
+    notified: dict[str, Any],
+    now: datetime,
+) -> tuple[list[dict[str, str]], bool]:
+    """toast 只来自两类事件：本次刷新检测到的新版本、已通知版本满 7 天仍未下载的最后一次提醒。
+    从未下载过的旧工作流不触发 toast（由 pending 角标承载），避免订阅后立刻被轰炸。"""
+    toast: list[dict[str, str]] = []
+    changed = False
+    pending_keys = {f"{item['owner']}/{item['repo']}/{item['workflow_id']}/{item['version']}".casefold() for item in pending}
+    for item in detected:
+        key = f"{item['owner']}/{item['repo']}/{item['workflow_id']}".casefold()
+        if f"{key}/{item['version']}".casefold() not in pending_keys:
+            continue
+        record = notified.get(key)
+        if isinstance(record, dict) and record.get("version") == item["version"]:
+            continue
+        toast.append(item)
+        notified[key] = {"version": item["version"], "notified_at": now.isoformat(), "reminded": False}
+        changed = True
+    for item in pending:
+        key = f"{item['owner']}/{item['repo']}/{item['workflow_id']}".casefold()
+        record = notified.get(key)
+        if not isinstance(record, dict) or record.get("version") != item["version"] or record.get("reminded"):
+            continue
+        try:
+            notified_at = datetime.fromisoformat(str(record.get("notified_at") or ""))
+        except ValueError:
+            notified_at = now - _REMINDER_INTERVAL
+        if notified_at.tzinfo is None:
+            notified_at = notified_at.replace(tzinfo=timezone.utc)
+        if now - notified_at >= _REMINDER_INTERVAL:
+            toast.append(item)
+            record["reminded"] = True
+            changed = True
+    return toast, changed
+
+
 async def _run_notification_check(storage: UserStorage) -> dict[str, Any]:
     settings = await _read_update_settings(storage)
     if not settings["auto_update_check"]:
-        return {"items": [], "catalog_changed": False, "checked": False, "enabled": False, "next_check_at": None}
+        return {
+            "items": [],
+            "pending": await _pending_updates(storage),
+            "catalog_changed": False,
+            "checked": False,
+            "enabled": False,
+            "next_check_at": None,
+        }
     now = datetime.now(timezone.utc)
     try:
         state = await storage.read_json(_UPDATE_CHECK_STATE, {})
     except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict):
         state = {}
     if not _notification_check_due(state, now, settings["update_check_interval_hours"]):
         checked_at = datetime.fromisoformat(state["last_checked_at"])
@@ -829,23 +903,36 @@ async def _run_notification_check(storage: UserStorage) -> dict[str, Any]:
         next_check = checked_at + timedelta(hours=settings["update_check_interval_hours"])
         return {
             "items": [],
+            "pending": await _pending_updates(storage),
             "catalog_changed": False,
             "checked": False,
             "enabled": True,
             "next_check_at": next_check.isoformat(),
         }
 
-    result = await _refresh_startup_sources(storage, force=True)
+    # 静默检查走 ETag 条件请求：目录未变化时 GitHub 返回 304，不计入主限流额度
+    result = await _refresh_startup_sources(storage, force=False)
+    pending = await _pending_updates(storage)
+    notified = state.get("notified")
+    if not isinstance(notified, dict):
+        notified = {}
+    state["notified"] = notified
+    toast, notified_changed = _select_toast_items(result["items"], pending, notified, now)
     if not result["failed"]:
         checked_at = datetime.now(timezone.utc)
-        await storage.write_json(_UPDATE_CHECK_STATE, {"last_checked_at": checked_at.isoformat()})
+        state["last_checked_at"] = checked_at.isoformat()
         next_check = checked_at + timedelta(hours=settings["update_check_interval_hours"])
     else:
         next_check = datetime.now(timezone.utc) + timedelta(minutes=5)
+    if not result["failed"] or notified_changed:
+        await storage.write_json(_UPDATE_CHECK_STATE, state)
     return {
-        **result,
+        "items": toast,
+        "pending": pending,
+        "catalog_changed": result["catalog_changed"],
         "checked": not result["failed"],
         "enabled": True,
+        "failed": result["failed"],
         "next_check_at": next_check.isoformat(),
     }
 

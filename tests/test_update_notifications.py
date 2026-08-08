@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
-from workflow_hub.api import _notification_check_due, _read_update_settings, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _settings_payload
+from workflow_hub.api import _notification_check_due, _pending_updates, _read_update_settings, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _select_toast_items, _settings_payload
 from workflow_hub.catalog import Catalog
 from workflow_hub.github import ContentFile, GitHubError
 from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager, subscription_cache_path
@@ -169,13 +169,25 @@ class StartupRefreshStateTests(IsolatedAsyncioTestCase):
 
 
 class NotificationScheduleTests(IsolatedAsyncioTestCase):
+    async def _storage_with_subscription(self, folder: str) -> UserStorage:
+        storage = UserStorage(Path(folder))
+        await storage.write_json("subscriptions.json", [{
+            "owner": "owner",
+            "repo": "repo",
+            "url": "https://github.com/owner/repo",
+            "etag": "etag",
+            "refreshed_at": "",
+            "error": None,
+        }])
+        subscription_cache_path(storage, "owner", "repo").write_bytes(EXAMPLE.read_bytes())
+        return storage
     def test_interval_due_uses_the_configured_hours(self) -> None:
         now = datetime.now(timezone.utc)
         self.assertTrue(_notification_check_due({}, now, 24))
         self.assertFalse(_notification_check_due({"last_checked_at": (now - timedelta(hours=23)).isoformat()}, now, 24))
         self.assertTrue(_notification_check_due({"last_checked_at": (now - timedelta(hours=25)).isoformat()}, now, 24))
 
-    async def test_check_forces_refresh_and_persists_only_after_success(self) -> None:
+    async def test_check_revalidates_with_etag_and_persists_only_after_success(self) -> None:
         with TemporaryDirectory() as folder:
             storage = UserStorage(Path(folder))
             await storage.write_json("subscriptions.json", [{
@@ -190,7 +202,7 @@ class NotificationScheduleTests(IsolatedAsyncioTestCase):
                 result = await _run_notification_check(storage)
             self.assertTrue(result["checked"])
             self.assertIsNotNone(result["next_check_at"])
-            refresh.assert_awaited_once_with(storage, "owner", "repo", force=True)
+            refresh.assert_awaited_once_with(storage, "owner", "repo", force=False)
             self.assertTrue((storage.state_dir / "update-notifications.json").exists())
 
             with patch("workflow_hub.api.refresh_subscription", new=AsyncMock()) as refresh:
@@ -232,17 +244,95 @@ class NotificationScheduleTests(IsolatedAsyncioTestCase):
             self.assertFalse((storage.state_dir / "update-notifications.json").exists())
             refresh.assert_awaited_once()
 
+    async def test_pending_updates_reflect_downloaded_versions(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            self.assertEqual(
+                await _pending_updates(storage),
+                [{
+                    "owner": "owner",
+                    "repo": "repo",
+                    "workflow_id": "portrait-basic",
+                    "name": "Portrait Basic",
+                    "version": "1.12",
+                }],
+            )
+            downloaded = storage.workflows_root / "Portrait Basic.json"
+            downloaded.write_text("{}", encoding="utf-8")
+            await storage.write_json("installed.json", [{
+                "owner": "owner",
+                "repo": "repo",
+                "workflow_id": "portrait-basic",
+                "name": "Portrait Basic",
+                "version": "1.12",
+                "path": str(downloaded),
+            }])
+            self.assertEqual(await _pending_updates(storage), [])
+
+    async def test_toast_items_fire_once_per_version_and_remind_after_a_week(self) -> None:
+        now = datetime.now(timezone.utc)
+        item = {"owner": "owner", "repo": "repo", "workflow_id": "portrait-basic", "name": "Portrait Basic", "version": "1.13"}
+        notified: dict = {}
+
+        # 已下载的版本不弹
+        toast, changed = _select_toast_items([item], [], notified, now)
+        self.assertEqual(toast, [])
+        self.assertFalse(changed)
+
+        # 新版本首次检测到 → 弹一次
+        toast, changed = _select_toast_items([item], [item], notified, now)
+        self.assertEqual(toast, [item])
+        self.assertTrue(changed)
+
+        # 同一版本再次检测到 → 不再弹
+        toast, _ = _select_toast_items([item], [item], notified, now + timedelta(hours=1))
+        self.assertEqual(toast, [])
+
+        # 7 天内未下载不重复提醒，满 7 天提醒最后一次
+        toast, _ = _select_toast_items([], [item], notified, now + timedelta(days=6))
+        self.assertEqual(toast, [])
+        toast, changed = _select_toast_items([], [item], notified, now + timedelta(days=8))
+        self.assertEqual(toast, [item])
+        self.assertTrue(changed)
+        toast, _ = _select_toast_items([], [item], notified, now + timedelta(days=16))
+        self.assertEqual(toast, [])
+
+    async def test_notification_check_toasts_detected_version_once(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            updated = with_version(load_catalog(), "9.9").model_dump_json().encode()
+
+            async def apply_update(_storage: UserStorage, owner: str, repo: str, *, force: bool = False) -> dict:
+                subscription_cache_path(_storage, owner, repo).write_bytes(updated)
+                return {"changed": True, "catalog_missing": False}
+
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(side_effect=apply_update)):
+                result = await _run_notification_check(storage)
+            self.assertTrue(result["checked"])
+            self.assertEqual([item["version"] for item in result["items"]], ["9.9"])
+            self.assertEqual([item["version"] for item in result["pending"]], ["9.9"])
+            state = await storage.read_json("update-notifications.json", {})
+            self.assertEqual(state["notified"]["owner/repo/portrait-basic"]["version"], "9.9")
+
+            # 下一个检查周期目录无变化 → 不再为 9.9 弹 toast，角标仍在
+            state["last_checked_at"] = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+            await storage.write_json("update-notifications.json", state)
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(return_value={"changed": False, "catalog_missing": False})):
+                result = await _run_notification_check(storage)
+            self.assertEqual(result["items"], [])
+            self.assertEqual([item["version"] for item in result["pending"]], ["9.9"])
+
     async def test_settings_are_normalized_and_expose_last_check(self) -> None:
         with TemporaryDirectory() as folder:
             storage = UserStorage(Path(folder))
             self.assertEqual(await _read_update_settings(storage), {
                 "auto_update_check": True,
-                "update_check_interval_hours": 24,
+                "update_check_interval_hours": 4,
             })
             await storage.write_json("settings.json", {"auto_update_check": "yes", "update_check_interval_hours": 999})
             self.assertEqual(await _read_update_settings(storage), {
                 "auto_update_check": True,
-                "update_check_interval_hours": 24,
+                "update_check_interval_hours": 4,
             })
             await storage.write_json("settings.json", {"auto_update_check": False, "update_check_interval_hours": 6})
             await storage.write_json("update-notifications.json", {"last_checked_at": "2026-08-04T10:00:00+00:00"})

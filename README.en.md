@@ -16,7 +16,7 @@ A public workflow subscription, publishing, and version-management extension for
 
 - Subscribe to public GitHub repositories containing `workflow-catalog.json`; search, filter, and browse version history and changelogs in one aggregated catalog.
 - Download and verify workflow packages by version: workflows go to the current user's `workflows/`, bundled images go to `input/` with references untouched, and the folder can be opened right after downloading.
-- Native ComfyUI update notifications with a configurable on/off switch and check interval (1–168 hours).
+- Native ComfyUI update notifications (silent checks every 4 hours by default, with a configurable on/off switch and 1–168 hour interval); each new version triggers one native toast, and undownloaded updates keep a badge on the toolbar button.
 - A preflight check compares core and plugin dependencies before downloading; differences are explained in a dialog, and you can skip the check or synchronize plugins and recheck. The core is never modified automatically.
 - One-click plugin completion: Git dependencies install at their locked commits with `requirements.txt` handled automatically, while legacy Registry dependencies go through ComfyUI-Manager. Progress, per-plugin logs, and errors stay in one view, and downloads still work when completion is unavailable.
 

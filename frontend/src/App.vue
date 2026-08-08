@@ -1726,6 +1726,7 @@ async function pollOperations() {
     const failedDownload = finishedDownloads.find((operation) => operation.status === "failed");
     if (completedDownload) {
       downloadCompletion.value = completedDownload;
+      notifyHostUpdatesChanged();
       if (!catalogReloaded) {
         invalidateCatalogCache();
         await refreshCatalog();
@@ -1751,6 +1752,12 @@ async function refreshStartupCatalog() {
   } catch (reason) {
     error.value = errorMessage(reason);
   }
+}
+
+function notifyHostUpdatesChanged() {
+  const message = { type: "AAALICE_WORKFLOW_HUB_UPDATES_CHANGED" };
+  if (window.parent !== window) window.parent.postMessage(message, window.location.origin);
+  if (window.opener && !window.opener.closed) window.opener.postMessage(message, window.location.origin);
 }
 
 function requestCurrentCanvasWorkflow() {
