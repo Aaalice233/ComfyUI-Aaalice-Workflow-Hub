@@ -306,6 +306,7 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.conflicting_commits": "dependenciesConflictingCommits",
   "dependencies.duplicate_git_source": "dependenciesDuplicateGitSource",
   "dependencies.local_changes": "dependenciesLocalChanges",
+  "dependencies.unpushed_commits": "dependenciesUnpushedCommits",
   "dependencies.target_exists": "dependenciesTargetExists",
   "dependencies.git_command_failed": "dependenciesGitCommandFailed",
   "dependencies.manager_unavailable": "dependenciesManagerUnavailable",

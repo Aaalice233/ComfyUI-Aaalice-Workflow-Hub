@@ -234,6 +234,36 @@ async def _install_python_requirements(
     return True
 
 
+async def _default_branch(path: Path) -> str:
+    try:
+        ref = await _run_git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD", cwd=path, timeout=30)
+        branch = ref.removeprefix("origin/").strip()
+        if branch:
+            return branch
+    except GitCommandError:
+        pass
+    for candidate in ("main", "master"):
+        try:
+            await _run_git("show-ref", "--verify", f"refs/remotes/origin/{candidate}", cwd=path, timeout=30)
+            return candidate
+        except GitCommandError:
+            continue
+    raise GitCommandError("unable to determine the repository default branch")
+
+
+async def _checkout_pinned(path: Path, requested: str, on_log: Callable[[str], Awaitable[None]] | None) -> None:
+    # 钉在锁定 commit 但保持本地分支与 upstream 跟踪，避免游离态阻断启动器/Manager 的更新
+    branch = (await _run_git("branch", "--show-current", cwd=path, timeout=30)).strip()
+    if not branch:
+        branch = await _default_branch(path)
+    await _run_git("checkout", "-B", branch, requested, cwd=path, on_log=on_log)
+    try:
+        await _run_git("rev-parse", "--verify", f"refs/remotes/origin/{branch}", cwd=path, timeout=30)
+    except GitCommandError:
+        return
+    await _run_git("branch", "--set-upstream-to", f"origin/{branch}", cwd=path, timeout=30)
+
+
 async def _rollback_git_state(
     result: dict[str, Any],
     path: Path,
@@ -245,7 +275,11 @@ async def _rollback_git_state(
             if on_log:
                 await on_log(f"{path.name}: removed incomplete clone")
         elif result.get("_previous_commit"):
-            await _run_git("checkout", "--detach", str(result["_previous_commit"]), cwd=path, on_log=on_log)
+            previous_ref = str(result.get("_previous_ref") or "")
+            if previous_ref:
+                await _run_git("checkout", "-B", previous_ref, str(result["_previous_commit"]), cwd=path, on_log=on_log)
+            else:
+                await _run_git("checkout", "--detach", str(result["_previous_commit"]), cwd=path, on_log=on_log)
             if on_log:
                 await on_log(f"{path.name}: restored previous commit")
     except (GitCommandError, OSError) as exc:
@@ -550,9 +584,13 @@ class GitAdapter:
                 dirty = await _run_git("status", "--porcelain", cwd=current.path, timeout=30)
                 if dirty:
                     return _failure(item, "dependencies.local_changes"), None
+                unpushed = await _run_git("rev-list", "HEAD", "--not", "--remotes", cwd=current.path, timeout=30)
+                if unpushed.strip():
+                    return _failure(item, "dependencies.unpushed_commits", {"name": name}), None
+                previous_ref = (await _run_git("branch", "--show-current", cwd=current.path, timeout=30)).strip()
                 await git_log(f"fetching commit {requested}")
                 await ensure_commit(current.path)
-                await _run_git("checkout", "--detach", requested, cwd=current.path, on_log=git_log)
+                await _checkout_pinned(current.path, requested, git_log)
                 actual = await _run_git("rev-parse", "HEAD", cwd=current.path, timeout=30)
                 if actual.casefold() != requested.casefold():
                     raise GitCommandError(f"checked out {actual}, expected {requested}")
@@ -567,6 +605,7 @@ class GitAdapter:
                     "error_code": None,
                     "error_params": {},
                     "_previous_commit": current.commit,
+                    "_previous_ref": previous_ref,
                     "_cloned": False,
                 }, current.path
 
@@ -582,7 +621,7 @@ class GitAdapter:
                 await _run_git("clone", "--progress", source, str(target), on_log=git_log)
                 created = True
                 await ensure_commit(target)
-                await _run_git("checkout", "--detach", requested, cwd=target, on_log=git_log)
+                await _checkout_pinned(target, requested, git_log)
                 actual = await _run_git("rev-parse", "HEAD", cwd=target, timeout=30)
                 if actual.casefold() != requested.casefold():
                     raise GitCommandError(f"checked out {actual}, expected {requested}")

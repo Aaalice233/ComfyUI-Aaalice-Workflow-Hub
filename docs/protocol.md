@@ -54,7 +54,7 @@ inputs/*            可选，仅限画布、子图和侧边栏图像控件引用
 
 不得包含模型、第三方节点代码、脚本、可执行文件、符号链接或其它子目录。`manifest.inputs` 必须声明原引用、包内路径、大小、SHA-256 和节点 ID；安装时工作流文件直接写入当前 ComfyUI 用户的 `workflows/` 目录，图像按 `source` 原引用写入 ComfyUI 根 `input/` 目录，工作流引用保持不变。`source` 必须是安全的相对路径；若目标图像已存在但 SHA-256 不同，安装拒绝覆盖并报告冲突。`manifest.filename_separator` 可选为 `-` 或 `_`，用于让安装后的文件名沿用发布者的 `名称-v{版本}.json` 或 `名称_v{版本}.json` 格式。
 
-`custom_nodes` 声明插件仓库，而不是节点类型。Git 依赖使用 `manual: true`、`source_url` 和完整 40 位 `commit` 锁定 GitHub 工作副本；历史 Registry 依赖使用 `registry_id` 和语义版本。ComfyUI-Manager 与 ComfyUI-Aaalice-Workflow-Hub 属于宿主基础插件，不写入 `custom_nodes` 依赖声明，也不进入补全计划。发布扫描只读取 `custom_nodes` 下的 Git 工作副本；Git clone/fetch/checkout 可并行执行，随后使用 ComfyUI 环境的 Python 串行处理各插件 `requirements.txt`；历史 Registry 依赖由 Manager 队列负责 post-install。补全开始前会检查 GitHub/Comfy Registry 网络连通性。两种安装方式通过统一且持久化的异步操作报告插件级进度、安装日志、错误结果和重启提示。
+`custom_nodes` 声明插件仓库，而不是节点类型。Git 依赖使用 `manual: true`、`source_url` 和完整 40 位 `commit` 锁定 GitHub 工作副本；历史 Registry 依赖使用 `registry_id` 和语义版本。ComfyUI-Manager 与 ComfyUI-Aaalice-Workflow-Hub 属于宿主基础插件，不写入 `custom_nodes` 依赖声明，也不进入补全计划。发布扫描只读取 `custom_nodes` 下的 Git 工作副本；Git clone/fetch/checkout 可并行执行，随后使用 ComfyUI 环境的 Python 串行处理各插件 `requirements.txt`；历史 Registry 依赖由 Manager 队列负责 post-install。补全开始前会检查 GitHub/Comfy Registry 网络连通性。Git checkout 钉在锁定 commit 但保留本地分支与 upstream 跟踪（非游离态），用户可自行拉取更新，重新补全时重置回锁定 commit；存在未推送提交的工作副本会被拒绝切换。两种安装方式通过统一且持久化的异步操作报告插件级进度、安装日志、错误结果和重启提示。
 
 新版本发布不得在 ZIP、仓库历史或 `models` 中声明 LoRA。历史清单中的 LoRA 声明仅为旧协议兼容数据，不会出现在下载页，也不会提供下载入口。
 
