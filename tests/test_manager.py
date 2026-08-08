@@ -34,6 +34,18 @@ class GitSourceTests(IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["installed"], COMMIT_A)
         self.assertEqual(result[0]["requested"], COMMIT_A)
 
+    def test_plan_repairs_detached_matching_commit(self):
+        repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, False, True)
+        dependency = {
+            "name": "pack",
+            "source_url": SOURCE,
+            "commit": COMMIT_A,
+            "manual": True,
+        }
+        with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[repository])):
+            result = self._run_plan([dependency])
+        self.assertEqual(result[0]["action"], "upgrade")
+
     def test_plan_requests_switch_for_different_clean_commit(self):
         repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, False)
         dependency = {"name": "pack", "source_url": SOURCE, "commit": COMMIT_B, "manual": True}

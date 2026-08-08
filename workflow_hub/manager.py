@@ -37,6 +37,7 @@ class GitRepository:
     source_url: str | None
     commit: str | None
     dirty: bool
+    detached: bool = False
 
 
 @dataclass
@@ -294,9 +295,10 @@ async def _inspect_repository(path: Path) -> GitRepository | None:
         commit = (await _run_git("rev-parse", "HEAD", cwd=path, timeout=15)).casefold()
         remote = await _run_git("remote", "get-url", "origin", cwd=path, timeout=15)
         dirty = bool(await _run_git("status", "--porcelain", cwd=path, timeout=15))
+        detached = not (await _run_git("branch", "--show-current", cwd=path, timeout=15)).strip()
     except (GitCommandError, UserFacingError):
         return None
-    return GitRepository(path.name, path, _remote_source(remote), commit if _is_commit(commit) else None, dirty)
+    return GitRepository(path.name, path, _remote_source(remote), commit if _is_commit(commit) else None, dirty, detached)
 
 
 async def _scan_repositories() -> list[GitRepository]:
@@ -422,7 +424,8 @@ class GitAdapter:
                 action = "manual"
                 warning_code = "dependencies.local_changes"
             elif installed_commit == requested:
-                action = "keep"
+                # 游离态但 commit 已对齐：提供补全把工作副本挂回本地分支
+                action = "upgrade" if current.detached else "keep"
             elif not align_versions:
                 action = "manual"
                 warning_code = "dependencies.version_alignment_disabled"
