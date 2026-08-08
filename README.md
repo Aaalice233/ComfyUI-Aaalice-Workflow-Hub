@@ -8,38 +8,35 @@
 
 # ComfyUI-Aaalice-Workflow-Hub
 
-面向 ComfyUI 的公共工作流订阅、发布和版本管理插件。作者和订阅者使用同一个插件；入口是 ComfyUI 顶栏的“工作流中心”按钮，不创建侧边栏。
+面向 ComfyUI 的公共工作流订阅、发布和版本管理插件。作者和订阅者使用同一个插件，入口是 ComfyUI 顶栏的“工作流中心”按钮。
 
 ## 功能
 
 ### 订阅与下载
 
-- 订阅带 `workflow-catalog.json` 的公共 GitHub 仓库，在聚合目录中搜索、筛选并浏览历史版本和更新日志；目录正文优先通过 GitHub Contents API 读取，遇到公共 API 限流时自动回退到带强制刷新参数的 GitHub Raw 只读地址，并使用按用户隔离的本地缓存。每次 ComfyUI 启动后的首次显示会先完成强制远程校验，之后重新打开可先显示最近快照并继续校验；手动刷新同样直接请求权威远端，确保刚发布、删除或修改更新日志的内容及时可见。
-- 设置页可关闭自动更新检测，或将 ComfyUI 原生更新通知的检查间隔配置为 1–168 小时；通知检查与页面目录缓存分离，网络失败不会消耗本次检查周期。
-- 仓库默认分支按“类别 / 名称 / 版本”保存全部工作流文件，访问仓库即可浏览、备份或直接下载，不必逐个翻找 Release。
-- 按版本下载并校验 Release ZIP；每个本地版本保存为 `user/<当前用户>/workflows/` 下的独立工作流文件，可从详情页或下载完成提示直接打开工作流目录。
-- 详情页按版本显示内核、插件和随包图片状态；点击顶部状态控件查看完整明细。更新日志支持完整 GitHub Flavored Markdown 渲染并经过安全过滤，长日志在独立滚动区域内显示，工作流包不包含 LoRA 依赖。
-- 下载前自动检查 ComfyUI 内核和插件依赖；发现内核不匹配、插件缺失或版本不一致时先弹窗说明，可跳过检查直接下载，也可先同步可自动处理的插件后重新检查。内核不由 Workflow Hub 自动修改。
-- 插件依赖生成只读计划；补全前自动检查网络，新 Git 依赖由 ComfyUI 环境中的 Git 并行按锁定 commit 补全，插件 Python `requirements.txt` 安装计入同一进度和日志，历史 Registry 依赖交给 ComfyUI-Manager；两种来源使用不同徽章并在同一界面持久化展示进度、状态、日志和错误结果；补全不可用时仍可正常下载。
+- 订阅含 `workflow-catalog.json` 的公共 GitHub 仓库，在聚合目录中搜索、筛选，浏览历史版本与更新日志。
+- 按版本下载并校验工作流包：工作流写入当前用户的 `workflows/`，随包图片写入 `input/` 且引用保持不变，下载后可直接打开目录。
+- ComfyUI 原生更新通知，可配置开关与检查间隔（1–168 小时）。
+- 下载前自动检查内核与插件依赖，发现差异先弹窗说明，可跳过检查或先同步插件再重新检查；内核不会被自动修改。
+- 插件一键补全：Git 依赖按锁定 commit 安装并自动处理 `requirements.txt`，历史 Registry 依赖交给 ComfyUI-Manager；同一界面展示进度、逐插件日志和错误，补全不可用时仍可正常下载。
 
 ### 发布与管理
 
-- 直接读取当前 ComfyUI 画布，按“确认资源、填写信息、确认发布、完成”四个阶段完成发布；发布成功后自动进入完成页，展示仓库、版本、Release 链接和操作时间，并提供查看活动、管理已发布内容和再次发布入口；自动识别文件名末尾的 `-v{版本}` 或 `_v{版本}` 并填入名称和版本，下载后的不同版本使用带版本号的独立文件。
-- 活动面板以五段进度条显示发布或待同步续传的当前阶段；管理页的编辑资料、归档、更新日志和删除也通过同一活动面板显示真实阶段，并保留操作状态、日志和错误信息。每条活动显示记录时间，已完成或失败的记录可逐条删除或一键清除，进行中的操作不可删除。
-- 发布时扫描当前 `custom_nodes` 下的 Git 插件仓库并显示来源徽章；ComfyUI-Manager 和 ComfyUI-Aaalice-Workflow-Hub 作为宿主基础插件自动忽略，不写入工作流依赖。作者可取消勾选与工作流无关的插件，Git 依赖锁定 GitHub 地址和完整 commit；同时处理画布、子图和侧边栏图像控件的随包图片。检测到 LoRA 引用时仅显示警告，不阻止继续发布；LoRA 不会被自动打包或下载。
-- 可选上传封面图（不超过 10 MiB），同时作为工作流封面和版本预览。
-- 管理页面向有写权限的作者：直接打开所选 GitHub 仓库原址，编辑资料、归档、编辑版本更新日志、删除版本或整个工作流；订阅侧只提供下载与查看。
-- 使用 GitHub App Device Flow 登录；凭据优先保存在系统 keyring，keyring 不可用时仅保留在当前进程。
+- 从当前画布直接发布，按“资源确认、填写信息、确认、完成”四个阶段引导；自动识别文件名中的版本号。
+- 自动扫描 `custom_nodes` 下的 Git 插件并锁定 GitHub 地址与完整 commit，可取消勾选无关插件；随包图片自动打包；检测到 LoRA 仅警告，不打包、不下载。
+- 可选上传封面图（不超过 10 MiB），同时用作工作流封面和版本预览。
+- 管理页支持编辑资料、归档、编辑更新日志、删除版本或整个工作流；所有操作在活动面板中展示阶段进度、日志和结果，历史记录可清理。
+- 使用 GitHub Device Flow 登录，凭据优先保存在系统 keyring。
 
 ### 通用
 
 - 中英文界面自动跟随 ComfyUI 语言设置。
-- 启动时工作流更新 Toast、真实下载字节进度、轻量活动抽屉。
-- 状态和缓存按 ComfyUI 用户隔离。
+- 自动适配秋叶（绘世）启动器的 Git/PyPI 国内镜像，并继承 Windows 系统代理，国内网络环境开箱即用。
+- 状态与缓存按 ComfyUI 用户隔离。
 
 ## 安装
 
-**方式一（推荐）**：在 ComfyUI-Manager 中搜索 `ComfyUI-Aaalice-Workflow-Hub` 安装。插件已发布到 Comfy Registry，Python 依赖由 Manager 自动处理。
+**方式一（推荐）**：在 ComfyUI-Manager 中搜索 `ComfyUI-Aaalice-Workflow-Hub` 安装，Python 依赖由 Manager 自动处理。
 
 **方式二（手动）**：将本仓库放入 `ComfyUI/custom_nodes/`，执行 `pip install -r requirements.txt`。
 
@@ -47,11 +44,11 @@
 
 ## 使用
 
-1. 重启 ComfyUI，点击顶栏“工作流中心”；普通点击在 ComfyUI 内打开非全屏面板，`Shift+点击` 打开独立窗口。
+1. 重启 ComfyUI，点击顶栏“工作流中心”；普通点击在 ComfyUI 内打开面板，`Shift+点击` 打开独立窗口。
 2. 订阅无需 GitHub 登录；发布时按页面提示使用 Device Flow 登录。
 3. 作者首次发布前，需将公开的 [Aaalice Workflow Hub Publisher](https://github.com/apps/aaalice-workflow-hub-publisher) GitHub App 安装到目标仓库，详见[作者发布指南](docs/publisher-guide.zh-CN.md)。
 
-运行时状态写入当前 ComfyUI 用户数据目录的 `workflow_hub/`。下载的工作流直接写入当前用户的 `workflows/` 目录（默认用户即 `user/default/workflows/`）；随包图像写入 ComfyUI 根目录的 `input/`，工作流中的图像引用保持原样。
+下载产物位置：
 
 ```text
 user/{当前用户}/workflows/{名称}-v{版本}.json
@@ -70,7 +67,6 @@ input/{工作流原图像引用}
 - [故障排查](docs/troubleshooting.md)
 - [工作流目录与包协议](docs/protocol.md)
 - [安全边界](docs/security.md)
-- 设计与决策：[项目愿景](docs/vision.md) · [已实现功能](docs/features.md) · [术语与领域上下文](docs/context.md) · [目录缓存决策](docs/adr/0003-catalog-cache-and-startup-refresh.md) · [ADR 目录](docs/adr/)
 
 ## License
 
