@@ -125,7 +125,10 @@ class ManagerDependencyTests(IsolatedAsyncioTestCase):
 class GitStatusTests(IsolatedAsyncioTestCase):
     def test_status_reports_git_source(self):
         with patch.object(manager_module, "_git_executable", return_value="git"):
-            self.assertEqual(local_git_status(), {"available": True, "source": "github"})
+            status = local_git_status()
+        self.assertEqual(status["available"], True)
+        self.assertEqual(status["source"], "github")
+        self.assertIn("launcher_mirrors", status)
 
     async def test_installed_dependencies_are_locked_to_commits(self):
         repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, False)

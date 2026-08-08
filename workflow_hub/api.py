@@ -21,6 +21,7 @@ from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refr
 from .legacy_manager import ManagerAdapter, local_manager_status
 from .dependency_policy import is_ignored_dependency
 from .manager import GitAdapter, local_git_status
+from . import mirrors
 from .operations import Operation, operations
 from .proxy import apply_system_proxy, proxy_status
 from .security import ensure_within, parse_public_repository
@@ -370,11 +371,20 @@ async def _check_dependency_network(
     on_log: Callable[[str], Awaitable[None]],
     manager_origin: str,
 ) -> None:
-    hosts: list[str] = []
+    # 每个 Git 依赖按“实际将使用的端点”检查：启动器镜像候选任一可达即可，
+    # 只有全部候选都失败才判定该依赖不可下载
+    git_candidates: list[tuple[str, list[str]]] = []
     for item in git_actions:
         source = str(item.get("source_url") or "").strip().rstrip("/")
-        if source and source not in hosts:
-            hosts.append(source)
+        if not source:
+            continue
+        candidates = mirrors.active().git_clone_candidates(source)
+        git_candidates.append((source, candidates))
+    hosts: list[str] = []
+    for _source, candidates in git_candidates:
+        for url in candidates:
+            if url not in hosts:
+                hosts.append(url)
     if manager_actions:
         hosts.extend((
             "https://api.comfy.org/",
@@ -412,7 +422,11 @@ async def _check_dependency_network(
 
     async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
         results = await asyncio.gather(*(bounded_check(session, host) for host in hosts))
-    failures = [(host, detail) for host, detail in results if detail and host not in manager_version_hosts]
+    details = {host: detail for host, detail in results}
+    failures: list[tuple[str, str | None]] = []
+    for source, candidates in git_candidates:
+        if all(details.get(url) for url in candidates):
+            failures.append((source, details.get(candidates[0])))
     if manager_actions and not any(not detail for host, detail in results if host in manager_version_hosts):
         failures.extend((host, detail) for host, detail in results if host in manager_version_hosts and detail)
     for host, detail in results:

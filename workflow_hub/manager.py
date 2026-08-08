@@ -12,6 +12,7 @@ from typing import Any
 
 from .dependency_policy import is_ignored_dependency
 from .errors import UserFacingError
+from . import mirrors
 from .security import ensure_within, parse_public_repository
 
 _COMMIT_RE = r"[0-9a-f]{40}"
@@ -75,12 +76,9 @@ def _source_key(value: str | None) -> str | None:
 
 
 def _remote_source(value: str | None) -> str | None:
-    text = str(value or "").strip()
-    if text.startswith("git@github.com:"):
-        text = f"https://github.com/{text.removeprefix('git@github.com:')}"
-    elif text.startswith("ssh://git@github.com/"):
-        text = f"https://github.com/{text.removeprefix('ssh://git@github.com/')}"
-    return _canonical_source(text)
+    # 启动器镜像（jihulab/gitee 映射、ghproxy 前缀等）克隆的工作副本 remote 不是
+    # github.com，统一经 mirrors 归一化，保证插件识别与去重不受下载来源影响
+    return mirrors.active().canonical_remote_url(str(value or ""))
 
 
 def _is_commit(value: str | None) -> bool:
@@ -184,6 +182,7 @@ async def _install_python_requirements(
         return False
     if on_log:
         await on_log(f"{repository.name}: installing Python requirements.txt")
+    mirror_args = await mirrors.active().select_pip_arguments()
     try:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -192,6 +191,7 @@ async def _install_python_requirements(
             "install",
             "--disable-pip-version-check",
             "--no-input",
+            *mirror_args,
             "-r",
             str(requirements),
             cwd=str(repository),
@@ -231,7 +231,10 @@ async def _install_python_requirements(
         detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
         raise PythonDependencyError(detail)
     if on_log:
-        await on_log(f"{repository.name}: Python requirements installed")
+        if mirror_args:
+            await on_log(f"{repository.name}: Python requirements installed (index {mirror_args[1]})")
+        else:
+            await on_log(f"{repository.name}: Python requirements installed")
     return True
 
 
@@ -574,11 +577,24 @@ class GitAdapter:
             return _failure(item, "dependencies.duplicate_git_source"), None
         current = matches[0] if matches else None
 
+        clone_candidates = mirrors.active().git_clone_candidates(source)
+
         async def ensure_commit(path: Path) -> None:
             try:
                 await _run_git("cat-file", "-e", f"{requested}^{{commit}}", cwd=path, timeout=30)
+                return
             except GitCommandError:
-                await _run_git("fetch", "--no-tags", "origin", requested, cwd=path, on_log=git_log)
+                pass
+            # origin 可能是滞后于 GitHub 的镜像；逐个候选源拉取直到拿到钉住的 commit
+            remotes = ["origin", *(url for url in clone_candidates if url != "origin")]
+            errors: list[str] = []
+            for remote in dict.fromkeys(remotes):
+                try:
+                    await _run_git("fetch", "--no-tags", remote, requested, cwd=path, on_log=git_log)
+                    return
+                except GitCommandError as exc:
+                    errors.append(f"{remote}: {exc.detail}")
+            raise GitCommandError("; ".join(errors))
 
         try:
             if current is not None:
@@ -621,7 +637,19 @@ class GitAdapter:
             await git_log(f"cloning {source}")
             created = False
             try:
-                await _run_git("clone", "--progress", source, str(target), on_log=git_log)
+                clone_error: GitCommandError | None = None
+                for candidate in clone_candidates:
+                    if candidate != source:
+                        await git_log(f"trying launcher mirror {candidate}")
+                    try:
+                        await _run_git("clone", "--progress", candidate, str(target), on_log=git_log)
+                        clone_error = None
+                        break
+                    except GitCommandError as exc:
+                        clone_error = exc
+                        shutil.rmtree(target, ignore_errors=True)
+                if clone_error is not None:
+                    raise clone_error
                 created = True
                 await ensure_commit(target)
                 await _checkout_pinned(target, requested, git_log)
@@ -652,4 +680,13 @@ class GitAdapter:
 
 
 def local_git_status() -> dict[str, Any]:
-    return {"available": _git_executable() is not None, "source": "github"}
+    active_mirrors = mirrors.active()
+    return {
+        "available": _git_executable() is not None,
+        "source": "github",
+        "launcher_mirrors": {
+            "detected": active_mirrors.available,
+            "git": active_mirrors.mirror_git,
+            "pypi": active_mirrors.mirror_pypi,
+        },
+    }

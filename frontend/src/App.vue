@@ -22,6 +22,7 @@ import {
   FolderOpen,
   GitBranch,
   ImagePlus,
+  Info,
   LibraryBig,
   LoaderCircle,
   Clock,
@@ -100,7 +101,7 @@ type Status = {
     update_check_interval_hours: number;
     last_checked_at?: string | null;
   };
-  git: { available: boolean; source?: string };
+  git: { available: boolean; source?: string; launcher_mirrors?: { detected: boolean; git: boolean; pypi: boolean } };
   manager?: { available: boolean; compatible: boolean; version?: string; api?: string };
   github: { configured: boolean; authenticated: boolean; user?: { login: string; avatar_url: string }; persistent_credentials: boolean };
 };
@@ -2985,6 +2986,7 @@ onBeforeUnmount(() => {
                 @change="toggleDependencyAlignment(selected, activeDetailVersion, ($event.target as HTMLInputElement).checked)" />{{ t("alignDependencyVersions") }}</label>
             </div>
             <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && !status?.git.available && !status?.manager?.compatible" class="message warning"><TriangleAlert :size="17" /><span>{{ t("dependencyInstallerUnavailable") }}</span></div>
+            <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && status?.git.launcher_mirrors?.git" class="dependency-inline-state dependency-inline-state-muted"><Info :size="15" /><span>{{ t("dependencyLauncherGitMirror") }}</span></div>
             <div v-if="dependencyAlignment[dependencyKey(selected, activeDetailVersion)] === false" class="message warning"><TriangleAlert :size="16" /><span>{{ t("versionAlignmentDisabledWarning") }}</span></div>
             <div v-if="dependencyPlans[dependencyKey(selected, activeDetailVersion)] && dependencyChangeCount(dependencyKey(selected, activeDetailVersion))" class="dependency-plan-actions">
               <button class="primary wide"
