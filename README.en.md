@@ -10,9 +10,9 @@
 
 A public workflow subscription, publishing, and version-management extension for ComfyUI. Authors and subscribers use the same extension, opened from the **Workflow Hub** button in ComfyUI's top bar.
 
-## Features
+## ✨ Features
 
-### Subscribe and download
+### 📥 Subscribe and download
 
 - Subscribe to public GitHub repositories containing `workflow-catalog.json`; search, filter, and browse version history and changelogs in one aggregated catalog.
 - Download and verify workflow packages by version: workflows go to the current user's `workflows/`, bundled images go to `input/` with references untouched, and the folder can be opened right after downloading.
@@ -20,7 +20,7 @@ A public workflow subscription, publishing, and version-management extension for
 - A preflight check compares core and plugin dependencies before downloading; differences are explained in a dialog, and you can skip the check or synchronize plugins and recheck. The core is never modified automatically.
 - One-click plugin completion: Git dependencies install at their locked commits with `requirements.txt` handled automatically, while legacy Registry dependencies go through ComfyUI-Manager. Progress, per-plugin logs, and errors stay in one view, and downloads still work when completion is unavailable.
 
-### Publish and manage
+### 📤 Publish and manage
 
 - Publish directly from the current canvas through four guided stages: review resources, enter details, confirm, and complete. Version numbers are parsed from filenames automatically.
 - Git plugin worktrees under `custom_nodes` are scanned and locked to GitHub URLs and full commits, with unrelated plugins deselectable. Bundled images are packaged automatically. LoRA references only trigger a warning and are never bundled or downloaded.
@@ -28,13 +28,13 @@ A public workflow subscription, publishing, and version-management extension for
 - The Manage tab supports editing metadata, archiving, editing changelogs, and deleting versions or entire workflows. Every operation shows staged progress, logs, and results in the Activity panel, and history can be cleaned up.
 - Sign in through GitHub Device Flow; credentials prefer the system keyring.
 
-### General
+### 🌐 General
 
 - Chinese or English interface following the ComfyUI locale automatically.
 - Automatically adapts to the Aki launcher's Git/PyPI mirrors and inherits the Windows system proxy, so it works out of the box on restricted networks.
 - State and cache are isolated per ComfyUI user.
 
-## Installation
+## 📦 Installation
 
 **Option 1 (recommended)**: search for `ComfyUI-Aaalice-Workflow-Hub` in ComfyUI-Manager; Python dependencies are installed automatically.
 
@@ -42,7 +42,7 @@ A public workflow subscription, publishing, and version-management extension for
 
 Requires ComfyUI Frontend `1.33.9+`; ComfyUI-Manager `3.0+` is supported, `4.2.1+` recommended.
 
-## Usage
+## 🚀 Usage
 
 1. Restart ComfyUI and click **Workflow Hub** in the top bar. A normal click opens the panel inside ComfyUI; `Shift+click` opens a separate window.
 2. Subscriptions do not require GitHub sign-in; publishing uses Device Flow when prompted.
@@ -55,19 +55,19 @@ user/<current-user>/workflows/<name>-v<version>.json
 input/<original-workflow-image-reference>
 ```
 
-## Boundaries
+## ⚠️ Boundaries
 
 - Public GitHub repositories only; no private repositories, other Git services, or arbitrary download hosts.
 - Never downloads models or LoRAs automatically, never installs/upgrades/downgrades nodes silently, and never executes scripts from workflow repositories.
 - Published versions cannot be overwritten; downloaded local files are only removed by explicit user action.
 
-## Documentation
+## 📚 Documentation
 
 - [Publisher guide (English)](docs/publisher-guide.en.md) · [作者发布指南（中文）](docs/publisher-guide.zh-CN.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Workflow catalog and package protocol](docs/protocol.md)
 - [Security boundaries](docs/security.md)
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
