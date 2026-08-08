@@ -94,7 +94,7 @@ class GitDataClient(GitHubClient):
 
 class CatalogClient(GitHubClient):
     def __init__(self):
-        super().__init__()
+        super().__init__("token")
         self.call = None
 
     async def request(self, method: str, url: str, **kwargs):
@@ -104,7 +104,7 @@ class CatalogClient(GitHubClient):
 
 class RateLimitedCatalogClient(GitHubClient):
     def __init__(self):
-        super().__init__()
+        super().__init__("token")
         self.calls = []
 
     async def request(self, method: str, url: str, **kwargs):
@@ -115,6 +115,18 @@ class RateLimitedCatalogClient(GitHubClient):
                 403,
                 {"message": "API rate limit exceeded for 192.0.2.1"},
             )
+        return b"{}", {"ETag": 'W/"raw-etag"'}
+
+
+class AnonymousCatalogClient(GitHubClient):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    async def request(self, method: str, url: str, **kwargs):
+        self.calls.append((method, url, kwargs))
+        if url.startswith("https://api.github.com/"):
+            raise AssertionError("anonymous catalog reads must not hit the API first")
         return b"{}", {"ETag": 'W/"raw-etag"'}
 
 
@@ -186,6 +198,16 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
         raw_call = client.calls[1]
         self.assertTrue(raw_call[1].startswith("https://raw.githubusercontent.com/owner/repo/HEAD/workflow-catalog.json?"))
         self.assertEqual(raw_call[2]["headers"], {"Cache-Control": "no-cache"})
+
+    async def test_anonymous_catalog_read_prefers_raw_cdn(self):
+        client = AnonymousCatalogClient()
+
+        result = await client.get_catalog("owner", "repo", '"old-etag"', force=True)
+
+        self.assertEqual(result.content, b"{}")
+        self.assertEqual(result.etag, 'W/"raw-etag"')
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(client.calls[0][1].startswith("https://raw.githubusercontent.com/owner/repo/HEAD/workflow-catalog.json?"))
 
     async def test_catalog_forbidden_error_does_not_fall_back_to_raw(self):
         with self.assertRaisesRegex(GitHubError, "Repository access blocked"):

@@ -193,6 +193,13 @@ class GitHubClient:
         *,
         force: bool = False,
     ) -> ContentFile | None:
+        if not self.token:
+            # 匿名 API 配额按 IP 共享（VPN 出口极易耗尽），raw CDN 不占用 API 配额，优先走 raw
+            try:
+                return await self._get_catalog_from_raw(owner, repo, etag, force=force)
+            except GitHubError as exc:
+                if exc.status == 404:
+                    return None
         headers: dict[str, str] = {}
         if etag and not force:
             headers["If-None-Match"] = etag
