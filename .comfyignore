@@ -19,5 +19,4 @@ node_modules/
 # 测试与仅面向开发者的文档
 tests/
 AGENTS.md
-CONTEXT.md
 node.zip
