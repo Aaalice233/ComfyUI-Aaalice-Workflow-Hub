@@ -53,6 +53,8 @@ MAX_JSON = 20 * 1024 * 1024
 _registered = False
 _SETTINGS_FILE = "settings.json"
 _UPDATE_CHECK_STATE = "update-notifications.json"
+_IGNORED_UPDATES = "update-ignores.json"
+_MAX_IGNORED_UPDATES = 1000
 _DEFAULT_UPDATE_SETTINGS = {"auto_update_check": True, "update_check_interval_hours": 4}
 _MIN_UPDATE_INTERVAL_HOURS = 1
 _MAX_UPDATE_INTERVAL_HOURS = 168
@@ -814,9 +816,37 @@ def _notification_check_due(state: Any, now: datetime, interval_hours: int) -> b
     return now - checked_at >= timedelta(hours=interval_hours)
 
 
+async def _read_ignored_updates(storage: UserStorage) -> set[str]:
+    try:
+        data = await storage.read_json(_IGNORED_UPDATES, {})
+    except (OSError, ValueError):
+        return set()
+    items = data.get("ignored") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return set()
+    return {str(key).casefold() for key in items if isinstance(key, str)}
+
+
+def _pending_update_key(owner: str, repo: str, workflow_id: str, version: str) -> str:
+    return f"{owner}/{repo}/{workflow_id}/{version}".casefold()
+
+
+async def _record_ignored_updates(storage: UserStorage, keys: list[str]) -> None:
+    if not keys:
+        return
+
+    def mutate(value: Any) -> dict[str, Any]:
+        existing = value.get("ignored") if isinstance(value, dict) else None
+        merged = list(dict.fromkeys([*(existing if isinstance(existing, list) else []), *keys]))
+        return {"ignored": merged[-_MAX_IGNORED_UPDATES:]}
+
+    await storage.update_json(_IGNORED_UPDATES, {"ignored": []}, mutate)
+
+
 async def _pending_updates(storage: UserStorage) -> list[dict[str, str]]:
     """基于本地缓存与下载记录计算「远端有但用户未下载」的最新版本，供角标与通知去重使用。"""
     pending: list[dict[str, str]] = []
+    ignored = await _read_ignored_updates(storage)
     for product in await aggregate_catalog(storage):
         if product.get("archived"):
             continue
@@ -829,10 +859,16 @@ async def _pending_updates(storage: UserStorage) -> list[dict[str, str]]:
         if version in downloaded:
             continue
         source = product.get("source") or {}
+        owner = str(source.get("owner", ""))
+        repo = str(source.get("repo", ""))
+        workflow_id = str(product.get("id", ""))
+        # 被用户明确忽略的版本不再计入角标与 toast 去重，更高版本发布后会重新出现
+        if _pending_update_key(owner, repo, workflow_id, version) in ignored:
+            continue
         pending.append({
-            "owner": str(source.get("owner", "")),
-            "repo": str(source.get("repo", "")),
-            "workflow_id": str(product.get("id", "")),
+            "owner": owner,
+            "repo": repo,
+            "workflow_id": workflow_id,
             "name": str(product.get("name", "")),
             "version": version,
         })
@@ -1055,6 +1091,26 @@ def register_routes() -> None:
         await _json(request)
         storage = UserStorage.from_request(request)
         return web.json_response(await _notification_check(storage))
+
+    @routes.post(f"{BASE}/update-notifications/ignore")
+    @endpoint
+    async def update_notifications_ignore(request: web.Request) -> web.StreamResponse:
+        data = await _json(request)
+        items = data.get("items")
+        if not isinstance(items, list):
+            items = []
+        keys: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            owner, repo = _source_parts(item.get("owner", ""), item.get("repo", ""))
+            workflow_id = str(item.get("workflow_id", "")).strip()
+            version = str(item.get("version", "")).strip()
+            if workflow_id and version:
+                keys.append(_pending_update_key(owner, repo, workflow_id, version))
+        storage = UserStorage.from_request(request)
+        await _record_ignored_updates(storage, keys)
+        return web.json_response({"pending": await _pending_updates(storage)})
 
     @routes.get(f"{BASE}/subscriptions")
     @endpoint

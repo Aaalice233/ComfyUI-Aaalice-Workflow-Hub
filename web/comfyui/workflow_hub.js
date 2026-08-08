@@ -57,16 +57,167 @@ function comfyUserHeaders() {
   }
 }
 
-let pendingUpdateCount = 0;
+let pendingUpdates = [];
 let badgeAttempts = 0;
 
-function updatePendingBadge(count) {
-  pendingUpdateCount = count;
+function updatePendingBadge() {
   badgeAttempts = 0;
   applyPendingBadge();
 }
 
+function setPendingUpdates(items) {
+  pendingUpdates = Array.isArray(items) ? items : [];
+  updatePendingBadge();
+  if (pendingUpdates.length === 0) {
+    hideUpdateTooltip();
+    closeUpdateMenu();
+  } else {
+    renderUpdateTooltip();
+  }
+}
+
+const TOOLTIP_ID = "aaalice-workflow-hub-updates-tooltip";
+const MENU_ID = "aaalice-workflow-hub-updates-menu";
+const TOOLTIP_MAX_ITEMS = 8;
+
+function updateTooltipElement() {
+  return document.getElementById(TOOLTIP_ID);
+}
+
+function renderUpdateTooltip() {
+  const tooltip = updateTooltipElement();
+  if (!tooltip || pendingUpdates.length === 0) return;
+  const visible = pendingUpdates.slice(0, TOOLTIP_MAX_ITEMS);
+  const rows = visible.map((item) => {
+    const row = document.createElement("div");
+    row.className = "aaalice-workflow-hub-updates-tooltip-row";
+    const name = document.createElement("span");
+    name.textContent = item.name;
+    const version = document.createElement("strong");
+    version.textContent = `v${item.version}`;
+    row.append(name, version);
+    return row;
+  });
+  if (pendingUpdates.length > visible.length) {
+    const more = document.createElement("div");
+    more.className = "aaalice-workflow-hub-updates-tooltip-row more";
+    more.textContent = t("updateMoreCount", { count: pendingUpdates.length - visible.length });
+    rows.push(more);
+  }
+  const hint = document.createElement("div");
+  hint.className = "aaalice-workflow-hub-updates-tooltip-hint";
+  hint.textContent = t("ignoreUpdatesHint");
+  tooltip.replaceChildren(...rows, hint);
+}
+
+function showUpdateTooltip() {
+  if (pendingUpdates.length === 0) return;
+  const button = document.querySelector(`button[aria-label="${TOOLTIP}"]`);
+  if (!button) return;
+  let tooltip = updateTooltipElement();
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.id = TOOLTIP_ID;
+    document.body.append(tooltip);
+  }
+  renderUpdateTooltip();
+  const rect = button.getBoundingClientRect();
+  tooltip.style.left = `${Math.min(rect.left, window.innerWidth - 340)}px`;
+  tooltip.style.top = `${rect.bottom + 8}px`;
+}
+
+function hideUpdateTooltip() {
+  updateTooltipElement()?.remove();
+}
+
+function updateMenuElement() {
+  return document.getElementById(MENU_ID);
+}
+
+function closeUpdateMenu() {
+  updateMenuElement()?.remove();
+  document.removeEventListener("pointerdown", handleUpdateMenuOutside, true);
+  document.removeEventListener("keydown", handleUpdateMenuKeydown, true);
+}
+
+function handleUpdateMenuOutside(event) {
+  if (!updateMenuElement()?.contains(event.target)) closeUpdateMenu();
+}
+
+function handleUpdateMenuKeydown(event) {
+  if (event.key === "Escape") closeUpdateMenu();
+}
+
+async function ignorePendingUpdates(items) {
+  try {
+    const response = await fetch("/workflow-hub/api/v1/update-notifications/ignore", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...comfyUserHeaders() },
+      body: JSON.stringify({ items }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    setPendingUpdates(result.pending);
+  } catch (error) {
+    app.extensionManager.toast.add({ severity: "error", summary: t("ignoreUpdateFailed"), life: 4000 });
+    console.warn("[Aaalice Workflow Hub] Failed to ignore workflow updates.", error);
+  }
+}
+
+function openUpdateMenu(event) {
+  if (pendingUpdates.length === 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  hideUpdateTooltip();
+  closeUpdateMenu();
+  const menu = document.createElement("div");
+  menu.id = MENU_ID;
+  menu.setAttribute("role", "menu");
+  for (const item of pendingUpdates) {
+    const entry = document.createElement("button");
+    entry.type = "button";
+    entry.setAttribute("role", "menuitem");
+    entry.textContent = t("ignoreUpdate", { name: item.name, version: item.version });
+    entry.addEventListener("click", () => {
+      closeUpdateMenu();
+      void ignorePendingUpdates([item]);
+    });
+    menu.append(entry);
+  }
+  if (pendingUpdates.length > 1) {
+    const divider = document.createElement("div");
+    divider.className = "aaalice-workflow-hub-updates-menu-divider";
+    const all = document.createElement("button");
+    all.type = "button";
+    all.setAttribute("role", "menuitem");
+    all.textContent = t("ignoreAllUpdates");
+    all.addEventListener("click", () => {
+      const items = [...pendingUpdates];
+      closeUpdateMenu();
+      void ignorePendingUpdates(items);
+    });
+    menu.append(divider, all);
+  }
+  document.body.append(menu);
+  const x = Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8);
+  const y = Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8);
+  menu.style.left = `${Math.max(4, x)}px`;
+  menu.style.top = `${Math.max(4, y)}px`;
+  document.addEventListener("pointerdown", handleUpdateMenuOutside, true);
+  document.addEventListener("keydown", handleUpdateMenuKeydown, true);
+}
+
+function bindUpdateButtonInteractions(button) {
+  if (button.dataset.updateInteractionsBound) return;
+  button.dataset.updateInteractionsBound = "1";
+  button.addEventListener("pointerenter", showUpdateTooltip);
+  button.addEventListener("pointerleave", hideUpdateTooltip);
+  button.addEventListener("contextmenu", openUpdateMenu);
+}
+
 function applyPendingBadge() {
+  const count = pendingUpdates.length;
   const button = document.querySelector(`button[aria-label="${TOOLTIP}"]`);
   if (!button) {
     // The action bar button renders asynchronously after extension setup
@@ -76,7 +227,8 @@ function applyPendingBadge() {
     }
     return;
   }
-  if (pendingUpdateCount > 0) button.setAttribute("data-update-count", String(pendingUpdateCount));
+  bindUpdateButtonInteractions(button);
+  if (count > 0) button.setAttribute("data-update-count", String(count));
   else button.removeAttribute("data-update-count");
 }
 
@@ -91,7 +243,7 @@ async function notifyWorkflowUpdates() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json();
     scheduleWorkflowUpdateCheck(result.next_check_at);
-    updatePendingBadge(Array.isArray(result.pending) ? result.pending.length : 0);
+    setPendingUpdates(result.pending);
     const { items } = result;
     if (!Array.isArray(items) || items.length === 0) return;
 
@@ -133,22 +285,103 @@ function installIconStyle() {
     }
 
     button[aria-label="${TOOLTIP}"][data-update-count]::after {
-      content: attr(data-update-count);
+      content: "";
       position: absolute;
-      top: -5px;
-      right: -6px;
-      min-width: 17px;
-      height: 17px;
-      padding: 0 4px;
-      box-sizing: border-box;
-      border-radius: 9px;
+      top: 1px;
+      right: 0;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
       background: #d9485f;
-      color: #fff;
-      font-size: 12px;
-      line-height: 17px;
-      text-align: center;
       box-shadow: 0 1px 4px rgb(0 0 0 / 40%);
       pointer-events: none;
+    }
+
+    #${TOOLTIP_ID} {
+      position: fixed;
+      z-index: 10001;
+      box-sizing: border-box;
+      max-width: 332px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--p-overlay-modal-background, var(--p-content-background, #1e1e1e));
+      color: var(--p-text-color, #e8e8e8);
+      box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+      font-size: 13px;
+      line-height: 1.5;
+      pointer-events: none;
+    }
+
+    #${TOOLTIP_ID} .aaalice-workflow-hub-updates-tooltip-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 2px 0;
+    }
+
+    #${TOOLTIP_ID} .aaalice-workflow-hub-updates-tooltip-row span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #${TOOLTIP_ID} .aaalice-workflow-hub-updates-tooltip-row strong {
+      flex: none;
+      color: var(--p-primary-color, #7db4d8);
+    }
+
+    #${TOOLTIP_ID} .aaalice-workflow-hub-updates-tooltip-row.more {
+      color: var(--p-text-muted-color, #9a9a9a);
+    }
+
+    #${TOOLTIP_ID} .aaalice-workflow-hub-updates-tooltip-hint {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid rgb(128 128 128 / 20%);
+      color: var(--p-text-muted-color, #9a9a9a);
+      font-size: 12px;
+    }
+
+    #${MENU_ID} {
+      position: fixed;
+      z-index: 10002;
+      min-width: 200px;
+      max-width: 340px;
+      padding: 4px;
+      border-radius: 8px;
+      background: var(--p-overlay-modal-background, var(--p-content-background, #1e1e1e));
+      color: var(--p-text-color, #e8e8e8);
+      box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+      font-size: 13px;
+    }
+
+    #${MENU_ID} button {
+      display: block;
+      width: 100%;
+      padding: 7px 10px;
+      border: none;
+      border-radius: 5px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #${MENU_ID} button:hover,
+    #${MENU_ID} button:focus-visible {
+      background: var(--p-content-hover-background, rgb(255 255 255 / 8%));
+      outline: none;
+    }
+
+    #${MENU_ID} .aaalice-workflow-hub-updates-menu-divider {
+      height: 1px;
+      margin: 4px 6px;
+      background: rgb(128 128 128 / 20%);
     }
 
     .${ICON_CLASS} {

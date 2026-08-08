@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
-from workflow_hub.api import _notification_check_due, _pending_updates, _read_update_settings, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _select_toast_items, _settings_payload
+from workflow_hub.api import _MAX_IGNORED_UPDATES, _notification_check_due, _pending_updates, _read_update_settings, _record_ignored_updates, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _select_toast_items, _settings_payload
 from workflow_hub.catalog import Catalog
 from workflow_hub.github import ContentFile, GitHubError
 from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager, subscription_cache_path
@@ -268,6 +268,34 @@ class NotificationScheduleTests(IsolatedAsyncioTestCase):
                 "path": str(downloaded),
             }])
             self.assertEqual(await _pending_updates(storage), [])
+
+    async def test_pending_updates_skip_ignored_versions(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            await storage.write_json("update-ignores.json", {"ignored": ["owner/repo/portrait-basic/1.12"]})
+            self.assertEqual(await _pending_updates(storage), [])
+
+    async def test_pending_updates_reappear_for_newer_versions(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            await storage.write_json("update-ignores.json", {"ignored": ["owner/repo/portrait-basic/1.12"]})
+            subscription_cache_path(storage, "owner", "repo").write_bytes(
+                with_version(load_catalog(), "1.13").model_dump_json().encode()
+            )
+            pending = await _pending_updates(storage)
+            self.assertEqual([item["version"] for item in pending], ["1.13"])
+
+    async def test_record_ignored_updates_dedupes_and_caps(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            await _record_ignored_updates(storage, ["owner/repo/a/1.0", "owner/repo/b/2.0"])
+            await _record_ignored_updates(storage, ["owner/repo/a/1.0"])
+            state = await storage.read_json("update-ignores.json", {})
+            self.assertEqual(state["ignored"], ["owner/repo/a/1.0", "owner/repo/b/2.0"])
+            await _record_ignored_updates(storage, [f"owner/repo/c/{idx}" for idx in range(_MAX_IGNORED_UPDATES)])
+            state = await storage.read_json("update-ignores.json", {})
+            self.assertEqual(len(state["ignored"]), _MAX_IGNORED_UPDATES)
+            self.assertEqual(state["ignored"][-1], f"owner/repo/c/{_MAX_IGNORED_UPDATES - 1}")
 
     async def test_toast_items_fire_once_per_version_and_remind_after_a_week(self) -> None:
         now = datetime.now(timezone.utc)

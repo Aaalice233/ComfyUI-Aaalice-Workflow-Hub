@@ -224,6 +224,8 @@ const selectedCatalogProductId = ref("");
 const imageReferences = ref<AssetReference[]>([]);
 const loraReferences = ref<AssetReference[]>([]);
 const coverImage = ref<{ name: string; filename: string; data_base64: string; previewUrl: string; size: number } | null>(null);
+const publishChangelogFileInput = ref<HTMLInputElement | null>(null);
+const manageChangelogFileInput = ref<HTMLInputElement | null>(null);
 const publishStep = ref<PublishStep>(1);
 const publishOperationId = ref("");
 const publishSourceName = ref("");
@@ -1946,6 +1948,33 @@ function payload() {
   };
 }
 const coverImageTypes: Record<string, string> = { "image/png": ".png", "image/webp": ".webp", "image/jpeg": ".jpg" };
+const changelogFilePattern = /\.(md|markdown|txt)$/i;
+async function importChangelogFile(event: Event, apply: (text: string) => void) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  if (!changelogFilePattern.test(file.name)) {
+    error.value = t.value("changelogFileInvalidType");
+    return;
+  }
+  if (file.size > 1024 * 1024) {
+    error.value = t.value("changelogFileTooLarge");
+    return;
+  }
+  try {
+    const text = (await file.text()).trim();
+    // Backend catalog caps changelog at max_length=20000; longer text would fail validation.
+    if (text.length > 20_000) {
+      error.value = t.value("changelogFileTooLarge");
+      return;
+    }
+    apply(text);
+    error.value = "";
+  } catch {
+    error.value = t.value("changelogFileReadFailed");
+  }
+}
 function chooseCoverImage(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -2668,7 +2697,8 @@ onBeforeUnmount(() => {
                         </div>
                         <p v-if="selectedCatalogProduct" class="field-note span-2">{{ t("publishedVersions", { versions: selectedCatalogProduct.versions.join(t("listSeparator")) || t("none") }) }}</p>
                         <p v-if="existingVersionConflict" class="message warning span-2"><TriangleAlert :size="16" /><span>{{ t("versionAlreadyPublished") }}</span></p>
-                        <label class="compact-field release-notes-field span-2"><span>{{ t("releaseNotes") }}</span><textarea v-model="form.changelog" rows="4" /></label>
+                        <label class="compact-field release-notes-field span-2"><span>{{ t("releaseNotes") }}<button class="ghost compact-action" type="button" @click.stop.prevent="publishChangelogFileInput?.click()"><FileUp :size="14" />{{ t("importChangelogFromFile") }}</button></span><textarea v-model="form.changelog" rows="4" /></label>
+                        <input ref="publishChangelogFileInput" type="file" accept=".md,.markdown,.txt" hidden @change="importChangelogFile($event, (text) => { form.changelog = text; })" />
                         <div class="compact-field cover-field span-2">
                         <span>{{ t("coverImage") }}<em>{{ t("optional") }}</em></span>
                         <div v-if="coverImage" class="cover-selected">
@@ -3181,7 +3211,11 @@ onBeforeUnmount(() => {
     <div v-if="editingChangelog" class="backdrop" @click.self="editingChangelog = null">
       <section class="manage-dialog">
         <h2>{{ t("changelogFor", { version: editingChangelog.version.version }) }}</h2>
+        <div class="manage-changelog-toolbar">
+          <button class="ghost compact-action" type="button" @click="manageChangelogFileInput?.click()"><FileUp :size="14" />{{ t("importChangelogFromFile") }}</button>
+        </div>
         <textarea v-model="editingChangelog.text" rows="8" class="manage-changelog-input"></textarea>
+        <input ref="manageChangelogFileInput" type="file" accept=".md,.markdown,.txt" hidden @change="importChangelogFile($event, (text) => { if (editingChangelog) editingChangelog.text = text; })" />
         <div class="manage-dialog-actions">
           <button class="ghost" @click="editingChangelog = null">{{ t("cancel") }}</button>
           <button class="primary" :disabled="!!busy || publisherManagementOperationRunning || !editingChangelog.text.trim()" @click="saveChangelogEditor">{{ t("save") }}</button>

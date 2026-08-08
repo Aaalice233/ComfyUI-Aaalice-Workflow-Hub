@@ -5271,6 +5271,12 @@ pre {
   gap: 8px;
 }
 
+.manage-changelog-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
 .manage-changelog-input {
   font-family: inherit;
   line-height: 1.6;
