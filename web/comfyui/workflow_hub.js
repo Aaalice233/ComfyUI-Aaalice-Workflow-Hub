@@ -402,14 +402,14 @@ function installIconStyle() {
       z-index: 10000;
       display: grid;
       place-items: center;
-      padding: 36px;
+      padding: 24px;
       background: rgb(5 8 12 / 82%);
     }
 
     .aaalice-workflow-hub-panel {
       display: flex;
       width: min(1180px, 92vw);
-      height: min(780px, 86vh);
+      height: min(900px, 92vh);
       min-height: 520px;
       overflow: hidden;
       border-radius: 14px;
