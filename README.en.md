@@ -31,7 +31,7 @@ A public workflow subscription, publishing, and version-management extension for
 ### 🌐 General
 
 - Chinese or English interface following the ComfyUI locale automatically.
-- Automatically adapts to the Aki launcher's Git/PyPI mirrors and inherits the Windows system proxy, so it works out of the box on restricted networks.
+- Automatically adapts to the Aki launcher's Git/PyPI mirrors, detects the PortableGit bundled with comfyui-xiao, and inherits the Windows system proxy.
 - State and cache are isolated per ComfyUI user.
 
 ## 📦 Installation

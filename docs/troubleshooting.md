@@ -38,6 +38,12 @@ ComfyUI 以 `--multi-user` 多用户模式运行时，请求必须携带当前�
 - 通过镜像地址克隆的插件（jihulab、gitee 或 ghproxy 前缀的 remote）会被正确识别为其 GitHub 源仓库，版本检测、去重与脏检查不受影响。
 - 内核版本检测读取 ComfyUI 本地的 `comfyui_version` 模块，不访问网络，与镜像开关无关。
 
+## 提示“找不到 Git”
+
+插件会依次检查 ComfyUI Python 环境、整合包工具目录和进程 `PATH`。comfyui-xiao 自带的 Git 位于 `<整合包根>/.xiaoziya/PortableGit/`，其中 `cmd/git.exe`、`bin/git.exe` 和 `mingw64/bin/git.exe` 均可自动识别，不需要另外安装系统 Git。
+
+如果仍提示找不到 Git，请确认 `.xiaoziya/PortableGit` 没有被杀毒软件隔离且安装包工具下载完整，然后彻底退出并重启 ComfyUI。修复前仍可下载工作流，但无法扫描发布依赖或自动补全 Git 插件。
+
 ## 订阅源刷新失败
 
 订阅清单读取不依赖匿名 API 配额：已登录 GitHub 时使用用户 token 走 Contents API，未登录时优先走 GitHub Raw CDN 只读地址（带强制刷新参数绕开缓存），两条路径互为其失败时的回退。已有订阅会保留本地缓存作为失败回退，但网页打开和手动刷新都会强制重新校验远端。新订阅或刷新仍失败时，请确认仓库公开、根目录存在 `workflow-catalog.json`，并检查网络、VPN 或 TUN 模式。订阅无需 GitHub 登录。

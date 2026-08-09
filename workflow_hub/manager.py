@@ -107,14 +107,36 @@ def _custom_node_roots() -> list[Path]:
 
 
 def _git_executable() -> str | None:
-    candidates: list[Path] = []
     prefix = Path(sys.prefix)
-    candidates.extend((prefix / "Scripts" / "git.exe", prefix / "bin" / "git"))
     executable_dir = Path(sys.executable).resolve().parent
-    candidates.extend((executable_dir / "git.exe", executable_dir / "Scripts" / "git.exe"))
-    for root in (_comfyui_root(), _comfyui_root().parent):
+    comfyui_root = _comfyui_root()
+    candidates = [
+        prefix / "Scripts" / "git.exe",
+        prefix / "bin" / "git",
+        executable_dir / "git.exe",
+        executable_dir / "Scripts" / "git.exe",
+    ]
+    xiaoziya_roots = [
+        comfyui_root / ".xiaoziya",
+        comfyui_root.parent / ".xiaoziya",
+    ]
+    if executable_dir.parent.name.casefold() == ".xiaoziya":
+        xiaoziya_roots.append(executable_dir.parent)
+    for root in xiaoziya_roots:
+        portable_git = root / "PortableGit"
+        candidates.extend(
+            (
+                portable_git / "cmd" / "git.exe",
+                portable_git / "bin" / "git.exe",
+                portable_git / "mingw64" / "bin" / "git.exe",
+            )
+        )
+    for root in (comfyui_root, comfyui_root.parent):
         candidates.extend((root / "git" / "cmd" / "git.exe", root / "git" / "bin" / "git"))
-    for candidate in candidates:
+    path_git = shutil.which("git")
+    if path_git:
+        candidates.append(Path(path_git))
+    for candidate in dict.fromkeys(candidates):
         if candidate.is_file():
             return str(candidate)
     return None

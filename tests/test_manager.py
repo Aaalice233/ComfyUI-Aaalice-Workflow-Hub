@@ -1,5 +1,6 @@
+import tempfile
 from pathlib import Path
-from unittest import IsolatedAsyncioTestCase
+from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
 
 from workflow_hub import manager as manager_module
@@ -13,6 +14,46 @@ COMMIT_B = "b" * 40
 SOURCE = "https://github.com/example/pack"
 MANAGER_SOURCE = "https://github.com/ltdrdata/ComfyUI-Manager"
 WORKFLOW_HUB_SOURCE = "https://github.com/Aaalice233/ComfyUI-Aaalice-Workflow-Hub"
+
+
+class GitExecutableTests(TestCase):
+    def test_detects_comfyui_xiao_portable_git(self):
+        for relative_path in (("cmd", "git.exe"), ("bin", "git.exe"), ("mingw64", "bin", "git.exe")):
+            with self.subTest(relative_path=relative_path), tempfile.TemporaryDirectory() as directory:
+                install_root = Path(directory)
+                comfyui_root = install_root / "ComfyUI"
+                python = comfyui_root / "venv" / "Scripts" / "python.exe"
+                git = install_root / ".xiaoziya" / "PortableGit" / Path(*relative_path)
+                python.parent.mkdir(parents=True)
+                python.touch()
+                git.parent.mkdir(parents=True)
+                git.touch()
+                with (
+                    patch.object(manager_module, "_comfyui_root", return_value=comfyui_root),
+                    patch.object(manager_module.sys, "prefix", str(python.parents[1])),
+                    patch.object(manager_module.sys, "executable", str(python)),
+                    patch.object(manager_module.shutil, "which", return_value=None),
+                ):
+                    self.assertEqual(manager_module._git_executable(), str(git))
+
+    def test_uses_git_from_process_path_as_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            comfyui_root = root / "ComfyUI"
+            python = root / "python" / "python.exe"
+            git = root / "tools" / "git.exe"
+            comfyui_root.mkdir()
+            python.parent.mkdir()
+            python.touch()
+            git.parent.mkdir()
+            git.touch()
+            with (
+                patch.object(manager_module, "_comfyui_root", return_value=comfyui_root),
+                patch.object(manager_module.sys, "prefix", str(python.parent)),
+                patch.object(manager_module.sys, "executable", str(python)),
+                patch.object(manager_module.shutil, "which", return_value=str(git)),
+            ):
+                self.assertEqual(manager_module._git_executable(), str(git))
 
 
 class GitSourceTests(IsolatedAsyncioTestCase):

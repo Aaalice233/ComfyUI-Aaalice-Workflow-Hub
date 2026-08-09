@@ -70,7 +70,8 @@
 - 用户确认后只执行勾选的安装或版本切换；Git 依赖按锁定 commit 执行，Manager 依赖交给兼容的 ComfyUI-Manager 队列处理，手动依赖和冲突不会自动执行。
 - 点击执行后先检查 GitHub/Comfy Registry 网络连通性；失败会在同一进度条和日志中提示检查网络、VPN 或 TUN 模式。
 - 启动时自动继承 Windows 系统代理并注入 Git/pip 子进程与 HTTP 客户端（`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`，本机回环地址始终绕过），显式设置的环境变量优先，不开 TUN 也能完成插件补全；代理状态随 `/status` 返回供诊断。
-- 自动探测秋叶（绘世）启动器的镜像开关（`.launcher/preference.json` 的 `network_preference` 与同目录 `data.json` 的镜像清单，按文件修改时间即时重读）：开启「Git 国内镜像」时，克隆/拉取按启动器的 git_mirrors 映射优先使用镜像源并保留 GitHub 源站兑底，网络预检按实际使用的端点判定；开启「PyPI 国内镜像」时，`requirements.txt` 安装自动探测可用镜像并携带 `--index-url`（内网地址仅在公网镜像不可达时参与）；使用镜像地址克隆的插件工作副本（jihulab/gitee 映射、ghproxy 前缀等）在依赖扫描中会归一化回 GitHub 源地址，识别与去重不受下载来源影响。非秋叶环境行为完全不变。
+- 自动探测秋叶（绘世）启动器的镜像开关（`.launcher/preference.json` 的 `network_preference` 与同目录 `data.json` 的镜像清单，按文件修改时间即时重读）：开启「Git 国内镜像」时，克隆/拉取按启动器的 git_mirrors 映射优先使用镜像源并保留 GitHub 源站兜底，网络预检按实际使用的端点判定；开启「PyPI 国内镜像」时，`requirements.txt` 安装自动探测可用镜像并携带 `--index-url`（内网地址仅在公网镜像不可达时参与）；使用镜像地址克隆的插件工作副本（jihulab/gitee 映射、ghproxy 前缀等）在依赖扫描中会归一化回 GitHub 源地址，识别与去重不受下载来源影响。非秋叶环境行为完全不变。
+- Git 探测优先使用 ComfyUI Python 环境与整合包内置工具，同时兼容系统 `PATH`；comfyui-xiao 的 `<整合包根>/.xiaoziya/PortableGit/{cmd,bin,mingw64/bin}/git.exe` 可直接识别，无需用户另装 Git 或手工修改环境变量。
 - Git clone/fetch/checkout 可安全并行执行，checkout 钉在锁定 commit 但保留本地分支与 upstream 跟踪（不产生游离态 HEAD），用户可用启动器或 Manager 自行检测和拉取更新，重新补全时会重置回锁定 commit；commit 已对齐但处于游离态的历史工作副本会在检测中提供补全，将其挂回分支跟踪；存在未推送提交的工作副本会被拒绝切换并提示先处理。Python `requirements.txt` 安装按插件完成后串行执行并计入进度；Manager 的 post-install 依赖处理由 Manager 执行并回传结果。两种路径共用同一个异步安装操作、逐插件状态、实时日志和持久化历史，完成后提示重启 ComfyUI。
 - 依赖弹窗的安装按钮、进度条和逐插件日志固定在插件列表上方；进度展示只跟随本次面板会话中启动的安装操作，历史已完成或失败的操作不会在重开面板后残留显示，手动重新检查依赖时同步清除已结束的执行展示。
 - 订阅者依赖弹窗、发布资源确认和下载前检查的插件条目都提供来源页面跳转：Git 依赖打开 GitHub 仓库，Registry 依赖打开 Comfy Registry 节点页。
