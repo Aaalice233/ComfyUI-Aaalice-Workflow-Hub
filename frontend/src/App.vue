@@ -1448,17 +1448,60 @@ async function revealLocalVersion(item: Product, version: Version) {
     });
   });
 }
+let workflowLoadRequestId = 0;
+async function loadWorkflowOnHost(path: string, workflow: Record<string, unknown>) {
+  const targets = new Set<Window>();
+  if (window.parent !== window) targets.add(window.parent);
+  if (window.opener && !window.opener.closed) targets.add(window.opener);
+  if (!targets.size) throw new Error(t.value("openFromToolbar"));
+
+  const requestId = String(++workflowLoadRequestId);
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", handleResult);
+    };
+    const handleResult = (event: MessageEvent) => {
+      if (
+        event.origin !== window.location.origin ||
+        !targets.has(event.source as Window) ||
+        event.data?.type !== "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW_RESULT" ||
+        event.data?.requestId !== requestId
+      ) return;
+      cleanup();
+      if (event.data?.ok) {
+        resolve();
+        return;
+      }
+      if (event.data?.errorCode === "workflow_load.invalid_path" || event.data?.errorCode === "workflow_load.invalid_payload") {
+        reject(new Error(t.value("workflowLoadInvalidData")));
+        return;
+      }
+      if (event.data?.errorCode === "workflow_load.missing_from_storage") {
+        const missingPath = String(event.data?.errorParams?.path || path);
+        reject(new Error(t.value("workflowLoadMissingFromStorage", { path: missingPath })));
+        return;
+      }
+      const detail = typeof event.data?.detail === "string" ? event.data.detail : t.value("currentCanvasUnavailable");
+      reject(new Error(t.value("workflowLoadFailed", { detail })));
+    };
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(t.value("workflowLoadTimedOut")));
+    }, 30_000);
+    window.addEventListener("message", handleResult);
+    const message = { type: "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW", requestId, path, workflow };
+    for (const target of targets) target.postMessage(message, window.location.origin);
+  });
+}
 async function loadLocalVersion(item: Product, version: Version) {
   await withBusy("load-local", async () => {
-    const result = await post<{ workflow: Record<string, unknown> }>("/workflows/local/load", {
+    const result = await post<{ path: string; workflow: Record<string, unknown> }>("/workflows/local/load", {
       owner: item.source.owner, repo: item.source.repo, workflow_id: item.id, version: version.version,
     });
-    const message = { type: "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW", workflow: result.workflow };
-    const targets = new Set<Window>();
-    if (window.parent !== window) targets.add(window.parent);
-    if (window.opener && !window.opener.closed) targets.add(window.opener);
-    for (const target of targets) target.postMessage(message, window.location.origin);
+    await loadWorkflowOnHost(result.path, result.workflow);
     notice.value = t.value("workflowLoaded");
+    closeHubPage();
   });
 }
 function clearFinishedDependencyExecution(key: string) {

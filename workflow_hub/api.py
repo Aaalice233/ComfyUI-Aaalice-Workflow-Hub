@@ -1287,7 +1287,10 @@ def register_routes() -> None:
         target = ensure_within(storage.workflows_root, Path(record["path"]))
         if not target.is_file():
             raise UserFacingError("subscription.local_file_missing")
-        return web.json_response({"workflow": json.loads(target.read_text(encoding="utf-8"))})
+        return web.json_response({
+            "path": target.relative_to(storage.workflows_root).as_posix(),
+            "workflow": json.loads(target.read_text(encoding="utf-8")),
+        })
 
     @routes.post(f"{BASE}/workflows/dependencies/plan")
     @endpoint

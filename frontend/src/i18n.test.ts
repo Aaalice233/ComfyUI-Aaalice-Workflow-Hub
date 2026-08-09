@@ -24,6 +24,8 @@ describe("translations", () => {
     expect(t.value("pluginStatusMissing", { count: 2 })).toBe("缺少 2 个");
     expect(t.value("includedImagesDetail", { count: 1 })).toBe("包含 1 张随包图片，安装时会写入 ComfyUI 的 input 目录，工作流引用保持不变。");
     expect(t.value("downloadComplete", { name: "Demo", version: "1.2.0" })).toBe("工作流 Demo v1.2.0 已下载完成。");
+    expect(t.value("workflowLoadFailed", { detail: "文件不存在" })).toBe("工作流加载失败：文件不存在");
+    expect(t.value("workflowLoadMissingFromStorage", { path: "workflows/Demo.json" })).toBe("ComfyUI 未在工作流目录中找到 workflows/Demo.json，请重新下载后重试。");
     expect(t.value("clearCompletedActivities", { count: 2 })).toBe("清除已完成（2）");
     expect(t.value("activityTime", { time: "2026/01/01 12:00:00" })).toBe("时间：2026/01/01 12:00:00");
     expect(t.value("publishCompleteDescription", { name: "Demo", version: "1.2.0" })).toBe("Demo v1.2.0 已成功发布，并已写入工作流目录。");
@@ -33,6 +35,8 @@ describe("translations", () => {
     expect(t.value("pluginStatusMissing", { count: 2 })).toBe("2 missing");
     expect(t.value("includedImagesDetail", { count: 1 })).toBe("Includes 1 bundled image(s), installed into ComfyUI's input directory with workflow references unchanged.");
     expect(t.value("downloadComplete", { name: "Demo", version: "1.2.0" })).toBe("Demo v1.2.0 finished downloading.");
+    expect(t.value("workflowLoadFailed", { detail: "File not found" })).toBe("Failed to load the workflow: File not found");
+    expect(t.value("workflowLoadMissingFromStorage", { path: "workflows/Demo.json" })).toBe("ComfyUI could not find workflows/Demo.json in workflow storage. Download it again and retry.");
     expect(t.value("clearCompletedActivities", { count: 2 })).toBe("Clear completed (2)");
     expect(t.value("activityTime", { time: "01/01/2026 12:00:00" })).toBe("Time: 01/01/2026 12:00:00");
     expect(t.value("publishCompleteDescription", { name: "Demo", version: "1.2.0" })).toBe("Demo v1.2.0 was published and added to the workflow catalog.");

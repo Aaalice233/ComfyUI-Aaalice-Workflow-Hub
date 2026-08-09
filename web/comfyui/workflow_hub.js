@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { resolveHostLocale, translateHost } from "./i18n.js";
+import { openWorkflowInComfyUI, WorkflowLoadError } from "./workflow_loader.js";
 
 const PAGE = "/workflow-hub";
 const ICON_CLASS = "aaalice-workflow-hub-icon";
@@ -447,7 +448,7 @@ function closeHub() {
   document.removeEventListener("keydown", handleHubKeydown, true);
 }
 
-function handleHubMessage(event) {
+async function handleHubMessage(event) {
   if (event.origin !== window.location.origin) return;
   if (event.data?.type === "AAALICE_WORKFLOW_HUB_SETTINGS_CHANGED" || event.data?.type === "AAALICE_WORKFLOW_HUB_UPDATES_CHANGED") {
     void notifyWorkflowUpdates();
@@ -458,12 +459,26 @@ function handleHubMessage(event) {
     return;
   }
   if (event.data?.type === "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW") {
+    const requestId = event.data?.requestId;
     try {
-      if (!event.data.workflow || typeof event.data.workflow !== "object") throw new Error("Invalid workflow payload");
-      app.loadGraphData(event.data.workflow);
-      closeHub();
+      await openWorkflowInComfyUI(app, event.data);
+      event.source?.postMessage(
+        { type: "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW_RESULT", requestId, ok: true },
+        window.location.origin,
+      );
     } catch (error) {
       console.error("[Aaalice Workflow Hub] Failed to load workflow.", error);
+      event.source?.postMessage(
+        {
+          type: "AAALICE_WORKFLOW_HUB_LOAD_WORKFLOW_RESULT",
+          requestId,
+          ok: false,
+          errorCode: error instanceof WorkflowLoadError ? error.code : "workflow_load.failed",
+          errorParams: error instanceof WorkflowLoadError ? error.params : {},
+          detail: error instanceof Error ? error.message : String(error),
+        },
+        window.location.origin,
+      );
     }
     return;
   }
