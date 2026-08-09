@@ -228,6 +228,8 @@ function applyPendingBadge() {
     return;
   }
   bindUpdateButtonInteractions(button);
+  // The update list replaces ComfyUI's generic tooltip while the badge is active.
+  button.$_ptooltipDisabled = count > 0;
   if (count > 0) button.setAttribute("data-update-count", String(count));
   else button.removeAttribute("data-update-count");
 }
