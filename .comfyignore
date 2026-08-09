@@ -1,6 +1,9 @@
 # 版本控制与开发环境
 .git/
 .github/
+.gitattributes
+.gitignore
+.comfyignore
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -13,10 +16,14 @@ venv/
 *.log
 
 # 前端源码与依赖（构建产物已在 web/app 中）
-frontend/
-node_modules/
+/frontend/
+/node_modules/
 
-# 测试与仅面向开发者的文档
-tests/
-AGENTS.md
-node.zip
+# Registry 运行包不需要的开发资料与仓库资源
+/tests/
+/AGENTS.md
+/assets/
+/docs/
+/examples/
+/schemas/
+/node.zip
