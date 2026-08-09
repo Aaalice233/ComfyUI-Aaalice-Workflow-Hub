@@ -183,6 +183,7 @@ const resourceDialog = ref<ResourceDialog | null>(null);
 const sourceUrl = ref("");
 const sourceInput = ref<HTMLInputElement | null>(null);
 const searchInput = ref<HTMLInputElement | null>(null);
+const detailReleaseScroll = ref<HTMLElement | null>(null);
 const sourceComposerOpen = ref(false);
 const search = ref("");
 const filter = ref<"all" | "downloaded" | "updates" | "archived">("all");
@@ -744,9 +745,11 @@ function openDetails(item: Product) {
   selectedDetailVersion.value = latest(item)?.version || "";
   resourceDialog.value = null;
 }
-function selectDetailVersion(version: string) {
+async function selectDetailVersion(version: string) {
   selectedDetailVersion.value = version;
   resourceDialog.value = null;
+  await nextTick();
+  detailReleaseScroll.value?.scrollTo({ top: 0, behavior: "smooth" });
 }
 function openResourceDialog(kind: ResourceDialog) {
   resourceDialog.value = kind;
@@ -2873,81 +2876,83 @@ onBeforeUnmount(() => {
             <div class="version-rail-heading"><span>{{ t("versions") }}</span><em>{{ selected.versions.length }}</em></div>
             <button v-for="version in detailVersions" :key="version.version"
               :class="{ active: activeDetailVersion?.version === version.version }"
+              :aria-current="activeDetailVersion?.version === version.version ? 'true' : undefined"
               @click="selectDetailVersion(version.version)">
               <span><strong>v{{ version.version }}</strong><small>{{ new Date(version.published_at).toLocaleDateString() }}</small></span>
               <CheckCircle2 v-if="selected.downloaded_versions.includes(version.version)" :size="15" />
             </button>
           </nav>
 
-          <article v-if="activeDetailVersion" class="release release-focused">
-            <div class="release-overview">
-              <div class="release-version-summary">
-                <span class="eyebrow">{{ t("selectedVersion") }}</span>
-                <div class="release-head"><strong>v{{ activeDetailVersion.version }}</strong><span>{{ humanBytes(activeDetailVersion.package.size) }}</span></div>
-                <p class="compatibility">{{ comfyuiCompatibilityLabel(activeDetailVersion) }}</p>
+          <div ref="detailReleaseScroll" class="detail-release-scroll">
+            <article v-if="activeDetailVersion" class="release release-focused">
+              <div class="release-overview">
+                <div class="release-version-summary">
+                  <span class="eyebrow">{{ t("selectedVersion") }}</span>
+                  <div class="release-head"><strong>v{{ activeDetailVersion.version }}</strong><span>{{ humanBytes(activeDetailVersion.package.size) }}</span></div>
+                  <p class="compatibility">{{ comfyuiCompatibilityLabel(activeDetailVersion) }}</p>
+                </div>
+                <div class="resource-status-toolbar" role="group" :aria-label="t('resourceStatusSummary')">
+                  <button
+                    class="resource-status-chip"
+                    :data-tone="activeCoreCheck.tone"
+                    :title="t(activeCoreCheck.detail, activeCoreCheck.params)"
+                    :aria-label="t('resourceStatusAria', { resource: t('comfyCoreVersion'), status: t(activeCoreCheck.label, activeCoreCheck.params) })"
+                    @click="openResourceDialog('core')"
+                  >
+                    <CheckCircle2 v-if="activeCoreCheck.state === 'aligned'" :size="17" />
+                    <TriangleAlert v-else-if="activeCoreCheck.state === 'mismatch'" :size="17" />
+                    <Clock v-else :size="17" />
+                    <span><small>{{ t("comfyCoreVersion") }}</small><strong>{{ t(activeCoreCheck.label, activeCoreCheck.params) }}</strong></span>
+                  </button>
+                  <button
+                    class="resource-status-chip"
+                    :data-tone="activePluginCheck.tone"
+                    :title="t(activePluginCheck.detail, activePluginCheck.params)"
+                    :aria-label="t('resourceStatusAria', { resource: t('requiredPlugins'), status: t(activePluginCheck.label, activePluginCheck.params) })"
+                    @click="openResourceDialog('plugins')"
+                  >
+                    <CheckCircle2 v-if="activePluginCheck.state === 'aligned'" :size="17" />
+                    <CircleX v-else-if="activePluginCheck.state === 'missing'" :size="17" />
+                    <TriangleAlert v-else-if="activePluginCheck.state === 'mismatch'" :size="17" />
+                    <LoaderCircle v-else-if="activePluginCheck.state === 'checking'" :size="17" class="dependency-task-spin" />
+                    <Clock v-else :size="17" />
+                    <span><small>{{ t("requiredPlugins") }}</small><strong>{{ t(activePluginCheck.label, activePluginCheck.params) }}</strong></span>
+                  </button>
+                  <button
+                    class="resource-status-chip"
+                    :data-tone="activeImageCount ? 'ok' : 'muted'"
+                    :title="t(activeImageCount ? 'includedImagesDetail' : 'noBundledImagesDetail', { count: activeImageCount })"
+                    :aria-label="t('resourceStatusAria', { resource: t('includedImages'), status: t('includedImageCount', { count: activeImageCount }) })"
+                    @click="openResourceDialog('images')"
+                  >
+                    <FileUp :size="17" />
+                    <span><small>{{ t("includedImages") }}</small><strong>{{ t("includedImageCount", { count: activeImageCount }) }}</strong></span>
+                  </button>
+                </div>
               </div>
-              <div class="resource-status-toolbar" role="group" :aria-label="t('resourceStatusSummary')">
-                <button
-                  class="resource-status-chip"
-                  :data-tone="activeCoreCheck.tone"
-                  :title="t(activeCoreCheck.detail, activeCoreCheck.params)"
-                  :aria-label="t('resourceStatusAria', { resource: t('comfyCoreVersion'), status: t(activeCoreCheck.label, activeCoreCheck.params) })"
-                  @click="openResourceDialog('core')"
-                >
-                  <CheckCircle2 v-if="activeCoreCheck.state === 'aligned'" :size="17" />
-                  <TriangleAlert v-else-if="activeCoreCheck.state === 'mismatch'" :size="17" />
-                  <Clock v-else :size="17" />
-                  <span><small>{{ t("comfyCoreVersion") }}</small><strong>{{ t(activeCoreCheck.label, activeCoreCheck.params) }}</strong></span>
-                </button>
-                <button
-                  class="resource-status-chip"
-                  :data-tone="activePluginCheck.tone"
-                  :title="t(activePluginCheck.detail, activePluginCheck.params)"
-                  :aria-label="t('resourceStatusAria', { resource: t('requiredPlugins'), status: t(activePluginCheck.label, activePluginCheck.params) })"
-                  @click="openResourceDialog('plugins')"
-                >
-                  <CheckCircle2 v-if="activePluginCheck.state === 'aligned'" :size="17" />
-                  <CircleX v-else-if="activePluginCheck.state === 'missing'" :size="17" />
-                  <TriangleAlert v-else-if="activePluginCheck.state === 'mismatch'" :size="17" />
-                  <LoaderCircle v-else-if="activePluginCheck.state === 'checking'" :size="17" class="dependency-task-spin" />
-                  <Clock v-else :size="17" />
-                  <span><small>{{ t("requiredPlugins") }}</small><strong>{{ t(activePluginCheck.label, activePluginCheck.params) }}</strong></span>
-                </button>
-                <button
-                  class="resource-status-chip"
-                  :data-tone="activeImageCount ? 'ok' : 'muted'"
-                  :title="t(activeImageCount ? 'includedImagesDetail' : 'noBundledImagesDetail', { count: activeImageCount })"
-                  :aria-label="t('resourceStatusAria', { resource: t('includedImages'), status: t('includedImageCount', { count: activeImageCount }) })"
-                  @click="openResourceDialog('images')"
-                >
-                  <FileUp :size="17" />
-                  <span><small>{{ t("includedImages") }}</small><strong>{{ t("includedImageCount", { count: activeImageCount }) }}</strong></span>
-                </button>
+
+              <div class="version-actions" :class="{ 'downloaded-actions': selected.downloaded_versions.includes(activeDetailVersion.version) }">
+                <button v-if="!selected.downloaded_versions.includes(activeDetailVersion.version)" class="primary wide" :disabled="!!busy || isVersionDownloading(selected, activeDetailVersion)" @click="download(selected, activeDetailVersion)"><LoaderCircle v-if="busy === 'download-check' || busy === 'download' || isVersionDownloading(selected, activeDetailVersion)" :size="17" class="dependency-task-spin" /><DownloadIcon v-else :size="17" />{{ busy === "download-check" ? t("checkingDownload") : busy === "download" || isVersionDownloading(selected, activeDetailVersion) ? t("downloading") : t("download") }}</button>
+                <template v-else>
+                  <button class="primary wide" :disabled="!!busy" @click="loadLocalVersion(selected, activeDetailVersion)"><FileJson :size="17" />{{ t("loadToCanvas") }}</button>
+                  <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, activeDetailVersion)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
+                  <button class="ghost wide danger-action" :disabled="!!busy" @click="deleteLocalVersion(selected, activeDetailVersion)"><Trash2 :size="16" />{{ t("deleteLocal") }}</button>
+                </template>
               </div>
-            </div>
 
-            <div class="version-actions" :class="{ 'downloaded-actions': selected.downloaded_versions.includes(activeDetailVersion.version) }">
-              <button v-if="!selected.downloaded_versions.includes(activeDetailVersion.version)" class="primary wide" :disabled="!!busy || isVersionDownloading(selected, activeDetailVersion)" @click="download(selected, activeDetailVersion)"><LoaderCircle v-if="busy === 'download-check' || busy === 'download' || isVersionDownloading(selected, activeDetailVersion)" :size="17" class="dependency-task-spin" /><DownloadIcon v-else :size="17" />{{ busy === "download-check" ? t("checkingDownload") : busy === "download" || isVersionDownloading(selected, activeDetailVersion) ? t("downloading") : t("download") }}</button>
-              <template v-else>
-                <button class="primary wide" :disabled="!!busy" @click="loadLocalVersion(selected, activeDetailVersion)"><FileJson :size="17" />{{ t("loadToCanvas") }}</button>
-                <button class="secondary wide" :disabled="!!busy" @click="revealLocalVersion(selected, activeDetailVersion)"><FolderOpen :size="17" />{{ t("revealLocal") }}</button>
-                <button class="ghost wide danger-action" :disabled="!!busy" @click="deleteLocalVersion(selected, activeDetailVersion)"><Trash2 :size="16" />{{ t("deleteLocal") }}</button>
-              </template>
-            </div>
+              <section class="release-note">
+                <span>{{ t("changelog") }}</span>
+                <div class="changelog markdown-body" v-html="renderedActiveChangelog"></div>
+              </section>
 
-            <section class="release-note">
-              <span>{{ t("changelog") }}</span>
-              <div class="changelog markdown-body" v-html="renderedActiveChangelog"></div>
-            </section>
-
-            <details v-if="otherModelAssets(activeDetailVersion).length" class="model-assets"><summary>{{ t("models") }} ({{ otherModelAssets(activeDetailVersion).length }})</summary>
-              <div v-for="model in otherModelAssets(activeDetailVersion)" :key="`${model.type}:${model.filename}`" class="model-asset">
-                <span><strong>{{ model.name }}</strong><small>{{ model.type }} · {{ model.filename }}</small></span>
-                <a :href="model.source_url" target="_blank" rel="noopener"><ExternalLink :size="14" /></a>
-              </div>
-            </details>
-
-        </article>
+              <details v-if="otherModelAssets(activeDetailVersion).length" class="model-assets"><summary>{{ t("models") }} ({{ otherModelAssets(activeDetailVersion).length }})</summary>
+                <div v-for="model in otherModelAssets(activeDetailVersion)" :key="`${model.type}:${model.filename}`" class="model-asset">
+                  <span><strong>{{ model.name }}</strong><small>{{ model.type }} · {{ model.filename }}</small></span>
+                  <a :href="model.source_url" target="_blank" rel="noopener"><ExternalLink :size="14" /></a>
+                </div>
+              </details>
+            </article>
+          </div>
         </div>
       </aside>
     </div>

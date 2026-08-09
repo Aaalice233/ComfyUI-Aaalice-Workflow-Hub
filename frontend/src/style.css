@@ -2816,11 +2816,13 @@ code {
   right: 0;
   top: 0;
   bottom: 0;
+  display: grid;
   width: min(960px, 96vw);
-  overflow-y: auto;
+  overflow: hidden;
   padding: 0;
   background: #121315;
   box-shadow: -28px 0 90px rgb(0 0 0 / 42%), inset 1px 0 rgb(255 255 255 / 4%);
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .close {
@@ -2912,21 +2914,59 @@ code {
 
 .detail-workbench {
   display: grid;
-  padding: 16px 28px 30px;
-  align-items: start;
+  min-height: 0;
+  padding: 16px 0 0 28px;
+  align-items: stretch;
+  overflow: hidden;
   grid-template-columns: 176px minmax(0, 1fr);
   gap: 16px;
 }
 
 .version-rail {
-  position: sticky;
-  top: 16px;
   display: grid;
+  min-height: 0;
+  max-height: 100%;
+  margin-bottom: 30px;
   padding: 8px;
+  overflow-y: auto;
   border-radius: 13px;
+  align-content: start;
   background: rgb(255 255 255 / 2.5%);
   box-shadow: inset 0 1px rgb(255 255 255 / 4%);
+  overscroll-behavior: contain;
+  scrollbar-color: var(--muted) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
   gap: 4px;
+}
+
+.detail-release-scroll {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0 28px 30px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--muted) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.version-rail::-webkit-scrollbar,
+.detail-release-scroll::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+.version-rail::-webkit-scrollbar-thumb,
+.detail-release-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.version-rail::-webkit-scrollbar-track,
+.detail-release-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .version-rail-heading {
@@ -3242,31 +3282,12 @@ code {
 }
 
 .changelog {
-  max-height: 520px;
   margin: 7px 0 0;
-  padding: 1px 10px 1px 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-color: var(--muted) transparent;
-  scrollbar-gutter: stable;
-  scrollbar-width: thin;
+  padding: 1px 0;
   color: var(--text-soft);
   font-size: 14px;
   line-height: 1.55;
   overflow-wrap: anywhere;
-}
-
-.changelog::-webkit-scrollbar {
-  width: 7px;
-}
-
-.changelog::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--muted);
-}
-
-.changelog::-webkit-scrollbar-track {
-  background: transparent;
 }
 
 .markdown-body > :first-child {
@@ -4311,15 +4332,22 @@ pre {
   }
 
   .detail-workbench {
-    padding: 12px 18px 24px;
+    padding: 12px 0 0 18px;
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: 10px;
   }
 
   .version-rail {
-    position: static;
     display: flex;
+    max-height: none;
+    margin: 0 18px 0 0;
     overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .detail-release-scroll {
+    padding: 0 18px 24px 0;
   }
 
   .version-rail-heading {
