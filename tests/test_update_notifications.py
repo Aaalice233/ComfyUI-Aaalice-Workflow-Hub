@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
-from workflow_hub.api import _MAX_IGNORED_UPDATES, _notification_check_due, _pending_updates, _read_update_settings, _record_ignored_updates, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _select_toast_items, _settings_payload
+from workflow_hub.api import _MAX_IGNORED_UPDATES, _notification_check, _notification_check_due, _notification_check_tasks, _pending_updates, _read_update_settings, _record_ignored_updates, _refresh_catalog_sources, _refresh_startup_source, _run_notification_check, _select_toast_items, _settings_payload, _startup_catalog_checks
 from workflow_hub.catalog import Catalog
 from workflow_hub.github import ContentFile, GitHubError
 from workflow_hub.service import aggregate_catalog, find_catalog_updates, refresh_subscription, reveal_in_file_manager, subscription_cache_path
@@ -210,6 +210,11 @@ class NotificationScheduleTests(IsolatedAsyncioTestCase):
             self.assertFalse(result["checked"])
             refresh.assert_not_awaited()
 
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(return_value={"changed": False, "catalog_missing": False})) as refresh:
+                result = await _run_notification_check(storage, revalidate=True)
+            self.assertTrue(result["checked"])
+            refresh.assert_awaited_once_with(storage, "owner", "repo", force=False)
+
     async def test_disabled_check_does_not_touch_sources(self) -> None:
         with TemporaryDirectory() as folder:
             storage = UserStorage(Path(folder))
@@ -222,10 +227,37 @@ class NotificationScheduleTests(IsolatedAsyncioTestCase):
                 "error": None,
             }])
             with patch("workflow_hub.api.refresh_subscription", new=AsyncMock()) as refresh:
-                result = await _run_notification_check(storage)
+                result = await _run_notification_check(storage, force=True)
             self.assertFalse(result["enabled"])
             self.assertIsNone(result["next_check_at"])
             refresh.assert_not_awaited()
+
+    async def test_catalog_revalidation_bypasses_disabled_notifications(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            await storage.write_json("settings.json", {"auto_update_check": False, "update_check_interval_hours": 1})
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(return_value={"changed": False, "catalog_missing": False})) as refresh:
+                result = await _run_notification_check(storage, force=True, revalidate=True)
+            self.assertTrue(result["checked"])
+            self.assertFalse(result["enabled"])
+            self.assertIsNone(result["next_check_at"])
+            refresh.assert_awaited_once_with(storage, "owner", "repo", force=True)
+
+    async def test_coordinator_forces_only_the_first_check_per_process(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            _notification_check_tasks.pop(storage.key, None)
+            _startup_catalog_checks.discard(storage.key)
+            results = [
+                {"checked": True, "catalog_changed": False},
+                {"checked": False, "catalog_changed": False},
+            ]
+            with patch("workflow_hub.api._run_notification_check", new=AsyncMock(side_effect=results)) as run:
+                await _notification_check(storage)
+                await _notification_check(storage)
+            self.assertEqual([call.kwargs["force"] for call in run.await_args_list], [True, False])
+            _notification_check_tasks.pop(storage.key, None)
+            _startup_catalog_checks.discard(storage.key)
 
     async def test_failed_check_is_retryable(self) -> None:
         with TemporaryDirectory() as folder:
@@ -324,6 +356,27 @@ class NotificationScheduleTests(IsolatedAsyncioTestCase):
         self.assertTrue(changed)
         toast, _ = _select_toast_items([], [item], notified, now + timedelta(days=16))
         self.assertEqual(toast, [])
+
+    async def test_revalidation_reports_same_version_metadata_changes(self) -> None:
+        with TemporaryDirectory() as folder:
+            storage = await self._storage_with_subscription(folder)
+            previous = load_catalog()
+            product = previous.workflows[0]
+            changed_version = product.versions[0].model_copy(update={"changelog": "Updated notes"})
+            updated = previous.model_copy(
+                update={"workflows": [product.model_copy(update={"versions": [changed_version]})]}
+            ).model_dump_json().encode()
+
+            async def apply_update(_storage: UserStorage, owner: str, repo: str, *, force: bool = False) -> dict:
+                subscription_cache_path(_storage, owner, repo).write_bytes(updated)
+                return {"changed": True, "catalog_missing": False}
+
+            with patch("workflow_hub.api.refresh_subscription", new=AsyncMock(side_effect=apply_update)):
+                result = await _run_notification_check(storage, revalidate=True)
+            self.assertTrue(result["catalog_changed"])
+            self.assertEqual(result["items"], [])
+            refreshed = await aggregate_catalog(storage)
+            self.assertEqual(refreshed[0]["versions"][0]["changelog"], "Updated notes")
 
     async def test_notification_check_toasts_detected_version_once(self) -> None:
         with TemporaryDirectory() as folder:

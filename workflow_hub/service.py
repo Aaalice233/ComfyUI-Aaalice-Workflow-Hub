@@ -345,6 +345,15 @@ def reveal_in_file_manager(target: Path) -> None:
 
 
 async def aggregate_catalog(storage: UserStorage) -> list[dict[str, Any]]:
+    return await _aggregate_catalog(storage, await list_subscriptions(storage))
+
+
+async def catalog_snapshot(storage: UserStorage) -> dict[str, list[dict[str, Any]]]:
+    sources = await list_subscriptions(storage)
+    return {"sources": sources, "products": await _aggregate_catalog(storage, sources)}
+
+
+async def _aggregate_catalog(storage: UserStorage, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     installed_data = await storage.read_json("installed.json", [])
     installed = installed_data if isinstance(installed_data, list) else []
     stale_records = [item for item in installed if not _installed_record_exists(storage, item)]
@@ -355,7 +364,7 @@ async def aggregate_catalog(storage: UserStorage) -> list[dict[str, Any]]:
             lambda items: [item for item in items if _installed_record_exists(storage, item)],
         )
     result: list[dict[str, Any]] = []
-    for source in await list_subscriptions(storage):
+    for source in sources:
         if not isinstance(source, dict) or not source.get("owner") or not source.get("repo"):
             continue
         owner, repo = str(source["owner"]), str(source["repo"])

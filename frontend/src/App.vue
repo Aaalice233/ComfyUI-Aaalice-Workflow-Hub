@@ -218,7 +218,8 @@ const canvasWorkflowError = ref("");
 const dependencyScanError = ref("");
 const scannedPluginDependencies = ref<ScannedNodeDependency[]>([]);
 const selectedPluginKeys = ref<string[]>([]);
-const resourceScanPending = ref(true);
+const resourceScanPending = ref(false);
+const publisherLoading = ref(false);
 const publishCatalogProducts = ref<PublishCatalogProduct[]>([]);
 const repositoryCategories = ref<string[]>([]);
 const selectedCatalogProductId = ref("");
@@ -254,11 +255,12 @@ const dependencyPlanLoading = reactive<Record<string, boolean>>({});
 const downloadPreflight = ref<DownloadPreflight | null>(null);
 const loading = ref(true);
 const catalogRefreshing = ref(false);
-const catalogRequests = new CatalogRequestCoordinator<CatalogSnapshot<Source, Product>>(() => Promise.all([
-  api<{ items: Source[] }>("/subscriptions"),
-  api<{ items: Product[] }>("/workflows"),
-]).then(([sub, flows]) => ({ sources: sub.items, products: flows.items })));
+const catalogRequests = new CatalogRequestCoordinator<CatalogSnapshot<Source, Product>>(() =>
+  api<CatalogSnapshot<Source, Product>>("/catalog")
+);
 let loadInFlight: Promise<void> | null = null;
+let publisherLoadInFlight: Promise<void> | null = null;
+let publisherLoaded = false;
 let loadAttempted = false;
 let operationPollInFlight = false;
 let managerSocket: WebSocket | null = null;
@@ -1140,6 +1142,8 @@ function load(): Promise<void> {
     if (showInitialLoading) loading.value = true;
     restorePublishOperation();
     clearMessages();
+    const catalogRequest = requestCatalog();
+    void catalogRequest.catch(() => undefined);
     try {
       const [s, ops] = await Promise.all([
         api<Status>("/status"),
@@ -1155,48 +1159,22 @@ function load(): Promise<void> {
         }
       }
       const cached = restoreCatalogCache(s);
-      if (!cached || showInitialLoading) loading.value = true;
-      if (cached && !showInitialLoading) {
-        applyCatalog(cached);
-        loading.value = false;
-      }
-      let failedSources = 0;
+      if (cached) loading.value = false;
       try {
-        failedSources = await refreshRemoteCatalog(showInitialLoading);
+        const snapshot = await catalogRequest;
+        applyCatalog(snapshot);
+        if (s.catalog_cache_scope) writeCatalogCache(s.catalog_cache_scope, snapshot);
       } catch (reason) {
         if (!cached) throw reason;
         applyCatalog(cached);
         error.value = errorMessage(reason);
       }
-      if (failedSources) notice.value = t.value("someSourcesFailed", { count: failedSources });
-      if (s.github.authenticated) {
-        try {
-          const [repos, pending] = await Promise.all([
-            api<{ items: PublishRepository[] }>("/github/repositories"),
-            api<{ items: { tag: string }[] }>("/publisher/pending"),
-          ]);
-          repositories.value = repos.items;
-          let remembered = "";
-          try {
-            remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
-          } catch {
-            // Browser storage may be unavailable in hardened embedded views.
-          }
-          form.repository_url = resolvePublishRepositoryUrl(
-            repositories.value,
-            form.repository_url,
-            remembered
-          );
-          await applySelectedRepository();
-          pendingPublications.value = pending.items;
-        } catch (reason) {
-          if (!(reason instanceof ApiError && reason.status === 401)) throw reason;
-          status.value.github.authenticated = false;
-          repositories.value = [];
-          error.value = reason.message;
-        }
-      } else {
+      if (!s.github.authenticated) {
         repositories.value = [];
+        pendingPublications.value = [];
+        publisherLoaded = false;
+      } else if (tab.value === "publish" || tab.value === "manage") {
+        await loadPublisherWorkspace();
       }
     } catch (reason) {
       error.value = errorMessage(reason);
@@ -1794,14 +1772,21 @@ async function pollOperations() {
   }
 }
 async function refreshStartupCatalog() {
+  catalogRefreshing.value = true;
   try {
-    const result = await post<{ catalog_changed?: boolean }>("/update-notifications", {});
-    if (result.catalog_changed) {
+    type RevalidationResult = { catalog_changed?: boolean; checked?: boolean; failed?: boolean };
+    let result = await post<RevalidationResult>("/update-notifications", { revalidate: true });
+    if (!result.checked && !result.failed) {
+      result = await post<RevalidationResult>("/update-notifications", { revalidate: true });
+    }
+    if (result.catalog_changed || result.failed) {
       invalidateCatalogCache();
       await refreshCatalog();
     }
   } catch (reason) {
     error.value = errorMessage(reason);
+  } finally {
+    catalogRefreshing.value = false;
   }
 }
 
@@ -1918,6 +1903,57 @@ function syncCatalogProductByName() {
     tags: product.tags.join(", "),
   });
 }
+async function loadPublisherWorkspace(force = false): Promise<void> {
+  if (!status.value?.github.authenticated) return;
+  if (publisherLoaded && !force) return;
+  if (publisherLoadInFlight) return publisherLoadInFlight;
+  const task = (async () => {
+    publisherLoading.value = true;
+    try {
+      const [repos, pending] = await Promise.all([
+        api<{ items: PublishRepository[] }>("/github/repositories"),
+        api<{ items: { tag: string }[] }>("/publisher/pending"),
+      ]);
+      repositories.value = repos.items;
+      let remembered = "";
+      try {
+        remembered = window.localStorage.getItem(LAST_PUBLISH_REPOSITORY_KEY) || "";
+      } catch {
+        // Browser storage may be unavailable in hardened embedded views.
+      }
+      form.repository_url = resolvePublishRepositoryUrl(repositories.value, form.repository_url, remembered);
+      await applySelectedRepository();
+      pendingPublications.value = pending.items;
+      publisherLoaded = true;
+    } catch (reason) {
+      publisherLoaded = false;
+      if (reason instanceof ApiError && reason.status === 401 && status.value) {
+        status.value.github.authenticated = false;
+        repositories.value = [];
+        pendingPublications.value = [];
+      }
+      throw reason;
+    } finally {
+      publisherLoading.value = false;
+    }
+  })();
+  publisherLoadInFlight = task;
+  void task.finally(() => {
+    if (publisherLoadInFlight === task) publisherLoadInFlight = null;
+  }).catch(() => undefined);
+  return task;
+}
+
+async function enterPublish() {
+  tab.value = "publish";
+  requestCurrentCanvasWorkflow();
+  try {
+    await loadPublisherWorkspace();
+  } catch (reason) {
+    error.value = errorMessage(reason);
+  }
+}
+
 async function applySelectedRepository() {
   error.value = "";
   const fullName = form.repository_url.replace(/^https:\/\/github\.com\//i, "").replace(/\/+$/, "");
@@ -1965,6 +2001,7 @@ async function createRepository() {
     form.repository_description = "";
     createRepositoryName.value = "";
     createRepositoryOpen.value = false;
+    publisherLoaded = false;
     await load();
     notice.value = t.value("repositoryCreated");
   });
@@ -2171,6 +2208,12 @@ async function loadManaged() {
 }
 async function enterManage() {
   if (!status.value?.github.authenticated) return;
+  try {
+    await loadPublisherWorkspace();
+  } catch (reason) {
+    error.value = errorMessage(reason);
+    return;
+  }
   if (!manageRepositoryUrl.value) {
     manageRepositoryUrl.value = form.repository_url || (repositories.value[0] ? publishRepositoryUrl(repositories.value[0]) : "");
   }
@@ -2216,6 +2259,7 @@ async function reloadAfterManage(targetFullName = manageRepositoryFullName()) {
   const target = targetFullName.toLowerCase();
   if (target && manageRepositoryFullName().toLowerCase() === target) await loadManaged();
   await refreshSubscribedSource(targetFullName);
+  publisherLoaded = false;
   invalidateCatalogCache();
   await load();
 }
@@ -2396,7 +2440,6 @@ async function logout() {
 onMounted(async () => {
   document.addEventListener("keydown", handleWorkspaceShortcut);
   window.addEventListener("message", handleHubMessage);
-  requestCurrentCanvasWorkflow();
   try {
     await load();
     await pollOperations();
@@ -2425,7 +2468,7 @@ onBeforeUnmount(() => {
         <button :class="{ active: tab === 'subscribe' }" @click="tab = 'subscribe'">
           <Compass :size="18" /><span>{{ t("subscribe") }}</span>
         </button>
-        <button :class="{ active: tab === 'publish' }" @click="tab = 'publish'">
+        <button :class="{ active: tab === 'publish' }" @click="enterPublish">
           <UploadCloud :size="18" /><span>{{ t("publish") }}</span>
         </button>
         <button :class="{ active: tab === 'manage' }" @click="tab = 'manage'; enterManage()">
@@ -2601,6 +2644,8 @@ onBeforeUnmount(() => {
                 <GitBranch :size="17" />{{ t("login") }}<ArrowRight :size="16" />
               </button>
             </div>
+
+            <div v-else-if="publisherLoading" class="empty-state loading-state"><LoaderCircle :size="32" class="dependency-task-spin" /><p>{{ t("loading") }}</p></div>
 
             <template v-else>
               <template v-if="tab === 'publish'">

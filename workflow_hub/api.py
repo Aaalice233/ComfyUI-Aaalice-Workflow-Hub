@@ -28,6 +28,7 @@ from .security import ensure_within, parse_public_repository
 from .service import (
     add_subscription,
     aggregate_catalog,
+    catalog_snapshot,
     clear_subscription_cache,
     delete_version,
     delete_workflow,
@@ -60,6 +61,7 @@ _MIN_UPDATE_INTERVAL_HOURS = 1
 _MAX_UPDATE_INTERVAL_HOURS = 168
 _REMINDER_INTERVAL = timedelta(days=7)
 _notification_check_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
+_startup_catalog_checks: set[str] = set()
 
 
 def _plugin_version() -> str:
@@ -914,9 +916,15 @@ def _select_toast_items(
     return toast, changed
 
 
-async def _run_notification_check(storage: UserStorage) -> dict[str, Any]:
+async def _run_notification_check(
+    storage: UserStorage,
+    *,
+    force: bool = False,
+    revalidate: bool = False,
+) -> dict[str, Any]:
     settings = await _read_update_settings(storage)
-    if not settings["auto_update_check"]:
+    enabled = settings["auto_update_check"]
+    if not enabled and not revalidate:
         return {
             "items": [],
             "pending": await _pending_updates(storage),
@@ -932,7 +940,7 @@ async def _run_notification_check(storage: UserStorage) -> dict[str, Any]:
         state = {}
     if not isinstance(state, dict):
         state = {}
-    if not _notification_check_due(state, now, settings["update_check_interval_hours"]):
+    if not force and not revalidate and not _notification_check_due(state, now, settings["update_check_interval_hours"]):
         checked_at = datetime.fromisoformat(state["last_checked_at"])
         if checked_at.tzinfo is None:
             checked_at = checked_at.replace(tzinfo=timezone.utc)
@@ -946,37 +954,55 @@ async def _run_notification_check(storage: UserStorage) -> dict[str, Any]:
             "next_check_at": next_check.isoformat(),
         }
 
-    # 静默检查走 ETag 条件请求：目录未变化时 GitHub 返回 304，不计入主限流额度
-    result = await _refresh_startup_sources(storage, force=False)
+    result = await _refresh_startup_sources(storage, force=force)
     pending = await _pending_updates(storage)
     notified = state.get("notified")
     if not isinstance(notified, dict):
         notified = {}
     state["notified"] = notified
-    toast, notified_changed = _select_toast_items(result["items"], pending, notified, now)
+    toast, notified_changed = _select_toast_items(result["items"], pending, notified, now) if enabled else ([], False)
     if not result["failed"]:
         checked_at = datetime.now(timezone.utc)
-        state["last_checked_at"] = checked_at.isoformat()
-        next_check = checked_at + timedelta(hours=settings["update_check_interval_hours"])
+        next_check = checked_at + timedelta(hours=settings["update_check_interval_hours"]) if enabled else None
+        if enabled:
+            state["last_checked_at"] = checked_at.isoformat()
     else:
-        next_check = datetime.now(timezone.utc) + timedelta(minutes=5)
-    if not result["failed"] or notified_changed:
+        next_check = datetime.now(timezone.utc) + timedelta(minutes=5) if enabled else None
+    if enabled and (not result["failed"] or notified_changed):
         await storage.write_json(_UPDATE_CHECK_STATE, state)
     return {
         "items": toast,
         "pending": pending,
         "catalog_changed": result["catalog_changed"],
         "checked": not result["failed"],
-        "enabled": True,
+        "enabled": enabled,
         "failed": result["failed"],
-        "next_check_at": next_check.isoformat(),
+        "next_check_at": next_check.isoformat() if next_check else None,
     }
 
 
-def _notification_check(storage: UserStorage) -> asyncio.Task[dict[str, Any]]:
+async def _run_coordinated_notification_check(
+    storage: UserStorage,
+    *,
+    force: bool,
+    revalidate: bool,
+) -> dict[str, Any]:
+    result = await _run_notification_check(storage, force=force, revalidate=revalidate)
+    if force and result["checked"]:
+        _startup_catalog_checks.add(storage.key)
+    return result
+
+
+def _notification_check(storage: UserStorage, *, revalidate: bool = False) -> asyncio.Task[dict[str, Any]]:
     task = _notification_check_tasks.get(storage.key)
     if task is None or task.done():
-        task = asyncio.create_task(_run_notification_check(storage))
+        task = asyncio.create_task(
+            _run_coordinated_notification_check(
+                storage,
+                force=storage.key not in _startup_catalog_checks,
+                revalidate=revalidate,
+            )
+        )
         _notification_check_tasks[storage.key] = task
         task.add_done_callback(
             lambda completed: _notification_check_tasks.pop(storage.key, None)
@@ -1088,9 +1114,9 @@ def register_routes() -> None:
     @routes.post(f"{BASE}/update-notifications")
     @endpoint
     async def update_notifications(request: web.Request) -> web.StreamResponse:
-        await _json(request)
+        data = await _json(request)
         storage = UserStorage.from_request(request)
-        return web.json_response(await _notification_check(storage))
+        return web.json_response(await _notification_check(storage, revalidate=data.get("revalidate") is True))
 
     @routes.post(f"{BASE}/update-notifications/ignore")
     @endpoint
@@ -1111,6 +1137,11 @@ def register_routes() -> None:
         storage = UserStorage.from_request(request)
         await _record_ignored_updates(storage, keys)
         return web.json_response({"pending": await _pending_updates(storage)})
+
+    @routes.get(f"{BASE}/catalog")
+    @endpoint
+    async def catalog_get(request: web.Request) -> web.StreamResponse:
+        return web.json_response(await catalog_snapshot(UserStorage.from_request(request)))
 
     @routes.get(f"{BASE}/subscriptions")
     @endpoint
@@ -1133,11 +1164,7 @@ def register_routes() -> None:
         if not isinstance(force, bool):
             force = True
         result = await _refresh_catalog_sources(storage, force=force)
-        return web.json_response({
-            **result,
-            "sources": await list_subscriptions(storage),
-            "products": await aggregate_catalog(storage),
-        })
+        return web.json_response({**result, **await catalog_snapshot(storage)})
 
     @routes.delete(f"{BASE}/subscriptions/{{owner}}/{{repo}}")
     @endpoint

@@ -3,9 +3,10 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, patch
 
 from workflow_hub.storage import UserStorage
-from workflow_hub.service import aggregate_catalog
+from workflow_hub.service import aggregate_catalog, catalog_snapshot
 
 
 class StorageTests(unittest.IsolatedAsyncioTestCase):
@@ -27,6 +28,14 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
             await second.write_json("counter.json", {"value": 99})
             self.assertEqual((await first.read_json("counter.json", {}))["value"], 20)
             self.assertEqual(json.loads((second.state_dir / "counter.json").read_text(encoding="utf-8"))["value"], 99)
+
+    async def test_catalog_snapshot_reads_subscriptions_once(self):
+        with TemporaryDirectory() as folder:
+            storage = UserStorage(Path(folder))
+            with patch("workflow_hub.service.list_subscriptions", new=AsyncMock(return_value=[])) as subscriptions:
+                snapshot = await catalog_snapshot(storage)
+            self.assertEqual(snapshot, {"sources": [], "products": []})
+            subscriptions.assert_awaited_once_with(storage)
 
     async def test_missing_download_is_removed_from_installed_state(self):
         with TemporaryDirectory() as folder:
