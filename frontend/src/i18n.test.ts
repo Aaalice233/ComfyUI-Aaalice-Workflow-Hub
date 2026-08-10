@@ -21,6 +21,8 @@ describe("translations", () => {
   it("interpolates dynamic values through the dictionary", () => {
     locale.value = "zh";
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("目标目录 custom_nodes/example 已存在，未覆盖本地文件。");
+    expect(t.value("dependenciesNonGitInstall")).toBe("检测到同名非 Git 安装，需要手动移除。");
+    expect(t.value("nonGitInstall")).toBe("非 Git 安装");
     expect(t.value("pluginStatusMissing", { count: 2 })).toBe("缺少 2 个");
     expect(t.value("includedImagesDetail", { count: 1 })).toBe("包含 1 张随包图片，安装时会写入 ComfyUI 的 input 目录，工作流引用保持不变。");
     expect(t.value("downloadComplete", { name: "Demo", version: "1.2.0" })).toBe("工作流 Demo v1.2.0 已下载完成。");
@@ -31,6 +33,8 @@ describe("translations", () => {
     expect(t.value("publishCompleteDescription", { name: "Demo", version: "1.2.0" })).toBe("Demo v1.2.0 已成功发布，并已写入工作流目录。");
     locale.value = "en";
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("The target directory custom_nodes/example already exists; local files were not overwritten.");
+    expect(t.value("dependenciesNonGitInstall")).toBe("A non-Git installation with the same name was found. Remove it manually first.");
+    expect(t.value("nonGitInstall")).toBe("Non-Git installation");
     expect(t.value("dependencyVersionTransition", { installed: "old", requested: "new" })).toBe("old → new");
     expect(t.value("pluginStatusMissing", { count: 2 })).toBe("2 missing");
     expect(t.value("includedImagesDetail", { count: 1 })).toBe("Includes 1 bundled image(s), installed into ComfyUI's input directory with workflow references unchanged.");

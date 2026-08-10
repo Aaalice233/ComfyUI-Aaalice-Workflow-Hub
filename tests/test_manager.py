@@ -113,6 +113,37 @@ class GitSourceTests(IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["action"], "manual")
         self.assertEqual(result[0]["warning_code"], "dependencies.duplicate_git_source")
 
+    def test_plan_blocks_same_name_non_git_install(self):
+        dependency = {"name": "pack", "source_url": SOURCE, "commit": COMMIT_A, "manual": True}
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            marker = custom_nodes / "pack" / ".git" / ".cnr-id"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("pack", encoding="utf-8")
+            with (
+                patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[])),
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+            ):
+                result = self._run_plan([dependency])
+        self.assertEqual(result[0]["action"], "manual")
+        self.assertEqual(result[0]["warning_code"], "dependencies.non_git_install")
+
+    async def test_execute_reports_non_git_install_created_after_plan(self):
+        item = {"name": "pack", "source_url": SOURCE, "requested": COMMIT_A, "action": "install"}
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            marker = custom_nodes / "pack" / ".git" / ".cnr-id"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("pack", encoding="utf-8")
+            with (
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+                patch.object(manager_module, "_inspect_repository", AsyncMock(return_value=None)),
+            ):
+                result, path = await GitAdapter()._execute_git_one(item, [])
+        self.assertIsNone(path)
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["error_code"], "dependencies.non_git_install")
+
     def test_plan_skips_legacy_registry_dependency(self):
         dependency = {"registry_id": "old-pack", "name": "Old Pack", "version": "1.0.0", "manual": False}
         with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[])):

@@ -344,6 +344,18 @@ async def _scan_repositories() -> list[GitRepository]:
     return repositories
 
 
+def _non_git_directory_names(repositories: list[GitRepository]) -> set[str]:
+    git_paths = {repository.path.resolve() for repository in repositories}
+    names: set[str] = set()
+    for root in _custom_node_roots():
+        if not root.is_dir():
+            continue
+        for path in root.iterdir():
+            if path.is_dir() and path.resolve() not in git_paths:
+                names.add(path.name.casefold())
+    return names
+
+
 def _requested_commit(item: dict[str, Any]) -> str | None:
     # 执行阶段收到的是 plan() 输出的字典，提交记录在 requested 字段；
     # 原始清单依赖使用 commit，历史清单可能把 SHA 放在 version。
@@ -407,11 +419,14 @@ class GitAdapter:
         if not dependencies:
             return []
         installed: dict[str, list[GitRepository]] = {}
+        non_git_directories: set[str] = set()
         if any(item.get("source_url") for item in dependencies):
-            for repository in await _scan_repositories():
+            repositories = await _scan_repositories()
+            for repository in repositories:
                 key = _source_key(repository.source_url)
                 if key:
                     installed.setdefault(key, []).append(repository)
+            non_git_directories = _non_git_directory_names(repositories)
         requested_by_source: dict[str, set[str]] = {}
         for dependency in dependencies:
             source = _canonical_source(dependency.get("source_url"))
@@ -443,6 +458,9 @@ class GitAdapter:
             elif not requested:
                 action = "manual"
                 warning_code = "dependencies.commit_missing"
+            elif parse_public_repository(source)[1].casefold() in non_git_directories:
+                action = "manual"
+                warning_code = "dependencies.non_git_install"
             elif not current:
                 action = "install"
             elif current.dirty:
@@ -655,6 +673,8 @@ class GitAdapter:
             root.mkdir(parents=True, exist_ok=True)
             target = ensure_within(root, root / repo)
             if target.exists():
+                if target.is_dir() and await _inspect_repository(target) is None:
+                    return _failure(item, "dependencies.non_git_install"), None
                 return _failure(item, "dependencies.target_exists", {"path": target.name}), None
             await git_log(f"cloning {source}")
             created = False

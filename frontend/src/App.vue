@@ -311,6 +311,7 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.duplicate_git_source": "dependenciesDuplicateGitSource",
   "dependencies.local_changes": "dependenciesLocalChanges",
   "dependencies.unpushed_commits": "dependenciesUnpushedCommits",
+  "dependencies.non_git_install": "dependenciesNonGitInstall",
   "dependencies.target_exists": "dependenciesTargetExists",
   "dependencies.git_command_failed": "dependenciesGitCommandFailed",
   "dependencies.manager_unavailable": "dependenciesManagerUnavailable",
@@ -1574,7 +1575,9 @@ watch(operations, (items) => {
   if (operation.status !== "success") {
     check.syncing = false;
     check.syncOperationId = "";
-    check.syncError = operationErrorMessage(operation) || t.value("dependencySyncFailed");
+    check.syncError = operation.error_code
+      ? localizedBackendError(operation.error_code, operation.error_params)
+      : t.value("dependencySyncFailed");
     return;
   }
   downloadPreflight.value = null;
@@ -3213,7 +3216,12 @@ onBeforeUnmount(() => {
             <b class="dependency-status" data-tone="warn">{{ t("downloadCheckAttention") }}</b>
           </div>
           <div v-for="entry in preflightDependencyIssues" :key="`download-check-${dependencyActionKey(entry)}`" class="download-check-dependency">
-            <span><PackageOpen :size="15" /><strong>{{ entry.name }}</strong><small>{{ entry.installed || t("notInstalled") }} → {{ entry.requested || t("gitRevisionUnavailable") }}</small></span>
+            <span>
+              <PackageOpen :size="15" />
+              <strong>{{ entry.name }}</strong>
+              <small>{{ entry.warning_code === "dependencies.non_git_install" ? t("nonGitInstall") : entry.installed || t("notInstalled") }} → {{ entry.requested || t("gitRevisionUnavailable") }}</small>
+              <small v-if="entry.warning_code" class="dependency-warning">{{ dependencyWarning(entry) }}</small>
+            </span>
             <span class="download-check-dependency-meta">
               <b class="dependency-status" :data-tone="dependencyActionTone(entry.action)">{{ t(dependencyActionLabels[entry.action]) }}</b>
               <a
