@@ -155,6 +155,8 @@ type DependencyResult = {
   installer?: "git" | "manager";
   state: "queued" | "installing" | "python_installing" | "success" | "failed" | "unknown";
   error_code?: string | null; error_params?: Record<string, string | number>;
+  backup_ref?: string | null;
+  backup_refs?: string[];
 };
 type DependencyExecutionTask = DependencyResult & { registryId: string; version: string; message: string };
 type PublishCatalogProduct = {
@@ -356,6 +358,7 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "dependencies.invalid_plan": "dependenciesInvalidPlan",
   "dependencies.confirmation_required": "dependenciesConfirmationRequired",
   "dependencies.plan_changed": "dependenciesPlanChanged",
+  "dependencies.operation_busy": "dependenciesOperationBusy",
   "publisher.lora_forbidden": "loraPublishForbidden",
   "publisher.dependency_update_invalid": "publisherDependencyUpdateInvalid",
   "publisher.dependency_commit_missing": "publisherDependencyCommitMissing",
@@ -430,6 +433,10 @@ const activeDependencyOperation = computed(() => {
   const operationId = dependencyOperationIds[dependencyKey(selected.value, activeDetailVersion.value)];
   return operations.value.find((item) => item.id === operationId) || null;
 });
+function dependencyBackupMessage(entry: DependencyResult) {
+  const refs = entry.backup_refs?.length ? entry.backup_refs : (entry.backup_ref ? [entry.backup_ref] : []);
+  return refs.length ? t.value("dependencyBackupCreated", { refs: refs.join(", ") }) : "";
+}
 function operationTaskRows(operation: Operation): DependencyExecutionTask[] {
   const rawTasks = Array.isArray(operation.result?.tasks) ? operation.result.tasks as DependencyResult[] : [];
   return rawTasks.map((entry) => {
@@ -444,7 +451,9 @@ function operationTaskRows(operation: Operation): DependencyExecutionTask[] {
       registryId: taskId,
       state: override?.state || entry.state,
       version: entry.requested || "",
-      message: override?.message || (entry.error_code ? localizedBackendError(entry.error_code, entry.error_params) : ""),
+      message: override?.message
+        || (entry.error_code ? localizedBackendError(entry.error_code, entry.error_params) : "")
+        || dependencyBackupMessage(entry),
     };
   });
 }
@@ -469,7 +478,12 @@ const dependencyExecutionFailures = computed(() => {
   const taskFailures = execution.tasks.filter((task) => task.state === "failed" || task.state === "unknown").length;
   return taskFailures || (execution.failed ? 1 : 0);
 });
-const dependencyOperationRunning = computed(() => operations.value.some((item) => item.kind === "dependencies" && isOperationActive(item)));
+const dependencyOperationRunning = computed(() =>
+  Object.values(dependencyOperationIds).some((operationId) => {
+    const operation = operations.value.find((item) => item.id === operationId);
+    return !operation || isOperationActive(operation);
+  }) || operations.value.some((item) => item.kind === "dependencies" && isOperationActive(item))
+);
 const publisherManagementOperationRunning = computed(() =>
   Object.keys(publisherManagementOperationIds).length > 0
   || operations.value.some((item) => item.kind === "publisher-manage" && item.status === "running"),
@@ -1355,9 +1369,21 @@ async function retryDownloadPreflight() {
   downloadPreflight.value = null;
   await download(check.item, check.version);
 }
+async function refreshDownloadPreflightDependencies(check: DownloadPreflight) {
+  try {
+    const dependencies = await fetchDependencyPlan(check.item, check.version);
+    if (downloadPreflight.value !== check) return dependencies;
+    check.dependencies = dependencies;
+    check.dependencyError = "";
+    return dependencies;
+  } catch (reason) {
+    if (downloadPreflight.value === check) check.dependencyError = errorMessage(reason);
+    return null;
+  }
+}
 async function syncDownloadDependencies() {
   const check = downloadPreflight.value;
-  if (!check || check.syncing || !preflightSyncableDependencies.value.length) return;
+  if (!check || check.syncing || dependencyOperationRunning.value || !preflightSyncableDependencies.value.length) return;
   const key = dependencyKey(check.item, check.version);
   const actions = preflightSyncableDependencies.value;
   check.syncing = true;
@@ -1383,8 +1409,9 @@ async function syncDownloadDependencies() {
       }
       void pollOperations();
     } catch (reason) {
-      check.syncing = false;
       check.syncError = errorMessage(reason);
+      await refreshDownloadPreflightDependencies(check);
+      if (downloadPreflight.value === check) check.syncing = false;
     }
   });
 }
@@ -1545,17 +1572,23 @@ async function autoPlanDependencies(item: Product | null, version: Version | nul
 watch([selected, activeDetailVersion, status], ([item, version]) => {
   void autoPlanDependencies(item, version);
 });
-watch(operations, (items) => {
+watch(operations, async (items) => {
   const check = downloadPreflight.value;
   if (!check?.syncing || !check.syncOperationId) return;
   const operation = items.find((item) => item.id === check.syncOperationId);
   if (!operation || isOperationActive(operation)) return;
+  check.syncOperationId = "";
+  const dependencies = await refreshDownloadPreflightDependencies(check);
+  if (downloadPreflight.value !== check) return;
+  check.syncing = false;
   if (operation.status !== "success") {
-    check.syncing = false;
-    check.syncOperationId = "";
     check.syncError = operation.error_code
       ? localizedBackendError(operation.error_code, operation.error_params)
       : t.value("dependencySyncFailed");
+    return;
+  }
+  if (!dependencies || dependencies.some((entry) => entry.action !== "keep")) {
+    check.syncError = t.value("dependencySyncStillNeedsAttention");
     return;
   }
   downloadPreflight.value = null;
@@ -1606,7 +1639,7 @@ function toggleDependencyRow(key: string, entry: DependencyPlan | null) {
   toggleDependencyAction(key, dependencyActionKey(entry), !dependencyActionSelected(key, entry));
 }
 async function executeDependencyPlan(item: Product | null, version: Version | null) {
-  if (!item || !version) return;
+  if (!item || !version || dependencyOperationRunning.value) return;
   const key = dependencyKey(item, version);
   const selectedIds = new Set(selectedDependencyActions[key] || []);
   const actions = (dependencyPlans[key] || []).filter((entry) => selectedIds.has(dependencyActionKey(entry)));
@@ -3289,7 +3322,7 @@ onBeforeUnmount(() => {
           <button v-if="downloadPreflight.environmentError || downloadPreflight.dependencyError || downloadPreflight.syncError" class="ghost" :disabled="!!busy || downloadPreflight.syncing" @click="retryDownloadPreflight">{{ t("retryCheck") }}</button>
           <button class="ghost" :disabled="downloadPreflight.syncing" @click="closeDownloadPreflight">{{ t("cancel") }}</button>
           <button class="secondary" :disabled="downloadPreflight.syncing" @click="skipDownloadPreflight">{{ t("downloadAnyway") }}</button>
-          <button v-if="preflightSyncableDependencies.length" class="primary" :disabled="!!busy || downloadPreflight.syncing" @click="syncDownloadDependencies"><LoaderCircle v-if="downloadPreflight.syncing" :size="16" class="dependency-task-spin" />{{ t("syncPluginsThenDownload") }}</button>
+          <button v-if="preflightSyncableDependencies.length" class="primary" :disabled="!!busy || downloadPreflight.syncing || dependencyOperationRunning" @click="syncDownloadDependencies"><LoaderCircle v-if="downloadPreflight.syncing" :size="16" class="dependency-task-spin" />{{ t("syncPluginsThenDownload") }}</button>
         </footer>
       </section>
     </div>
@@ -3477,7 +3510,7 @@ onBeforeUnmount(() => {
               <CheckCircle2 v-else-if="task.state === 'success'" :size="14" />
               <AlertCircle v-else-if="task.state === 'failed'" :size="14" />
               <Clock v-else :size="14" />
-              <span>{{ task.name }}</span><small>{{ task.version || task.installer || "" }}</small>
+              <span>{{ task.name }}</span><small>{{ dependencyBackupMessage(task) || task.version || task.installer || "" }}</small>
             </li>
           </ul>
           <pre v-if="item.error_code || item.logs.length">{{ operationErrorMessage(item) }}</pre>

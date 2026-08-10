@@ -58,7 +58,13 @@ ComfyUI 以 `--multi-user` 多用户模式运行时，请求必须携带当前�
 
 ## Manager 不可用
 
-工作流仍可下载。GitHub 依赖使用 ComfyUI 环境中的 Git；历史 Registry 依赖才需要 ComfyUI-Manager `3.0+`（legacy API）或 `4.2.1+`（v2 API）。补全开始前会检查下载端点；如果提示无法连接，请检查网络、VPN 或 TUN 模式。Git 任务可并行，Python requirements 日志和 Manager post-install 结果都会进入同一安装详情；操作记录按用户持久化，安装或升级后重启 ComfyUI 即可。Manager 3.x 下如果队列任务被拒绝并返回 403，需把 Manager 的 `security_level` 调整为 `middle` 或更低（默认 `normal` 即可）。
+工作流仍可下载。GitHub 依赖使用 ComfyUI 环境中的 Git；历史 Registry 依赖才需要 ComfyUI-Manager `3.0+`（legacy API）或 `4.2.1+`（v2 API）。补全开始前会检查下载端点；如果提示无法连接，请检查网络、VPN 或 TUN 模式。Git、Python requirements 与 Manager 环境变更会按插件串行执行，日志和 Manager post-install 结果都会进入同一安装详情；操作记录按用户持久化，安装或升级后重启 ComfyUI 即可。Manager 3.x 下如果队列任务被拒绝并返回 403，需把 Manager 的 `security_level` 调整为 `middle` 或更低（默认 `normal` 即可）。
+
+## 本地插件存在未提交改动或本地独有提交
+
+更新 Workflow Hub 后重新点击同步即可自动修复旧版本遗留的这两类状态。同步会先把 tracked/untracked 未提交改动保存到 `refs/workflow-hub/backups/*`，再刷新插件远端分支；远端引用过期但提交其实已经公开的情况会直接继续。若刷新后仍存在真正仅存于本地的 commit，还会创建 `workflow-hub-backup/<短提交>-<时间>` 备份分支。Python `requirements.txt` 若在仓库内生成文件或修改，也会保存到独立备份引用并恢复干净工作副本。
+
+活动详情会列出所有备份引用。完成后当前工作副本位于干净的远端跟踪分支，不会停在备份分支或游离态，因此启动器和 ComfyUI-Manager 仍可正常识别并更新。需要恢复未提交内容时，可在对应插件目录执行 `git stash apply <活动详情中的 refs/workflow-hub/backups/...>`；备份引用会继续保留，不会因应用而删除。
 
 ## 同版本下载失败
 

@@ -9,7 +9,7 @@
 - 不执行包、仓库或清单中的任何代码。
 - Token 只存系统 keyring；keyring 失败时只存当前 Python 进程内存。Token、设备码和 Authorization header 会从日志中脱敏。GitHub 对受信请求返回 401 时自动删除已存凭据并按未登录处理。
 - 所有写 API 要求同源、请求体不超过 20 MiB，并通过 ComfyUI 当前请求解析用户目录；携带 JSON 请求体时必须使用 `application/json`，无参数写操作允许空请求体。
-- 依赖计划默认只读。安装、升级或降级只有在请求明确携带确认后才执行；执行前检查 GitHub/Comfy Registry 网络，Git clone/fetch/checkout 可并行但 Python `requirements.txt` 安装串行，历史 Registry 依赖提交给 ComfyUI-Manager。统一操作记录按用户目录持久化进度、日志和结果。
+- 依赖计划默认只读。安装、升级或降级只有在请求明确携带确认后才执行；执行前检查 GitHub/Comfy Registry 网络并在全局串行锁内重新验证计划，同一请求复用活动操作，避免多个页面或用户并发改写共享 `custom_nodes`。Git 与 Python `requirements.txt` 按插件串行完成，历史 Registry 依赖提交给 ComfyUI-Manager。Git 切换不会丢弃本地内容：tracked/untracked 未提交改动先保存到 `refs/workflow-hub/backups/*`，远端分支随后刷新，真正只存在于本地的 commit 会保存在独立 `workflow-hub-backup/*` 分支后再切换；Python 依赖安装产生的仓库改动也会另行保存。最终工作副本保持干净的正常远端跟踪分支而非游离态，备份引用不会改变当前分支或阻止启动器更新。统一操作记录按用户目录持久化进度、日志和结果。
 - 删除已发布版本或工作流同样要求请求明确确认；删除会连同对应 Release 与 tag 一并移除，且不可恢复。
 - 插件不收集遥测。
 

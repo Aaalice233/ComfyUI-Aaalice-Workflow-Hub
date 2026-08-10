@@ -94,13 +94,13 @@ class GitSourceTests(IsolatedAsyncioTestCase):
             result = self._run_plan([dependency])
         self.assertEqual(result[0]["action"], "upgrade")
 
-    def test_plan_blocks_dirty_repository(self):
+    def test_plan_repairs_dirty_repository(self):
         repository = GitRepository("pack", Path("custom_nodes/pack"), SOURCE, COMMIT_A, True)
         dependency = {"name": "pack", "source_url": SOURCE, "commit": COMMIT_B, "manual": True}
         with patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[repository])):
             result = self._run_plan([dependency])
-        self.assertEqual(result[0]["action"], "manual")
-        self.assertEqual(result[0]["warning_code"], "dependencies.local_changes")
+        self.assertEqual(result[0]["action"], "upgrade")
+        self.assertIsNone(result[0]["warning_code"])
 
     def test_plan_blocks_duplicate_git_sources(self):
         repositories = [
@@ -128,6 +128,38 @@ class GitSourceTests(IsolatedAsyncioTestCase):
         self.assertEqual(result[0]["action"], "manual")
         self.assertEqual(result[0]["warning_code"], "dependencies.non_git_install")
 
+    def test_plan_blocks_existing_target_owned_by_another_git_repository(self):
+        dependency = {"name": "pack", "source_url": SOURCE, "commit": COMMIT_A, "manual": True}
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            target = custom_nodes / "pack"
+            target.mkdir(parents=True)
+            repository = GitRepository("pack", target, "https://github.com/example/other-pack", COMMIT_B, False)
+            with (
+                patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[repository])),
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+            ):
+                result = self._run_plan([dependency])
+        self.assertEqual(result[0]["action"], "manual")
+        self.assertEqual(result[0]["warning_code"], "dependencies.target_exists")
+        self.assertEqual(result[0]["warning_params"], {"path": "pack"})
+
+    def test_plan_blocks_different_sources_with_same_target_name(self):
+        dependencies = [
+            {"name": "first", "source_url": "https://github.com/first/shared", "commit": COMMIT_A, "manual": True},
+            {"name": "second", "source_url": "https://github.com/second/shared", "commit": COMMIT_B, "manual": True},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            with (
+                patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[])),
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+            ):
+                result = self._run_plan(dependencies)
+        self.assertTrue(all(item["action"] == "manual" for item in result))
+        self.assertTrue(all(item["warning_code"] == "dependencies.target_exists" for item in result))
+        self.assertTrue(all(item["warning_params"] == {"path": "shared"} for item in result))
+
     async def test_execute_reports_non_git_install_created_after_plan(self):
         item = {"name": "pack", "source_url": SOURCE, "requested": COMMIT_A, "action": "install"}
         with tempfile.TemporaryDirectory() as directory:
@@ -143,6 +175,23 @@ class GitSourceTests(IsolatedAsyncioTestCase):
         self.assertIsNone(path)
         self.assertEqual(result["state"], "failed")
         self.assertEqual(result["error_code"], "dependencies.non_git_install")
+
+    async def test_execute_reports_different_git_repository_created_after_plan(self):
+        item = {"name": "pack", "source_url": SOURCE, "requested": COMMIT_A, "action": "install"}
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            target = custom_nodes / "pack"
+            target.mkdir(parents=True)
+            repository = GitRepository("pack", target, "https://github.com/example/other-pack", COMMIT_B, False)
+            with (
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+                patch.object(manager_module, "_inspect_repository", AsyncMock(return_value=repository)),
+            ):
+                result, path = await GitAdapter()._execute_git_one(item, [])
+        self.assertIsNone(path)
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(result["error_code"], "dependencies.target_exists")
+        self.assertEqual(result["error_params"], {"path": "pack"})
 
     def test_plan_skips_legacy_registry_dependency(self):
         dependency = {"registry_id": "old-pack", "name": "Old Pack", "version": "1.0.0", "manual": False}
@@ -178,6 +227,204 @@ class GitSourceTests(IsolatedAsyncioTestCase):
 
     async def _plan(self, dependencies):
         return await GitAdapter().plan(dependencies)
+
+    async def test_remote_refresh_clears_stale_unpushed_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository, origin, base = await self._create_repository(Path(directory))
+            (repository / "plugin.py").write_text("second\n", encoding="utf-8")
+            await manager_module._run_git("add", "plugin.py", cwd=repository)
+            await manager_module._run_git("commit", "-m", "second", cwd=repository)
+            second = await manager_module._run_git("rev-parse", "HEAD", cwd=repository)
+            await manager_module._run_git("push", "origin", "main", cwd=repository)
+            await manager_module._run_git("update-ref", "refs/remotes/origin/main", base, cwd=repository)
+            before = await manager_module._run_git("rev-list", "HEAD", "--not", "--remotes", cwd=repository)
+            self.assertIn(second, before)
+
+            unpushed = await manager_module._refresh_remote_refs(repository, str(origin), None)
+
+            self.assertEqual(unpushed, "")
+            self.assertEqual(await manager_module._run_git("rev-parse", "refs/remotes/origin/main", cwd=repository), second)
+
+    async def test_true_local_commits_are_backed_up_before_returning_to_tracked_branch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository, origin, base = await self._create_repository(Path(directory))
+            (repository / "plugin.py").write_text("local only\n", encoding="utf-8")
+            await manager_module._run_git("add", "plugin.py", cwd=repository)
+            await manager_module._run_git("commit", "-m", "local only", cwd=repository)
+            local_commit = await manager_module._run_git("rev-parse", "HEAD", cwd=repository)
+
+            unpushed = await manager_module._refresh_remote_refs(repository, str(origin), None)
+            backup_ref = await manager_module._backup_unpushed_head(repository, None)
+            await manager_module._checkout_pinned(repository, base, None)
+
+            self.assertIn(local_commit, unpushed)
+            self.assertEqual(await manager_module._run_git("rev-parse", backup_ref, cwd=repository), local_commit)
+            self.assertEqual(await manager_module._run_git("branch", "--show-current", cwd=repository), "main")
+            self.assertEqual(await manager_module._run_git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=repository), "origin/main")
+            self.assertEqual(await manager_module._run_git("status", "--porcelain", cwd=repository), "")
+
+    async def test_execute_preserves_dirty_worktree_and_remains_launcher_updateable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            repository, _origin, base = await self._create_repository(custom_nodes, "pack")
+            (repository / "plugin.py").write_text("published update\n", encoding="utf-8")
+            await manager_module._run_git("add", "plugin.py", cwd=repository)
+            await manager_module._run_git("commit", "-m", "published update", cwd=repository)
+            published = await manager_module._run_git("rev-parse", "HEAD", cwd=repository)
+            await manager_module._run_git("push", "origin", "main", cwd=repository)
+            (repository / "plugin.py").write_text("subscriber edit\n", encoding="utf-8")
+            (repository / "subscriber.txt").write_text("subscriber file\n", encoding="utf-8")
+            installed = GitRepository("pack", repository, SOURCE, published, True)
+            item = {"name": "pack", "source_url": SOURCE, "requested": base, "action": "upgrade"}
+            with (
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+                patch.object(manager_module, "_refresh_remote_refs", AsyncMock(return_value="")),
+            ):
+                result, path = await GitAdapter()._execute_git_one(item, [installed])
+
+            self.assertEqual(path, repository)
+            self.assertEqual(result["state"], "success")
+            self.assertEqual(len(result["backup_refs"]), 1)
+            backup_ref = result["backup_refs"][0]
+            self.assertTrue(backup_ref.startswith("refs/workflow-hub/backups/workflow-hub-worktree-"))
+            self.assertEqual(await manager_module._run_git("status", "--porcelain", cwd=repository), "")
+            self.assertEqual(await manager_module._run_git("rev-parse", "HEAD", cwd=repository), base)
+            self.assertEqual(await manager_module._run_git("branch", "--show-current", cwd=repository), "main")
+            self.assertEqual(await manager_module._run_git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=repository), "origin/main")
+
+            await manager_module._run_git("merge", "--ff-only", "origin/main", cwd=repository)
+            self.assertEqual(await manager_module._run_git("rev-parse", "HEAD", cwd=repository), published)
+            await manager_module._run_git("stash", "apply", "--index", backup_ref, cwd=repository)
+            self.assertEqual((repository / "plugin.py").read_text(encoding="utf-8"), "subscriber edit\n")
+            self.assertEqual((repository / "subscriber.txt").read_text(encoding="utf-8"), "subscriber file\n")
+
+    async def test_failed_alignment_restores_dirty_worktree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            repository, _origin, base = await self._create_repository(custom_nodes, "pack")
+            (repository / "plugin.py").write_text("subscriber edit\n", encoding="utf-8")
+            (repository / "subscriber.txt").write_text("subscriber file\n", encoding="utf-8")
+            installed = GitRepository("pack", repository, SOURCE, base, True)
+            item = {"name": "pack", "source_url": SOURCE, "requested": COMMIT_A, "action": "upgrade"}
+            with (
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+                patch.object(manager_module, "_refresh_remote_refs", AsyncMock(side_effect=manager_module.GitCommandError("fetch failed"))),
+            ):
+                result, path = await GitAdapter()._execute_git_one(item, [installed])
+
+            self.assertIsNone(path)
+            self.assertEqual(result["state"], "failed")
+            self.assertEqual(result["error_code"], "dependencies.git_command_failed")
+            self.assertEqual((repository / "plugin.py").read_text(encoding="utf-8"), "subscriber edit\n")
+            self.assertEqual((repository / "subscriber.txt").read_text(encoding="utf-8"), "subscriber file\n")
+            self.assertNotEqual(await manager_module._run_git("status", "--porcelain", cwd=repository), "")
+            self.assertEqual(await manager_module._run_git("rev-parse", "HEAD", cwd=repository), base)
+            self.assertEqual(await manager_module._run_git("branch", "--show-current", cwd=repository), "main")
+
+    async def test_execute_preserves_local_only_head_and_returns_backup_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            repository, _origin, base = await self._create_repository(custom_nodes, "pack")
+            (repository / "plugin.py").write_text("local only\n", encoding="utf-8")
+            await manager_module._run_git("add", "plugin.py", cwd=repository)
+            await manager_module._run_git("commit", "-m", "local only", cwd=repository)
+            local_commit = await manager_module._run_git("rev-parse", "HEAD", cwd=repository)
+            installed = GitRepository("pack", repository, SOURCE, local_commit, False)
+            item = {"name": "pack", "source_url": SOURCE, "requested": base, "action": "upgrade"}
+            with (
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+                patch.object(manager_module, "_refresh_remote_refs", AsyncMock(return_value=local_commit)),
+            ):
+                result, path = await GitAdapter()._execute_git_one(item, [installed])
+
+            self.assertEqual(path, repository)
+            self.assertEqual(result["state"], "success")
+            self.assertTrue(str(result["backup_ref"]).startswith("workflow-hub-backup/"))
+            self.assertEqual(await manager_module._run_git("rev-parse", result["backup_ref"], cwd=repository), local_commit)
+            self.assertEqual(await manager_module._run_git("rev-parse", "HEAD", cwd=repository), base)
+            self.assertEqual(await manager_module._run_git("branch", "--show-current", cwd=repository), "main")
+            self.assertEqual(await manager_module._run_git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=repository), "origin/main")
+
+    async def test_requirement_generated_changes_are_preserved_and_worktree_is_left_clean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            custom_nodes = Path(directory) / "custom_nodes"
+            repository, _origin, base = await self._create_repository(custom_nodes, "pack")
+            installed = GitRepository("pack", repository, SOURCE, base, False)
+            action = {"name": "pack", "source_url": SOURCE, "requested": base, "action": "upgrade"}
+
+            async def install_requirements(path, on_log=None):
+                (path / "plugin.py").write_text("generated tracked change\n", encoding="utf-8")
+                (path / "generated.txt").write_text("generated file\n", encoding="utf-8")
+                return True
+
+            with (
+                patch.object(manager_module, "_custom_node_roots", return_value=[custom_nodes]),
+                patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[installed])),
+                patch.object(manager_module, "_refresh_remote_refs", AsyncMock(return_value="")),
+                patch.object(manager_module, "_install_python_requirements", install_requirements),
+            ):
+                result = await GitAdapter().execute([action])
+
+            self.assertEqual(result[0]["state"], "success")
+            self.assertEqual(result[0]["python_requirements"], "installed")
+            self.assertEqual(len(result[0]["backup_refs"]), 1)
+            backup_ref = result[0]["backup_refs"][0]
+            self.assertIn("workflow-hub-requirements-", backup_ref)
+            self.assertEqual(await manager_module._run_git("status", "--porcelain", cwd=repository), "")
+            self.assertEqual((repository / "plugin.py").read_text(encoding="utf-8"), "base\n")
+            self.assertFalse((repository / "generated.txt").exists())
+            await manager_module._run_git("stash", "apply", "--index", backup_ref, cwd=repository)
+            self.assertEqual((repository / "plugin.py").read_text(encoding="utf-8"), "generated tracked change\n")
+            self.assertEqual((repository / "generated.txt").read_text(encoding="utf-8"), "generated file\n")
+
+    async def test_git_dependencies_run_serially_through_requirements(self):
+        events: list[str] = []
+        actions = [
+            {"name": "one", "source_url": "https://github.com/example/one", "requested": COMMIT_A, "action": "install"},
+            {"name": "two", "source_url": "https://github.com/example/two", "requested": COMMIT_B, "action": "install"},
+        ]
+
+        async def execute_one(item, _repositories, on_log=None):
+            events.append(f"git:{item['name']}")
+            return {
+                **item,
+                "installer": "git",
+                "state": "success",
+                "error_code": None,
+                "error_params": {},
+                "_cloned": True,
+            }, Path(item["name"])
+
+        async def install_requirements(path, on_log=None):
+            events.append(f"requirements:{path.name}")
+            return False
+
+        adapter = GitAdapter()
+        with (
+            patch.object(manager_module, "_scan_repositories", AsyncMock(return_value=[])),
+            patch.object(adapter, "_execute_git_one", execute_one),
+            patch.object(manager_module, "_install_python_requirements", install_requirements),
+            patch.object(manager_module, "_stash_worktree_changes", AsyncMock(return_value=None)),
+        ):
+            result = await adapter.execute(actions)
+        self.assertEqual(events, ["git:one", "requirements:one", "git:two", "requirements:two"])
+        self.assertTrue(all(item["state"] == "success" for item in result))
+
+    async def _create_repository(self, root: Path, name: str = "work") -> tuple[Path, Path, str]:
+        root.mkdir(parents=True, exist_ok=True)
+        repository = root / name
+        origin = root / "origin.git"
+        await manager_module._run_git("init", str(repository))
+        await manager_module._run_git("init", "--bare", str(origin))
+        await manager_module._run_git("config", "user.email", "workflow-hub@example.invalid", cwd=repository)
+        await manager_module._run_git("config", "user.name", "Workflow Hub Tests", cwd=repository)
+        (repository / "plugin.py").write_text("base\n", encoding="utf-8")
+        await manager_module._run_git("add", "plugin.py", cwd=repository)
+        await manager_module._run_git("commit", "-m", "base", cwd=repository)
+        await manager_module._run_git("branch", "-M", "main", cwd=repository)
+        await manager_module._run_git("remote", "add", "origin", str(origin), cwd=repository)
+        await manager_module._run_git("push", "-u", "origin", "main", cwd=repository)
+        return repository, origin, await manager_module._run_git("rev-parse", "HEAD", cwd=repository)
 
     def _run_plan(self, dependencies):
         import asyncio

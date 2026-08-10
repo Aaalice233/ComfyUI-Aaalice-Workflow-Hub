@@ -264,7 +264,8 @@ def _dependency_from_action(item: dict[str, Any]) -> dict[str, Any]:
 
 def _response_error(exc: Exception) -> web.Response:
     if isinstance(exc, UserFacingError):
-        return web.json_response({"error_code": exc.code, "error_params": exc.params}, status=400)
+        status = 409 if exc.code == "dependencies.operation_busy" else 400
+        return web.json_response({"error_code": exc.code, "error_params": exc.params}, status=status)
     if isinstance(exc, ValidationError):
         return web.json_response(
             {
@@ -368,6 +369,8 @@ async def _start_publisher_management_operation(
 
 
 _dependency_lock = asyncio.Lock()
+_dependency_job_guard = asyncio.Lock()
+_active_dependency_job: tuple[str, str, Operation] | None = None
 
 
 async def _check_dependency_network(
@@ -440,6 +443,79 @@ async def _check_dependency_network(
         host, detail = failures[0]
         raise UserFacingError("dependencies.network_unavailable", {"host": host, "detail": detail or "unknown error"})
     await on_log("network check: download endpoints are reachable")
+
+
+async def _revalidate_dependency_actions(
+    actions: list[dict[str, Any]],
+    version_policy: str,
+    manager_origin: str,
+) -> list[dict[str, Any]]:
+    fresh_plan = await _plan_dependencies(
+        [_dependency_from_action(item) for item in actions],
+        version_policy,
+        manager_origin,
+    )
+    fresh_by_key = {str(item.get("task_id")): item for item in fresh_plan}
+    result: list[dict[str, Any]] = []
+    appended_keys: set[str] = set()
+    for selected_item in actions:
+        key = _dependency_key(selected_item)
+        fresh = fresh_by_key.get(key)
+        if fresh is None or fresh.get("action") not in {"keep", "install", "upgrade", "downgrade"}:
+            name = str(selected_item.get("name") or selected_item.get("registry_id") or selected_item.get("source_url") or key)
+            if fresh and fresh.get("warning_code"):
+                raise UserFacingError(str(fresh["warning_code"]), dict(fresh.get("warning_params") or {}))
+            raise UserFacingError("dependencies.plan_changed", {"name": name})
+        if key not in appended_keys:
+            appended_keys.add(key)
+            result.append(fresh)
+    return result
+
+
+def _dependency_job_signature(metadata: dict[str, Any], actions: list[dict[str, Any]], version_policy: str) -> str:
+    items = sorted(
+        (
+            str(item.get("task_id") or _dependency_key(item)),
+            str(item.get("requested") or ""),
+            str(item.get("action") or ""),
+        )
+        for item in actions
+    )
+    return json.dumps(
+        {
+            "workflow_key": str(metadata.get("workflow_key") or ""),
+            "version_policy": version_policy,
+            "actions": items,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
+def _fail_dependency_validation(operation: Operation, actions: list[dict[str, Any]], error: UserFacingError) -> None:
+    tasks = [
+        {
+            "task_id": item.get("task_id"),
+            "name": item.get("name", item.get("registry_id") or item.get("source_url") or ""),
+            "requested": item.get("requested"),
+            "action": item.get("action", ""),
+            "state": "failed",
+            "registry_id": item.get("registry_id"),
+            "source_url": item.get("source_url"),
+            "installer": item.get("installer"),
+            "error_code": error.code,
+            "error_params": error.params,
+        }
+        for item in actions
+    ]
+    operation.metadata["failed_stage"] = "validating"
+    operation.progress_mode = "tasks"
+    operation.progress = {"received": len(tasks), "total": len(tasks)}
+    operation.result = {"tasks": tasks}
+    operation.status = "failed"
+    operation.stage = "failed"
+    operation.error_code = error.code
+    operation.error_params = error.params
 
 
 async def _perform_dependency_operation(
@@ -675,10 +751,77 @@ async def _perform_dependency_operation(
 async def _run_dependency_operation(
     operation: Operation,
     actions: list[dict[str, Any]],
+    version_policy: str,
     manager_origin: str,
 ) -> None:
-    async with _dependency_lock:
-        await _perform_dependency_operation(operation, actions, manager_origin)
+    global _active_dependency_job
+    try:
+        async with _dependency_lock:
+            operation.stage = "validating"
+            try:
+                actions = await _revalidate_dependency_actions(actions, version_policy, manager_origin)
+            except UserFacingError as exc:
+                _fail_dependency_validation(operation, actions, exc)
+                return
+            except Exception as exc:
+                operation.logs.append(str(exc))
+                _fail_dependency_validation(
+                    operation,
+                    actions,
+                    UserFacingError("dependencies.operation_failed", {"detail": str(exc)[-1000:]}),
+                )
+                return
+            operation.metadata["actions"] = [
+                {
+                    "task_id": item.get("task_id"),
+                    "name": item.get("name"),
+                    "registry_id": item.get("registry_id"),
+                    "source_url": item.get("source_url"),
+                    "requested": item.get("requested"),
+                    "action": item.get("action"),
+                    "installer": item.get("installer"),
+                }
+                for item in actions
+            ]
+            await _perform_dependency_operation(operation, actions, manager_origin)
+    finally:
+        async with _dependency_job_guard:
+            if _active_dependency_job and _active_dependency_job[2].id == operation.id:
+                _active_dependency_job = None
+
+
+async def _schedule_dependency_operation(
+    storage: UserStorage,
+    metadata: dict[str, Any],
+    actions: list[dict[str, Any]],
+    version_policy: str,
+    manager_origin: str,
+) -> Operation:
+    global _active_dependency_job
+    signature = _dependency_job_signature(metadata, actions, version_policy)
+    async with _dependency_job_guard:
+        if _active_dependency_job and _active_dependency_job[2].is_active():
+            owner_key, active_signature, active_operation = _active_dependency_job
+            if owner_key == storage.key and active_signature == signature:
+                return active_operation
+            raise UserFacingError("dependencies.operation_busy")
+        actions = await _revalidate_dependency_actions(actions, version_policy, manager_origin)
+        metadata["actions"] = [
+            {
+                "task_id": item.get("task_id"),
+                "name": item.get("name"),
+                "registry_id": item.get("registry_id"),
+                "source_url": item.get("source_url"),
+                "requested": item.get("requested"),
+                "action": item.get("action"),
+                "installer": item.get("installer"),
+            }
+            for item in actions
+        ]
+        operation = await operations.create("dependencies", storage, metadata)
+        _active_dependency_job = (storage.key, signature, operation)
+        asyncio.create_task(_run_dependency_operation(operation, actions, version_policy, manager_origin))
+        return operation
 
 
 async def _refresh_startup_source(
@@ -1345,42 +1488,9 @@ def register_routes() -> None:
         if not selected or not isinstance(selected, list) or not all(isinstance(item, dict) for item in selected):
             raise UserFacingError("dependencies.invalid_plan")
         manager_origin = _manager_origin(request)
-        fresh_plan = await _plan_dependencies(
-            [_dependency_from_action(item) for item in selected],
-            version_policy,
-            manager_origin,
-        )
-        fresh_by_key = {str(item.get("task_id")): item for item in fresh_plan}
-        actions: list[dict[str, Any]] = []
-        appended_keys: set[str] = set()
-        for selected_item in selected:
-            key = _dependency_key(selected_item)
-            fresh = fresh_by_key.get(key)
-            if fresh is None or fresh.get("action") in {"manual", "unknown", "conflict"}:
-                raise UserFacingError(
-                    "dependencies.plan_changed",
-                    {"name": str(selected_item.get("name") or selected_item.get("registry_id") or selected_item.get("source_url") or key)},
-                )
-            # 前端可能提交重复条目，同一个依赖只执行一次
-            if key not in appended_keys:
-                appended_keys.add(key)
-                actions.append(fresh)
         metadata = dict(data.get("metadata") or {})
-        metadata["actions"] = [
-            {
-                "task_id": item.get("task_id"),
-                "name": item.get("name"),
-                "registry_id": item.get("registry_id"),
-                "source_url": item.get("source_url"),
-                "requested": item.get("requested"),
-                "action": item.get("action"),
-                "installer": item.get("installer"),
-            }
-            for item in actions
-        ]
         storage = UserStorage.from_request(request)
-        operation = await operations.create("dependencies", storage, metadata)
-        asyncio.create_task(_run_dependency_operation(operation, actions, manager_origin))
+        operation = await _schedule_dependency_operation(storage, metadata, selected, version_policy, manager_origin)
         return web.json_response({"operation_id": operation.id}, status=202)
 
     @routes.get(f"{BASE}/github/repositories")

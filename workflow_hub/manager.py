@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any
 
 from .dependency_policy import is_ignored_dependency
@@ -277,16 +278,117 @@ async def _default_branch(path: Path) -> str:
     raise GitCommandError("unable to determine the repository default branch")
 
 
+async def _refresh_remote_refs(
+    path: Path,
+    source: str,
+    on_log: Callable[[str], Awaitable[None]] | None,
+) -> str:
+    if on_log:
+        await on_log("refreshing remote branches before checking local commits")
+    try:
+        await _run_git("fetch", "--no-tags", "origin", cwd=path, on_log=on_log)
+    except GitCommandError as origin_error:
+        errors = [f"origin: {origin_error.detail}"]
+        for candidate in dict.fromkeys(mirrors.active().git_clone_candidates(source)):
+            try:
+                await _run_git(
+                    "fetch",
+                    "--no-tags",
+                    candidate,
+                    "+refs/heads/*:refs/remotes/origin/*",
+                    cwd=path,
+                    on_log=on_log,
+                )
+                break
+            except GitCommandError as exc:
+                errors.append(f"{candidate}: {exc.detail}")
+        else:
+            raise GitCommandError("; ".join(errors))
+
+    unpushed = await _run_git("rev-list", "HEAD", "--not", "--remotes", cwd=path, timeout=30)
+    if unpushed.strip():
+        try:
+            # 镜像可能落后于公开源；最后用 canonical GitHub refs 消除“远端引用过期”的误判。
+            await _run_git(
+                "fetch",
+                "--no-tags",
+                source,
+                "+refs/heads/*:refs/remotes/origin/*",
+                cwd=path,
+                on_log=on_log,
+            )
+            unpushed = await _run_git("rev-list", "HEAD", "--not", "--remotes", cwd=path, timeout=30)
+        except GitCommandError as exc:
+            if on_log:
+                await on_log(f"canonical remote refresh unavailable; preserving local-only commits: {exc.detail}")
+    return unpushed
+
+
+async def _backup_unpushed_head(path: Path, on_log: Callable[[str], Awaitable[None]] | None) -> str:
+    short_commit = (await _run_git("rev-parse", "--short=12", "HEAD", cwd=path, timeout=30)).strip()
+    backup_ref = f"workflow-hub-backup/{short_commit}-{time.time_ns()}"
+    await _run_git("branch", backup_ref, "HEAD", cwd=path, timeout=30)
+    if on_log:
+        await on_log(f"preserved local-only commits on {backup_ref}")
+    return backup_ref
+
+
+async def _stash_worktree_changes(
+    path: Path,
+    on_log: Callable[[str], Awaitable[None]] | None,
+    reason: str,
+) -> str | None:
+    if not await _run_git("status", "--porcelain", cwd=path, timeout=30):
+        return None
+    try:
+        previous_stash = await _run_git("rev-parse", "--verify", "refs/stash", cwd=path, timeout=30)
+    except GitCommandError:
+        previous_stash = ""
+    short_commit = (await _run_git("rev-parse", "--short=12", "HEAD", cwd=path, timeout=30)).strip()
+    marker = f"workflow-hub-{reason}-{short_commit}-{time.time_ns()}"
+    await _run_git("stash", "push", "--include-untracked", "--message", marker, cwd=path, timeout=120, on_log=on_log)
+    stash_commit = await _run_git("rev-parse", "--verify", "refs/stash", cwd=path, timeout=30)
+    if not stash_commit or stash_commit == previous_stash:
+        raise GitCommandError("unable to preserve local working tree changes")
+    backup_ref = f"refs/workflow-hub/backups/{marker}"
+    try:
+        await _run_git("update-ref", backup_ref, stash_commit, cwd=path, timeout=30)
+        if await _run_git("status", "--porcelain", cwd=path, timeout=30):
+            raise GitCommandError("unable to preserve all working tree changes")
+    except GitCommandError as exc:
+        try:
+            await _run_git("stash", "apply", "--index", stash_commit, cwd=path, timeout=120, on_log=on_log)
+        except GitCommandError as restore_exc:
+            raise GitCommandError(f"{exc.detail}; restore failed: {restore_exc.detail}") from restore_exc
+        raise
+    if on_log:
+        await on_log(f"preserved local working tree changes on {backup_ref}")
+    return backup_ref
+
+
+async def _restore_worktree_backup(
+    path: Path,
+    backup_ref: str | None,
+    on_log: Callable[[str], Awaitable[None]] | None,
+) -> None:
+    if not backup_ref:
+        return
+    await _run_git("stash", "apply", "--index", backup_ref, cwd=path, timeout=120, on_log=on_log)
+    if on_log:
+        await on_log(f"restored local working tree changes from {backup_ref}")
+
+
 async def _checkout_pinned(path: Path, requested: str, on_log: Callable[[str], Awaitable[None]] | None) -> None:
-    # 钉在锁定 commit 但保持本地分支与 upstream 跟踪，避免游离态阻断启动器/Manager 的更新
+    # 只复用有对应远端的当前分支；本地临时分支和游离态都回到默认分支，保持启动器可更新。
     branch = (await _run_git("branch", "--show-current", cwd=path, timeout=30)).strip()
+    if branch:
+        try:
+            await _run_git("rev-parse", "--verify", f"refs/remotes/origin/{branch}", cwd=path, timeout=30)
+        except GitCommandError:
+            branch = ""
     if not branch:
         branch = await _default_branch(path)
     await _run_git("checkout", "-B", branch, requested, cwd=path, on_log=on_log)
-    try:
-        await _run_git("rev-parse", "--verify", f"refs/remotes/origin/{branch}", cwd=path, timeout=30)
-    except GitCommandError:
-        return
     await _run_git("branch", "--set-upstream-to", f"origin/{branch}", cwd=path, timeout=30)
 
 
@@ -295,12 +397,16 @@ async def _rollback_git_state(
     path: Path,
     on_log: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
-    try:
-        if result.get("_cloned"):
+    errors: list[str] = []
+    if result.get("_cloned"):
+        try:
             shutil.rmtree(path, ignore_errors=False)
             if on_log:
                 await on_log(f"{path.name}: removed incomplete clone")
-        elif result.get("_previous_commit"):
+        except OSError as exc:
+            errors.append(str(exc))
+    elif result.get("_previous_commit"):
+        try:
             previous_ref = str(result.get("_previous_ref") or "")
             if previous_ref:
                 await _run_git("checkout", "-B", previous_ref, str(result["_previous_commit"]), cwd=path, on_log=on_log)
@@ -308,9 +414,13 @@ async def _rollback_git_state(
                 await _run_git("checkout", "--detach", str(result["_previous_commit"]), cwd=path, on_log=on_log)
             if on_log:
                 await on_log(f"{path.name}: restored previous commit")
-    except (GitCommandError, OSError) as exc:
-        return str(exc)
-    return None
+        except GitCommandError as exc:
+            errors.append(str(exc))
+        try:
+            await _restore_worktree_backup(path, result.get("_worktree_backup"), on_log)
+        except GitCommandError as exc:
+            errors.append(str(exc))
+    return "; ".join(errors) or None
 
 
 async def _inspect_repository(path: Path) -> GitRepository | None:
@@ -419,20 +529,27 @@ class GitAdapter:
         if not dependencies:
             return []
         installed: dict[str, list[GitRepository]] = {}
+        repositories_by_path: dict[Path, GitRepository] = {}
         non_git_directories: set[str] = set()
+        install_root: Path | None = None
         if any(item.get("source_url") for item in dependencies):
             repositories = await _scan_repositories()
             for repository in repositories:
                 key = _source_key(repository.source_url)
                 if key:
                     installed.setdefault(key, []).append(repository)
+                repositories_by_path[repository.path.resolve()] = repository
             non_git_directories = _non_git_directory_names(repositories)
+            install_root = _custom_node_roots()[0]
         requested_by_source: dict[str, set[str]] = {}
+        requested_by_target: dict[str, set[str]] = {}
         for dependency in dependencies:
             source = _canonical_source(dependency.get("source_url"))
             requested = _requested_commit(dependency)
             if source and requested:
-                requested_by_source.setdefault(_source_key(source) or source, set()).add(requested)
+                source_key = _source_key(source) or source
+                requested_by_source.setdefault(source_key, set()).add(requested)
+                requested_by_target.setdefault(parse_public_repository(source)[1].casefold(), set()).add(source_key)
 
         result: list[DependencyAction] = []
         for dependency in dependencies:
@@ -445,6 +562,13 @@ class GitAdapter:
             installed_commit = current.commit if current else None
             warning_code = None
             warning_params: dict[str, str | int] = {}
+            dependency_name = str(dependency.get("name") or source or "GitHub repository")
+            target: Path | None = None
+            target_repository: GitRepository | None = None
+            if source and install_root is not None:
+                _owner, repo = parse_public_repository(source)
+                target = ensure_within(install_root, install_root / repo)
+                target_repository = repositories_by_path.get(target.resolve())
 
             if source and duplicate_source:
                 action = "manual"
@@ -452,6 +576,10 @@ class GitAdapter:
             elif source and len(requested_by_source.get(_source_key(source) or source, set())) > 1:
                 action = "conflict"
                 warning_code = "dependencies.conflicting_commits"
+            elif target is not None and len(requested_by_target.get(target.name.casefold(), set())) > 1:
+                action = "manual"
+                warning_code = "dependencies.target_exists"
+                warning_params = {"path": target.name}
             elif not source:
                 action = "manual"
                 warning_code = "dependencies.github_source_missing"
@@ -461,11 +589,18 @@ class GitAdapter:
             elif parse_public_repository(source)[1].casefold() in non_git_directories:
                 action = "manual"
                 warning_code = "dependencies.non_git_install"
+            elif not current and target is not None and target.exists():
+                action = "manual"
+                if target_repository is not None:
+                    warning_code = "dependencies.target_exists"
+                    warning_params = {"path": target.name}
+                else:
+                    warning_code = "dependencies.non_git_install"
             elif not current:
                 action = "install"
             elif current.dirty:
-                action = "manual"
-                warning_code = "dependencies.local_changes"
+                # 同步会先把 tracked/untracked 改动保存到独立 Git ref，再恢复干净的跟踪分支。
+                action = "upgrade"
             elif installed_commit == requested:
                 # 游离态但 commit 已对齐：提供补全把工作副本挂回本地分支
                 action = "upgrade" if current.detached else "keep"
@@ -480,7 +615,7 @@ class GitAdapter:
                 DependencyAction(
                     registry_id=str(dependency.get("registry_id") or "").strip() or None,
                     source_url=source,
-                    name=str(dependency.get("name") or source or "GitHub repository"),
+                    name=dependency_name,
                     requested=requested,
                     installed=installed_commit,
                     action=action,
@@ -513,54 +648,17 @@ class GitAdapter:
             unique.setdefault(source or str(item.get("name") or "").casefold(), item)
         executable = list(unique.values())
         total = len(executable) * 2
-        git_done = 0
-        source_locks: dict[str, asyncio.Lock] = {}
-        target_locks: dict[str, asyncio.Lock] = {}
-        semaphore = asyncio.Semaphore(min(4, len(executable)))
-        root = _custom_node_roots()[0]
+        results: list[dict[str, Any]] = []
+        for index, item in enumerate(executable):
+            result, path = await self._execute_git_one(item, repositories, on_log=on_log)
+            installing = _public_git_result(result)
+            if installing.get("state") == "success":
+                installing["state"] = "installing"
+            if on_result:
+                await on_result(installing)
+            if on_progress:
+                await on_progress(index * 2 + 1, total)
 
-        def target_key(item: dict[str, Any]) -> str:
-            source = _canonical_source(item.get("source_url"))
-            if source:
-                _owner, repo = parse_public_repository(source)
-                return str(ensure_within(root, root / repo)).casefold()
-            return str(item.get("name") or "").casefold()
-
-        async def run_git(index: int, item: dict[str, Any]) -> tuple[int, dict[str, Any], Path | None]:
-            source = _source_key(item.get("source_url")) or str(item.get("name") or "").casefold()
-            source_lock = source_locks.setdefault(source, asyncio.Lock())
-            path_lock = target_locks.setdefault(target_key(item), asyncio.Lock())
-            async with semaphore, source_lock, path_lock:
-                result, path = await self._execute_git_one(item, repositories, on_log=on_log)
-                return index, result, path
-
-        git_results: list[tuple[dict[str, Any], Path | None] | None] = [None] * len(executable)
-        results: list[dict[str, Any]] = [{} for _ in executable]
-        git_tasks = [asyncio.create_task(run_git(index, item)) for index, item in enumerate(executable)]
-        try:
-            for completed_task in asyncio.as_completed(git_tasks):
-                index, result, path = await completed_task
-                git_results[index] = (result, path)
-                installing = _public_git_result(result)
-                if installing.get("state") == "success":
-                    installing["state"] = "installing"
-                results[index] = installing
-                if on_result:
-                    await on_result(installing)
-                git_done += 1
-                if on_progress:
-                    await on_progress(git_done, total)
-        except BaseException:
-            for task in git_tasks:
-                task.cancel()
-            await asyncio.gather(*git_tasks, return_exceptions=True)
-            raise
-
-        python_done = 0
-        for index, item_result in enumerate(git_results):
-            if item_result is None:
-                continue
-            result, path = item_result
             final = dict(result)
             if final.get("state") == "success" and path is not None:
                 name = str(final.get("name") or path.name)
@@ -569,28 +667,50 @@ class GitAdapter:
                     if on_log:
                         await on_log(f"{name}: {line}")
 
+                def add_backup_ref(backup_ref: str | None) -> None:
+                    if not backup_ref:
+                        return
+                    backup_refs = list(final.get("backup_refs") or [])
+                    if backup_ref not in backup_refs:
+                        backup_refs.append(backup_ref)
+                    final["backup_refs"] = backup_refs
+                    final["backup_ref"] = backup_refs[0]
+
                 try:
                     python_state = {**_public_git_result(final), "state": "python_installing"}
                     if on_result:
                         await on_result(python_state)
                     installed = await _install_python_requirements(path, on_log=requirements_log)
                     final["python_requirements"] = "installed" if installed else "not_required"
-                except PythonDependencyError as exc:
+                    add_backup_ref(await _stash_worktree_changes(path, requirements_log, "requirements"))
+                except (PythonDependencyError, GitCommandError) as exc:
+                    preserve_error = None
+                    if isinstance(exc, PythonDependencyError) and not final.get("_cloned"):
+                        try:
+                            add_backup_ref(await _stash_worktree_changes(path, requirements_log, "requirements-failed"))
+                        except GitCommandError as backup_exc:
+                            preserve_error = backup_exc.detail
                     rollback_detail = await _rollback_git_state(final, path, on_log)
                     detail = exc.detail[-1000:]
+                    if preserve_error:
+                        detail = f"{detail}; preserving generated changes failed: {preserve_error}"
                     if rollback_detail:
                         detail = f"{detail}; rollback failed: {rollback_detail}"
-                    final = _failure(
-                        executable[index],
+                    failed = _failure(
+                        item,
                         "dependencies.python_requirements_failed",
                         {"name": name, "detail": detail},
                     )
-            results[index] = _public_git_result(final)
+                    if final.get("backup_refs"):
+                        failed["backup_refs"] = final["backup_refs"]
+                        failed["backup_ref"] = final["backup_refs"][0]
+                    final = failed
+            public_result = _public_git_result(final)
+            results.append(public_result)
             if on_result:
-                await on_result(results[index])
-            python_done += 1
+                await on_result(public_result)
             if on_progress:
-                await on_progress(len(executable) + python_done, total)
+                await on_progress((index + 1) * 2, total)
         return results
 
     async def _execute_git_one(
@@ -616,6 +736,16 @@ class GitAdapter:
         if len(matches) > 1:
             return _failure(item, "dependencies.duplicate_git_source"), None
         current = matches[0] if matches else None
+        _owner, repo = parse_public_repository(source)
+        root = _custom_node_roots()[0]
+        target = ensure_within(root, root / repo)
+        if current is None and target.exists():
+            target_repository = await _inspect_repository(target) if target.is_dir() else None
+            if target_repository is None:
+                return _failure(item, "dependencies.non_git_install"), None
+            if _source_key(target_repository.source_url) != _source_key(source):
+                return _failure(item, "dependencies.target_exists", {"path": target.name}), None
+            current = target_repository
 
         clone_candidates = mirrors.active().git_clone_candidates(source)
 
@@ -638,21 +768,32 @@ class GitAdapter:
 
         try:
             if current is not None:
-                if current.dirty:
-                    return _failure(item, "dependencies.local_changes"), None
-                dirty = await _run_git("status", "--porcelain", cwd=current.path, timeout=30)
-                if dirty:
-                    return _failure(item, "dependencies.local_changes"), None
-                unpushed = await _run_git("rev-list", "HEAD", "--not", "--remotes", cwd=current.path, timeout=30)
-                if unpushed.strip():
-                    return _failure(item, "dependencies.unpushed_commits", {"name": name}), None
+                previous_commit = (await _run_git("rev-parse", "HEAD", cwd=current.path, timeout=30)).strip().casefold()
                 previous_ref = (await _run_git("branch", "--show-current", cwd=current.path, timeout=30)).strip()
-                await git_log(f"fetching commit {requested}")
-                await ensure_commit(current.path)
-                await _checkout_pinned(current.path, requested, git_log)
-                actual = await _run_git("rev-parse", "HEAD", cwd=current.path, timeout=30)
-                if actual.casefold() != requested.casefold():
-                    raise GitCommandError(f"checked out {actual}, expected {requested}")
+                worktree_backup = await _stash_worktree_changes(current.path, git_log, "worktree")
+                rollback_state = {
+                    "_cloned": False,
+                    "_previous_commit": previous_commit,
+                    "_previous_ref": previous_ref,
+                    "_worktree_backup": worktree_backup,
+                }
+                backup_refs = [worktree_backup] if worktree_backup else []
+                try:
+                    unpushed = await _refresh_remote_refs(current.path, source, git_log)
+                    await git_log(f"fetching commit {requested}")
+                    await ensure_commit(current.path)
+                    if unpushed.strip():
+                        backup_refs.append(await _backup_unpushed_head(current.path, git_log))
+                    await _checkout_pinned(current.path, requested, git_log)
+                    actual = await _run_git("rev-parse", "HEAD", cwd=current.path, timeout=30)
+                    if actual.casefold() != requested.casefold():
+                        raise GitCommandError(f"checked out {actual}, expected {requested}")
+                except GitCommandError as exc:
+                    rollback_detail = await _rollback_git_state(rollback_state, current.path, git_log)
+                    detail = exc.detail
+                    if rollback_detail:
+                        detail = f"{detail}; rollback failed: {rollback_detail}"
+                    raise GitCommandError(detail) from exc
                 return {
                     "task_id": str(item.get("task_id") or ""),
                     "name": name,
@@ -663,19 +804,15 @@ class GitAdapter:
                     "state": "success",
                     "error_code": None,
                     "error_params": {},
-                    "_previous_commit": current.commit,
+                    "backup_ref": backup_refs[0] if backup_refs else None,
+                    "backup_refs": backup_refs,
+                    "_worktree_backup": worktree_backup,
+                    "_previous_commit": previous_commit,
                     "_previous_ref": previous_ref,
                     "_cloned": False,
                 }, current.path
 
-            _owner, repo = parse_public_repository(source)
-            root = _custom_node_roots()[0]
             root.mkdir(parents=True, exist_ok=True)
-            target = ensure_within(root, root / repo)
-            if target.exists():
-                if target.is_dir() and await _inspect_repository(target) is None:
-                    return _failure(item, "dependencies.non_git_install"), None
-                return _failure(item, "dependencies.target_exists", {"path": target.name}), None
             await git_log(f"cloning {source}")
             created = False
             try:

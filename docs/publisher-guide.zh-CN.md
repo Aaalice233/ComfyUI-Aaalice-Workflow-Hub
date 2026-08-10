@@ -19,6 +19,6 @@
 
 插件依赖扫描当前 `custom_nodes` 下的 Git 工作副本，ComfyUI-Manager 和 ComfyUI-Aaalice-Workflow-Hub 作为宿主基础插件自动忽略；作者仍需取消勾选与工作流无关的项。列表中的名称都是插件仓库，不会把节点类型冒充插件。
 
-Git 依赖记录 GitHub 仓库地址和完整 40 位 commit。历史清单中的 Registry 依赖仍记录 Registry ID 和版本，用户补全时交给兼容的 ComfyUI-Manager 队列及其 post-install 处理；Git 依赖则先检查网络环境，再并行 clone、fetch 和 checkout，并在同一安装详情中执行和记录 Python `requirements.txt`。两种安装方式都在同一个依赖面板和活动详情面板中显示进度、插件状态、原始日志和错误结果，历史记录会持久化保存。
+Git 依赖记录 GitHub 仓库地址和完整 40 位 commit。历史清单中的 Registry 依赖仍记录 Registry ID 和版本，用户补全时交给兼容的 ComfyUI-Manager 队列及其 post-install 处理；Git 依赖先检查网络环境，再按插件串行完成 clone/fetch/checkout 和 Python `requirements.txt`。执行前会保存 tracked/untracked 未提交改动并刷新远端分支，真正只存在于本地的 commit 也会保存到备份分支；Python 依赖安装生成的仓库改动会另行备份，完成后工作副本干净且仍位于正常远端跟踪分支。两种安装方式都在同一个依赖面板和活动详情面板中显示进度、插件状态、原始日志和错误结果，历史记录会持久化保存。
 
 包和目录细节见[协议](protocol.md)，安全限制见[安全边界](security.md)。
