@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import tempfile
 import zipfile
@@ -199,6 +201,33 @@ def _input_relative_path(source: str) -> PurePosixPath:
     return path
 
 
+def _install_new_file(temp_name: str, target: Path) -> bool:
+    try:
+        os.link(temp_name, target)
+        return True
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        unsupported = exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP} or getattr(exc, "winerror", None) in {1, 50}
+        if not unsupported:
+            raise
+
+    # exFAT、网络盘和部分虚拟盘不支持硬链接，仍需保持不覆盖已有文件的约束。
+    try:
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(descriptor, "wb") as destination, open(temp_name, "rb") as source:
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return True
+
+
 def install_workflow(
     package_path: Path,
     workflows_root: Path,
@@ -250,16 +279,14 @@ def install_workflow(
                         stream.write(content_bytes)
                         stream.flush()
                         os.fsync(stream.fileno())
-                    try:
-                        os.link(temp_name, image_target)
+                    if _install_new_file(temp_name, image_target):
                         created.append(image_target)
-                    except FileExistsError:
-                        if (
-                            not image_target.is_file()
-                            or hashlib.sha256(image_target.read_bytes()).hexdigest()
-                            != hashlib.sha256(content_bytes).hexdigest()
-                        ):
-                            raise UserFacingError("subscription.input_file_conflict", {"path": relative})
+                    elif (
+                        not image_target.is_file()
+                        or hashlib.sha256(image_target.read_bytes()).hexdigest()
+                        != hashlib.sha256(content_bytes).hexdigest()
+                    ):
+                        raise UserFacingError("subscription.input_file_conflict", {"path": relative})
                 finally:
                     if os.path.exists(temp_name):
                         os.unlink(temp_name)
@@ -282,9 +309,7 @@ def install_workflow(
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        try:
-            os.link(temp_name, target)
-        except FileExistsError:
+        if not _install_new_file(temp_name, target):
             if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
                 raise UserFacingError("subscription.workflow_file_conflict", {"path": target.name})
     except BaseException:

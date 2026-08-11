@@ -5,6 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from workflow_hub.errors import UserFacingError
 from workflow_hub.packages import build_package, inspect_package, install_workflow
@@ -22,6 +23,54 @@ class PackageTests(unittest.TestCase):
             target.write_text('{"changed":true}', encoding="utf-8")
             with self.assertRaises(UserFacingError):
                 install_workflow(package, root / "workflows", "Demo", "1.0", result["sha256"])
+
+    def test_install_falls_back_when_windows_hard_links_are_unsupported(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            image = root / "source.png"
+            image.write_bytes(b"image")
+            digest = hashlib.sha256(image.read_bytes()).hexdigest()
+            archive_name = f"inputs/{digest[:12]}-source.png"
+            package = root / "package.zip"
+            result = build_package(
+                package,
+                {"inputs": [{"source": "source.png", "archive": archive_name, "sha256": digest, "size": image.stat().st_size}]},
+                {"nodes": [{"id": 1, "type": "LoadImage", "widgets_values": ["source.png"]}]},
+                "change",
+                input_assets=[{"path": image, "archive": archive_name}],
+            )
+            hard_link_error = OSError("Incorrect function")
+            hard_link_error.winerror = 1
+            with patch("workflow_hub.packages.os.link", side_effect=hard_link_error):
+                target, _ = install_workflow(
+                    package,
+                    root / "workflows",
+                    "Demo",
+                    "1.0",
+                    result["sha256"],
+                    root / "input",
+                )
+            self.assertTrue(target.is_file())
+            self.assertEqual((root / "input" / "source.png").read_bytes(), b"image")
+
+    def test_install_fallback_does_not_overwrite_a_competing_file(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            package = root / "package.zip"
+            result = build_package(package, {}, {"nodes": []}, "change")
+            hard_link_error = OSError("Incorrect function")
+            hard_link_error.winerror = 1
+
+            def create_competing_file(_source, target):
+                Path(target).write_text("competing-content", encoding="utf-8")
+                raise hard_link_error
+
+            with patch("workflow_hub.packages.os.link", side_effect=create_competing_file):
+                with self.assertRaises(UserFacingError) as caught:
+                    install_workflow(package, root / "workflows", "Demo", "1.0", result["sha256"])
+            target = root / "workflows" / "Demo-v1.0.json"
+            self.assertEqual(caught.exception.code, "subscription.workflow_file_conflict")
+            self.assertEqual(target.read_text(encoding="utf-8"), "competing-content")
 
     def test_install_preserves_filename_separator_from_manifest(self):
         with TemporaryDirectory() as folder:
