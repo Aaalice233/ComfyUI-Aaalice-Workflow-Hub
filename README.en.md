@@ -26,7 +26,7 @@ A public workflow subscription, publishing, and version-management extension for
 - Git plugin worktrees under `custom_nodes` are scanned and locked to GitHub URLs and full commits, with unrelated plugins deselectable. Bundled images are packaged automatically. LoRA references only trigger a warning and are never bundled or downloaded.
 - Optional cover image (up to 10 MiB), used as both the workflow cover and the version preview.
 - The Manage tab supports editing metadata, archiving, editing changelogs, and deleting versions or entire workflows. Changelogs can be imported directly from a local Markdown file. Every operation shows staged progress, logs, and results in the Activity panel, and history can be cleaned up.
-- Sign in through GitHub Device Flow; credentials prefer the system keyring.
+- Sign in through GitHub Device Flow; credentials prefer the system keyring and access tokens refresh automatically before expiry.
 
 ### 🌐 General
 

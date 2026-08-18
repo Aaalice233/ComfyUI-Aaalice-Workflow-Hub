@@ -9,13 +9,13 @@
 
 ## 决策
 
-使用公开可安装的 GitHub App 和 Device Flow。插件只包含公开 Client ID，环境变量可以覆盖。Token 优先存入系统 keyring，keyring 不可用时仅保留在当前进程。
+使用公开可安装的 GitHub App 和 Device Flow。插件只包含公开 Client ID，环境变量可以覆盖。Token 优先存入系统 keyring，keyring 不可用时仅保留在当前进程。GitHub App 的 user access token 临近过期时，使用同一凭据中的单次 refresh token 自动换取并原子保存新的 token 对；同一用户的刷新串行执行，避免并发请求重复消费 refresh token。只有 refresh token 已过期、授权被撤销或用户主动退出时才要求重新登录。
 
 GitHub App 权限为 Metadata 只读、Contents 读写、Administration 读写；不启用 webhook。发布采用 Draft Release → 上传 assets → 发布 Release → Git Data 原子提交仓库存档的事务。分支并发冲突合并重试一次，Release 成功而仓库存档失败时记录待同步状态。
 
 ## 结果
 
 - 本地客户端无需保存 GitHub App 私钥或 Client Secret。
-- 用户能在 GitHub 页面查看授权范围并撤销。
+- 用户能在 GitHub 页面查看授权范围并撤销；正常使用期间 access token 自动续期，不需要每 8 小时重新授权。
 - 新仓库仍需被加入 GitHub App installation。
 - 发布依赖 GitHub 服务和安装授权；离线时只能编辑本地资料，不能模拟发布成功。

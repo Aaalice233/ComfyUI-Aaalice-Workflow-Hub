@@ -58,6 +58,7 @@ class StorageStub:
 class GuardedGitHubCallTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         tokens._session_tokens.clear()
+        tokens._deleted.clear()
 
     async def test_401_clears_stored_credential(self) -> None:
         tokens._session_tokens[StorageStub.key] = '{"access_token": "dead"}'
@@ -66,9 +67,20 @@ class GuardedGitHubCallTests(unittest.IsolatedAsyncioTestCase):
             raise GitHubError("Bad credentials", 401)
 
         with self.assertRaisesRegex(GitHubError, "重新登录") as caught:
-            await _guarded_github_call(StorageStub(), fail())
+            await _guarded_github_call(StorageStub(), "dead", fail())
         self.assertEqual(caught.exception.status, 401)
         self.assertIsNone(await tokens.get(StorageStub.key))
+
+    async def test_stale_401_does_not_clear_rotated_credential(self) -> None:
+        tokens._session_tokens[StorageStub.key] = '{"access_token": "new"}'
+
+        async def fail():
+            raise GitHubError("Bad credentials", 401)
+
+        with self.assertRaises(UserFacingError) as caught:
+            await _guarded_github_call(StorageStub(), "old", fail())
+        self.assertEqual(caught.exception.code, "github.credential_rotated")
+        self.assertEqual(await tokens.get(StorageStub.key), "new")
 
     async def test_other_errors_keep_credential(self) -> None:
         tokens._session_tokens[StorageStub.key] = '{"access_token": "live"}'
@@ -77,14 +89,14 @@ class GuardedGitHubCallTests(unittest.IsolatedAsyncioTestCase):
             raise GitHubError("boom", 500)
 
         with self.assertRaises(GitHubError):
-            await _guarded_github_call(StorageStub(), fail())
+            await _guarded_github_call(StorageStub(), "live", fail())
         self.assertEqual(await tokens.get(StorageStub.key), "live")
 
     async def test_result_passes_through(self) -> None:
         async def ok():
             return {"items": []}
 
-        self.assertEqual(await _guarded_github_call(StorageStub(), ok()), {"items": []})
+        self.assertEqual(await _guarded_github_call(StorageStub(), "live", ok()), {"items": []})
 
 
 class OperationRunTests(unittest.IsolatedAsyncioTestCase):

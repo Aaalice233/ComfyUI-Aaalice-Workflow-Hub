@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import unittest
 import unittest.mock
@@ -143,6 +144,20 @@ class WriteOnlyKeyring:
         raise RuntimeError("credential backend temporarily unavailable")
 
 
+class DeleteFailKeyring:
+    def __init__(self):
+        self.value = None
+
+    def set_password(self, _service, _user, value):
+        self.value = value
+
+    def get_password(self, _service, _user):
+        return self.value
+
+    def delete_password(self, *_args):
+        raise RuntimeError("credential delete temporarily unavailable")
+
+
 class GitHubTests(unittest.IsolatedAsyncioTestCase):
     async def test_refresh_access_token_stamps_created_at(self):
         with unittest.mock.patch.object(github.aiohttp, "ClientSession", TokenRefreshSession):
@@ -227,6 +242,188 @@ class GitHubTests(unittest.IsolatedAsyncioTestCase):
         await store.set("user", {"access_token": "secret"})
 
         self.assertEqual(await store.get("user"), "secret")
+
+    async def test_expiring_access_token_is_refreshed_and_user_is_preserved(self):
+        store = TokenStore()
+        store._keyring = None
+        await store.set(
+            "user",
+            {
+                "access_token": "old-token",
+                "refresh_token": "old-refresh",
+                "created_at": 1_000,
+                "expires_in": 28_800,
+                "user": {"login": "alice", "avatar_url": "avatar"},
+            },
+        )
+
+        with (
+            unittest.mock.patch.object(github.time, "time", return_value=29_600),
+            unittest.mock.patch.object(
+                github,
+                "refresh_access_token",
+                unittest.mock.AsyncMock(
+                    return_value={
+                        "access_token": "new-token",
+                        "refresh_token": "new-refresh",
+                        "created_at": 29_600,
+                        "expires_in": 28_800,
+                    }
+                ),
+            ) as refresh,
+        ):
+            record = await store.get_valid_record("user")
+            self.assertEqual(record["access_token"], "new-token")
+
+        refresh.assert_awaited_once_with("old-refresh")
+        record = await store.get_record("user")
+        self.assertEqual(record["refresh_token"], "new-refresh")
+        self.assertEqual(record["user"]["login"], "alice")
+
+    async def test_concurrent_forced_refresh_rotates_token_once(self):
+        store = TokenStore()
+        store._keyring = None
+        await store.set(
+            "user",
+            {
+                "access_token": "old-token",
+                "refresh_token": "old-refresh",
+                "created_at": 1_000,
+                "expires_in": 28_800,
+            },
+        )
+
+        async def refreshed(_refresh_token):
+            await asyncio.sleep(0)
+            return {
+                "access_token": "new-token",
+                "refresh_token": "new-refresh",
+                "created_at": 29_600,
+                "expires_in": 28_800,
+            }
+
+        with (
+            unittest.mock.patch.object(github.time, "time", return_value=29_600),
+            unittest.mock.patch.object(
+                github,
+                "refresh_access_token",
+                unittest.mock.AsyncMock(side_effect=refreshed),
+            ) as refresh,
+        ):
+            results = await asyncio.gather(
+                store.get_valid_record("user", force_refresh=True),
+                store.get_valid_record("user", force_refresh=True),
+            )
+
+        self.assertEqual([item["access_token"] for item in results], ["new-token", "new-token"])
+        refresh.assert_awaited_once_with("old-refresh")
+
+    async def test_valid_access_token_is_not_refreshed_early(self):
+        store = TokenStore()
+        store._keyring = None
+        await store.set(
+            "user",
+            {
+                "access_token": "current-token",
+                "refresh_token": "current-refresh",
+                "created_at": 1_000,
+                "expires_in": 28_800,
+            },
+        )
+
+        with (
+            unittest.mock.patch.object(github.time, "time", return_value=2_000),
+            unittest.mock.patch.object(
+                github,
+                "refresh_access_token",
+                unittest.mock.AsyncMock(),
+            ) as refresh,
+        ):
+            record = await store.get_valid_record("user")
+            self.assertEqual(record["access_token"], "current-token")
+
+        refresh.assert_not_awaited()
+
+    async def test_rejected_refresh_clears_expired_credential(self):
+        store = TokenStore()
+        store._keyring = None
+        await store.set(
+            "user",
+            {
+                "access_token": "expired-token",
+                "refresh_token": "expired-refresh",
+                "created_at": 1_000,
+                "expires_in": 28_800,
+            },
+        )
+
+        with (
+            unittest.mock.patch.object(github.time, "time", return_value=30_000),
+            unittest.mock.patch.object(
+                github,
+                "refresh_access_token",
+                unittest.mock.AsyncMock(
+                    side_effect=GitHubError(
+                        "Bad refresh token",
+                        200,
+                        {"error": "bad_refresh_token"},
+                    )
+                ),
+            ),
+        ):
+            self.assertIsNone(await store.get_valid_record("user"))
+
+        self.assertIsNone(await store.get_record("user"))
+
+    async def test_logout_waits_for_refresh_and_remains_logged_out(self):
+        store = TokenStore()
+        store._keyring = None
+        await store.set(
+            "user",
+            {
+                "access_token": "old-token",
+                "refresh_token": "old-refresh",
+                "created_at": 1_000,
+                "expires_in": 28_800,
+            },
+        )
+        refresh_started = asyncio.Event()
+        finish_refresh = asyncio.Event()
+
+        async def refreshed(_refresh_token):
+            refresh_started.set()
+            await finish_refresh.wait()
+            return {
+                "access_token": "new-token",
+                "refresh_token": "new-refresh",
+                "created_at": 29_600,
+                "expires_in": 28_800,
+            }
+
+        with (
+            unittest.mock.patch.object(github.time, "time", return_value=29_600),
+            unittest.mock.patch.object(github, "refresh_access_token", side_effect=refreshed),
+        ):
+            refresh_task = asyncio.create_task(store.get_valid_record("user"))
+            await refresh_started.wait()
+            logout_task = asyncio.create_task(store.delete("user"))
+            finish_refresh.set()
+            await asyncio.gather(refresh_task, logout_task)
+
+        self.assertIsNone(await store.get_record("user"))
+
+    async def test_failed_keyring_delete_overwrites_persisted_credential(self):
+        keyring = DeleteFailKeyring()
+        store = TokenStore()
+        store._keyring = keyring
+        await store.set("user", {"access_token": "secret"})
+
+        await store.delete("user")
+
+        self.assertIsNone(await store.get("user"))
+        restored = TokenStore()
+        restored._keyring = keyring
+        self.assertIsNone(await restored.get("user"))
 
     async def test_commits_multiple_repository_files_with_one_ref_update(self):
         client = GitDataClient()

@@ -17,7 +17,7 @@ from .assets import scan_workflow_assets
 from .catalog import Catalog, WorkflowProduct, normalize_version, prepare_publish_product
 from .compatibility import current_comfyui_version, stamp_product_comfyui_version
 from .errors import UserFacingError
-from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, refresh_access_token, start_device_flow, tokens
+from .github import CLIENT_ID, GitHubClient, GitHubError, poll_device_flow, start_device_flow, tokens
 from .legacy_manager import ManagerAdapter, local_manager_status
 from .dependency_policy import is_ignored_dependency
 from .manager import GitAdapter, local_git_status
@@ -174,10 +174,10 @@ def _catalog_version(catalog: Catalog, workflow_id: Any, version: Any) -> tuple[
 
 
 async def _github_token(storage: UserStorage) -> str:
-    token = await tokens.get(storage.key)
-    if not token:
+    credential = await tokens.get_valid_record(storage.key)
+    if not credential or not credential.get("access_token"):
         raise UserFacingError("github.authentication_required")
-    return token
+    return str(credential["access_token"])
 
 
 def _manager_origin(request: web.Request) -> str:
@@ -310,14 +310,13 @@ def endpoint(handler: Callable[[web.Request], Awaitable[web.StreamResponse]]) ->
 T = TypeVar("T")
 
 
-async def _guarded_github_call(storage: UserStorage, action: Awaitable[T]) -> T:
+async def _guarded_github_call(storage: UserStorage, access_token: str, action: Awaitable[T]) -> T:
     try:
         return await action
     except GitHubError as exc:
         if exc.status == 401:
-            # 已存储的 token 被吊销或过期后，每次请求都只会重复 401；
-            # 凭据已不可用，直接清除并提示重新登录，避免之后每次进页面都报错。
-            await tokens.delete(storage.key)
+            if not await tokens.delete_if_matches(storage.key, access_token):
+                raise UserFacingError("github.credential_rotated") from exc
             raise GitHubError("GitHub 登录已失效，请重新登录", 401) from exc
         raise
 
@@ -362,7 +361,7 @@ async def _start_publisher_management_operation(
     operation = await operations.create("publisher-manage", storage, metadata)
 
     async def run() -> dict[str, Any]:
-        return await _guarded_github_call(storage, action(token, operation))
+        return await _guarded_github_call(storage, token, action(token, operation))
 
     asyncio.create_task(_run(operation, run()))
     return web.json_response({"operation_id": operation.id}, status=202)
@@ -1498,7 +1497,7 @@ def register_routes() -> None:
     async def github_repositories(request: web.Request) -> web.StreamResponse:
         storage = UserStorage.from_request(request)
         token = await _github_token(storage)
-        return web.json_response({"items": await _guarded_github_call(storage, GitHubClient(token).list_repositories())})
+        return web.json_response({"items": await _guarded_github_call(storage, token, GitHubClient(token).list_repositories())})
 
     @routes.get(f"{BASE}/publisher/catalog/{{owner}}/{{repo}}")
     @endpoint
@@ -1507,7 +1506,7 @@ def register_routes() -> None:
         token = await _github_token(storage)
         owner = request.match_info["owner"]
         repo = request.match_info["repo"]
-        remote = await _guarded_github_call(storage, GitHubClient(token).get_catalog(owner, repo))
+        remote = await _guarded_github_call(storage, token, GitHubClient(token).get_catalog(owner, repo))
         if remote is None:
             return web.json_response({"categories": [], "workflows": []})
         catalog = Catalog.model_validate_json(remote.content)
@@ -1575,15 +1574,9 @@ def register_routes() -> None:
         credential = await tokens.get_record(storage.key)
         if not credential or not credential.get("refresh_token"):
             raise UserFacingError("github.credential_unavailable")
-        try:
-            refreshed = await refresh_access_token(str(credential["refresh_token"]))
-        except GitHubError as exc:
-            if exc.status >= 500:
-                raise
-            # 刷新被拒（含 GitHub 以 200 返回 error 字段的情况）说明凭据已不可用。
-            await tokens.delete(storage.key)
-            raise GitHubError("GitHub 登录已失效，请重新登录", 401) from exc
-        await tokens.set(storage.key, refreshed)
+        refreshed = await tokens.get_valid_record(storage.key, force_refresh=True)
+        if not refreshed:
+            raise UserFacingError("github.authentication_required")
         return web.json_response({"authenticated": True})
 
     @routes.post(f"{BASE}/github/logout")
@@ -1602,6 +1595,7 @@ def register_routes() -> None:
         return web.json_response(
             await _guarded_github_call(
                 storage,
+                token,
                 GitHubClient(token).create_repository(str(data.get("name", "")), str(data.get("description", ""))),
             ),
             status=201,
@@ -1659,6 +1653,7 @@ def register_routes() -> None:
                 operation,
                 _guarded_github_call(
                     storage,
+                    token,
                     resume_publication(
                         storage,
                         token,
@@ -1687,6 +1682,7 @@ def register_routes() -> None:
                 operation,
                 _guarded_github_call(
                     storage,
+                    token,
                     publish(
                         storage,
                         token,
@@ -1737,6 +1733,7 @@ def register_routes() -> None:
         token = await _github_token(storage)
         items = await _guarded_github_call(
             storage,
+            token,
             list_managed_products(token, request.match_info["owner"], request.match_info["repo"]),
         )
         return web.json_response({"items": items})

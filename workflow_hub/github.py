@@ -19,6 +19,7 @@ DEVICE_URL = "https://github.com/login/device/code"
 TOKEN_URL = "https://github.com/login/oauth/access_token"
 CLIENT_ID = os.getenv("WORKFLOW_HUB_GITHUB_CLIENT_ID", "Iv23likAV8HgkxJ6f6Rz")
 KEYRING_SERVICE = "ComfyUI-Aaalice-Workflow-Hub"
+TOKEN_REFRESH_LEEWAY_SECONDS = 300
 
 
 class GitHubError(RuntimeError):
@@ -40,25 +41,34 @@ def _is_rate_limit_error(error: GitHubError) -> bool:
 class TokenStore:
     def __init__(self) -> None:
         self._session_tokens: dict[str, str] = {}
+        self._deleted: set[str] = set()
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._refreshed_at: dict[str, float] = {}
         try:
             import keyring
 
             self._keyring = keyring
         except Exception:
             self._keyring = None
+        self._persistence_available = self._keyring is not None
 
     @property
     def persistent(self) -> bool:
-        return self._keyring is not None
+        return self._persistence_available
 
-    async def get_record(self, user_key: str) -> dict[str, Any] | None:
-        raw: str | None = None
-        if self._keyring:
+    def _lock(self, user_key: str) -> asyncio.Lock:
+        return self._locks.setdefault(user_key, asyncio.Lock())
+
+    async def _get_record_unlocked(self, user_key: str) -> dict[str, Any] | None:
+        if user_key in self._deleted:
+            return None
+        raw = self._session_tokens.get(user_key)
+        if raw is None and self._keyring:
             try:
                 raw = await asyncio.to_thread(self._keyring.get_password, KEYRING_SERVICE, user_key)
+                self._persistence_available = True
             except Exception:
-                self._keyring = None
-        raw = raw or self._session_tokens.get(user_key)
+                self._persistence_available = False
         if not raw:
             return None
         try:
@@ -67,30 +77,109 @@ class TokenStore:
         except json.JSONDecodeError:
             return {"access_token": raw}
 
+    async def get_record(self, user_key: str) -> dict[str, Any] | None:
+        async with self._lock(user_key):
+            return await self._get_record_unlocked(user_key)
+
+    @staticmethod
+    def _refresh_due(record: dict[str, Any], now: float) -> bool:
+        if not record.get("refresh_token"):
+            return False
+        try:
+            created_at = float(record["created_at"])
+            expires_in = float(record["expires_in"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        leeway = min(TOKEN_REFRESH_LEEWAY_SECONDS, max(1.0, expires_in / 10))
+        return now >= created_at + expires_in - leeway
+
+    @staticmethod
+    def _expired(record: dict[str, Any], now: float) -> bool:
+        try:
+            return now >= float(record["created_at"]) + float(record["expires_in"])
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    async def get_valid_record(self, user_key: str, *, force_refresh: bool = False) -> dict[str, Any] | None:
+        request_started = time.monotonic()
+        record = await self.get_record(user_key)
+        if not record or (not force_refresh and not self._refresh_due(record, time.time())):
+            return record
+        refresh_token = record.get("refresh_token")
+
+        async with self._lock(user_key):
+            record = await self._get_record_unlocked(user_key)
+            now = time.time()
+            if not record or record.get("refresh_token") != refresh_token:
+                return record
+            if force_refresh and self._refreshed_at.get(user_key, 0) >= request_started:
+                return record
+            if not force_refresh and not self._refresh_due(record, now):
+                return record
+            try:
+                refreshed = await refresh_access_token(str(record["refresh_token"]))
+            except GitHubError as exc:
+                if isinstance(exc.data, dict) and exc.data.get("error") == "bad_refresh_token":
+                    await self._delete_unlocked(user_key)
+                    return None
+                if not force_refresh and not self._expired(record, now):
+                    return record
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                if not force_refresh and not self._expired(record, now):
+                    return record
+                raise
+            merged = {**record, **refreshed}
+            await self._set_unlocked(user_key, merged)
+            self._refreshed_at[user_key] = time.monotonic()
+            return merged
+
     async def get(self, user_key: str) -> str | None:
         record = await self.get_record(user_key)
         return str(record["access_token"]) if record and record.get("access_token") else None
 
-    async def set(self, user_key: str, credential: str | dict[str, Any]) -> None:
+    async def _set_unlocked(self, user_key: str, credential: str | dict[str, Any]) -> None:
         value = {"access_token": credential} if isinstance(credential, str) else dict(credential)
         raw = json.dumps(value)
-        # Keep the active session usable even if the platform keyring becomes
-        # temporarily unavailable after a successful write.
+        self._deleted.discard(user_key)
         self._session_tokens[user_key] = raw
         if self._keyring:
             try:
                 await asyncio.to_thread(self._keyring.set_password, KEYRING_SERVICE, user_key, raw)
-                return
+                self._persistence_available = True
             except Exception:
-                self._keyring = None
+                self._persistence_available = False
 
-    async def delete(self, user_key: str) -> None:
+    async def set(self, user_key: str, credential: str | dict[str, Any]) -> None:
+        async with self._lock(user_key):
+            await self._set_unlocked(user_key, credential)
+
+    async def _delete_unlocked(self, user_key: str) -> None:
         self._session_tokens.pop(user_key, None)
+        self._refreshed_at.pop(user_key, None)
+        self._deleted.add(user_key)
         if self._keyring:
             try:
                 await asyncio.to_thread(self._keyring.delete_password, KEYRING_SERVICE, user_key)
+                self._persistence_available = True
             except Exception:
-                pass
+                try:
+                    await asyncio.to_thread(self._keyring.set_password, KEYRING_SERVICE, user_key, "{}")
+                    self._persistence_available = True
+                except Exception:
+                    self._persistence_available = False
+
+    async def delete(self, user_key: str) -> None:
+        async with self._lock(user_key):
+            await self._delete_unlocked(user_key)
+
+    async def delete_if_matches(self, user_key: str, access_token: str) -> bool:
+        async with self._lock(user_key):
+            record = await self._get_record_unlocked(user_key)
+            if not record or record.get("access_token") != access_token:
+                return False
+            await self._delete_unlocked(user_key)
+            return True
 
 
 tokens = TokenStore()

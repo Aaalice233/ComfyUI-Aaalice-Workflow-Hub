@@ -346,6 +346,7 @@ const backendErrorMessages: Record<string, MessageKey> = {
   "github.authentication_required": "githubAuthenticationRequired",
   "github.login_expired": "githubLoginExpired",
   "github.credential_unavailable": "githubCredentialUnavailable",
+  "github.credential_rotated": "githubCredentialRotated",
   "subscription.invalid_source": "subscriptionInvalidSource",
   "subscription.not_found": "subscriptionNotFound",
   "subscription.workflow_not_found": "subscriptionWorkflowNotFound",

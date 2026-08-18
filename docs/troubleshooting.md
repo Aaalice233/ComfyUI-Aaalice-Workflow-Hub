@@ -18,7 +18,7 @@ ComfyUI 以 `--multi-user` 多用户模式运行时，请求必须携带当前�
 
 ## 提示“GitHub 登录已失效，请重新登录”
 
-已存储的 token 过期或被撤销（例如在 GitHub 设置中取消了授权）。插件在 GitHub 返回 401 时会自动清除失效凭据并按未登录处理，重新登录即可。订阅清单读取会在登录后使用该凭据提高配额，凭据失效时自动回退匿名/raw 路径，功能不受登录态影响。
+插件会在 GitHub App 的 8 小时 access token 临近过期时自动刷新并保存新的凭据，正常使用不需要反复登录。只有 6 个月 refresh token 已过期、用户在 GitHub 撤销了授权、系统 keyring 中的凭据被清除，或 GitHub 明确拒绝凭据时才会重新显示登录页。重新登录一次即可；若每次重启 ComfyUI 都丢失登录，请确认 `keyring` 依赖可用且系统凭据管理器允许保存 `ComfyUI-Aaalice-Workflow-Hub` 凭据。订阅清单在未登录时仍会回退匿名/raw 路径。
 
 ## 通过 HTTP 代理访问 GitHub
 
