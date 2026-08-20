@@ -30,7 +30,7 @@
 
 ### 🌐 通用
 
-- 中英文界面自动跟随 ComfyUI 语言设置。
+- 简体中文、繁体中文与英文界面自动跟随 ComfyUI 语言设置。
 - 自动适配秋叶（绘世）启动器的 Git/PyPI 国内镜像，识别 comfyui-xiao 自带的 PortableGit，并继承 Windows 系统代理。
 - 状态与缓存按 ComfyUI 用户隔离。
 

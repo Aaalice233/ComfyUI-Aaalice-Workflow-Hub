@@ -1,21 +1,49 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { locale, resolveLocale, t } from "./i18n";
+import { locale, messages, resolveLocale, setLocale, t, type MessageKey } from "./i18n";
 
 describe("translations", () => {
-  it("contains the canonical name in both languages", () => {
+  it("contains the canonical name in all three languages", () => {
     locale.value = "zh";
     expect(t.value("title")).toBe("工作流中心");
+    locale.value = "zh-TW";
+    expect(t.value("title")).toBe("工作流程中心");
     locale.value = "en";
     expect(t.value("title")).toBe("Workflow Hub");
   });
 
-  it("maps ComfyUI Chinese locales to Chinese and all other locales to English", () => {
+  it("maps ComfyUI and browser locale variants to the supported locales", () => {
     expect(resolveLocale("zh")).toBe("zh");
-    expect(resolveLocale("zh-TW")).toBe("zh");
+    expect(resolveLocale("zh-CN")).toBe("zh");
+    expect(resolveLocale("zh-Hans")).toBe("zh");
+    expect(resolveLocale("zh_TW")).toBe("zh-TW");
+    expect(resolveLocale("zh-Hant")).toBe("zh-TW");
+    expect(resolveLocale("zh-HK")).toBe("zh-TW");
+    expect(resolveLocale("ZH_mo")).toBe("zh-TW");
     expect(resolveLocale("en")).toBe("en");
     expect(resolveLocale("ja")).toBe("en");
+  });
+
+  it("sets the matching HTML language", () => {
+    setLocale("zh-Hans");
+    expect(document.documentElement.lang).toBe("zh-CN");
+    setLocale("zh-Hant");
+    expect(document.documentElement.lang).toBe("zh-TW");
+    setLocale("en-US");
+    expect(document.documentElement.lang).toBe("en");
+  });
+
+  it("keeps every dictionary complete with matching placeholders", () => {
+    const keys = Object.keys(messages.zh) as MessageKey[];
+    const placeholders = (message: string) => [...message.matchAll(/\{(\w+)\}/g)].map((match) => match[1]).sort();
+
+    expect(Object.keys(messages["zh-TW"]).sort()).toEqual([...keys].sort());
+    expect(Object.keys(messages.en).sort()).toEqual([...keys].sort());
+    for (const key of keys) {
+      expect(placeholders(messages["zh-TW"][key]), key).toEqual(placeholders(messages.zh[key]));
+      expect(placeholders(messages.en[key]), key).toEqual(placeholders(messages.zh[key]));
+    }
   });
 
   it("interpolates dynamic values through the dictionary", () => {
@@ -31,6 +59,18 @@ describe("translations", () => {
     expect(t.value("clearCompletedActivities", { count: 2 })).toBe("清除已完成（2）");
     expect(t.value("activityTime", { time: "2026/01/01 12:00:00" })).toBe("时间：2026/01/01 12:00:00");
     expect(t.value("publishCompleteDescription", { name: "Demo", version: "1.2.0" })).toBe("Demo v1.2.0 已成功发布，并已写入工作流目录。");
+    locale.value = "zh-TW";
+    expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("目標資料夾 custom_nodes/example 已存在，未覆寫本機檔案。");
+    expect(t.value("dependenciesNonGitInstall")).toBe("偵測到同名非 Git 安裝，需要手動移除。");
+    expect(t.value("nonGitInstall")).toBe("非 Git 安裝");
+    expect(t.value("pluginStatusMissing", { count: 2 })).toBe("缺少 2 個");
+    expect(t.value("includedImagesDetail", { count: 1 })).toBe("包含 1 張隨附圖片，安裝時會寫入 ComfyUI 的 input 資料夾，工作流程參照保持不變。");
+    expect(t.value("downloadComplete", { name: "Demo", version: "1.2.0" })).toBe("工作流程 Demo v1.2.0 已下載完成。");
+    expect(t.value("workflowLoadFailed", { detail: "檔案不存在" })).toBe("工作流程載入失敗：檔案不存在");
+    expect(t.value("workflowLoadMissingFromStorage", { path: "workflows/Demo.json" })).toBe("ComfyUI 未在工作流程資料夾中找到 workflows/Demo.json，請重新下載後重試。");
+    expect(t.value("clearCompletedActivities", { count: 2 })).toBe("清除已完成（2）");
+    expect(t.value("activityTime", { time: "2026/01/01 12:00:00" })).toBe("時間：2026/01/01 12:00:00");
+    expect(t.value("publishCompleteDescription", { name: "Demo", version: "1.2.0" })).toBe("Demo v1.2.0 已成功發佈，並已寫入工作流程目錄。");
     locale.value = "en";
     expect(t.value("dependenciesTargetExists", { path: "custom_nodes/example" })).toBe("The target directory custom_nodes/example already exists; local files were not overwritten.");
     expect(t.value("dependenciesNonGitInstall")).toBe("A non-Git installation with the same name was found. Remove it manually first.");
@@ -46,25 +86,32 @@ describe("translations", () => {
     expect(t.value("publishCompleteDescription", { name: "Demo", version: "1.2.0" })).toBe("Demo v1.2.0 was published and added to the workflow catalog.");
   });
 
-  it("localizes publish and management stage progress in both languages", () => {
+  it("localizes publish and management stage progress in all three languages", () => {
     locale.value = "zh";
     expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("发布阶段 5/5 · 正在写入仓库");
     expect(t.value("operationStageProgress", { current: 2, total: 3, stage: t.value("stageDeletingRelease") })).toBe("操作阶段 2/3 · 正在删除 Release");
+    locale.value = "zh-TW";
+    expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("發佈階段 5/5 · 正在寫入儲存庫");
+    expect(t.value("operationStageProgress", { current: 2, total: 3, stage: t.value("stageDeletingRelease") })).toBe("操作階段 2/3 · 正在刪除 Release");
     locale.value = "en";
     expect(t.value("publishStageProgress", { current: 5, total: 5, stage: t.value("stageUpdatingRepository") })).toBe("Publish stage 5 of 5 · Updating repository");
     expect(t.value("operationStageProgress", { current: 2, total: 3, stage: t.value("stageDeletingRelease") })).toBe("Operation stage 2 of 3 · Deleting Release");
   });
 
-  it("interpolates core version alignment details in both languages", () => {
+  it("interpolates core version alignment details in all three languages", () => {
     locale.value = "zh";
     expect(t.value("coreVersionAlignedDetail", { current: "0.28.0", required: "ComfyUI 0.28.0" })).toBe("当前 ComfyUI 0.28.0 满足工作流要求 ComfyUI 0.28.0。");
+    locale.value = "zh-TW";
+    expect(t.value("coreVersionAlignedDetail", { current: "0.28.0", required: "ComfyUI 0.28.0" })).toBe("目前 ComfyUI 0.28.0 滿足工作流程需求 ComfyUI 0.28.0。");
     locale.value = "en";
     expect(t.value("coreVersionAlignedDetail", { current: "0.28.0", required: "ComfyUI 0.28.0" })).toBe("ComfyUI 0.28.0 satisfies the workflow requirement ComfyUI 0.28.0.");
   });
 
-  it("interpolates download preflight copy in both languages", () => {
+  it("interpolates download preflight copy in all three languages", () => {
     locale.value = "zh";
     expect(t.value("downloadCheckDescription", { name: "Demo", version: "1.2.0" })).toBe("下载 Demo v1.2.0 前，先检查 ComfyUI 内核和插件依赖，避免下载后无法运行。");
+    locale.value = "zh-TW";
+    expect(t.value("downloadCheckDescription", { name: "Demo", version: "1.2.0" })).toBe("下載 Demo v1.2.0 前，先檢查 ComfyUI 核心和外掛相依性，避免下載後無法執行。");
     locale.value = "en";
     expect(t.value("downloadCheckDescription", { name: "Demo", version: "1.2.0" })).toBe("Before downloading Demo v1.2.0, we will check the ComfyUI core and plugin dependencies to avoid an unusable workflow.");
   });
