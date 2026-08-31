@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-31T02:57:13Z",
+  "title": "Design System: ComfyUI-Aaalice-Workflow-Hub",
+  "extensions": {
+    "colorMeta": {
+      "canvas-black": { "role": "neutral", "displayName": "画布黑", "canonical": "#0c0d0f", "tonalRamp": ["oklch(15% 0.006 250)", "oklch(25% 0.006 250)", "oklch(35% 0.006 250)", "oklch(47% 0.006 250)", "oklch(60% 0.006 250)", "oklch(72% 0.006 250)", "oklch(84% 0.006 250)", "oklch(95% 0.006 250)"] },
+      "surface-base": { "role": "neutral", "displayName": "基础表面", "canonical": "#17181b", "tonalRamp": ["oklch(15% 0.007 250)", "oklch(25% 0.007 250)", "oklch(35% 0.007 250)", "oklch(47% 0.007 250)", "oklch(60% 0.007 250)", "oklch(72% 0.007 250)", "oklch(84% 0.007 250)", "oklch(95% 0.007 250)"] },
+      "surface-raised": { "role": "neutral", "displayName": "抬升表面", "canonical": "#1c1e21", "tonalRamp": ["oklch(15% 0.008 250)", "oklch(25% 0.008 250)", "oklch(35% 0.008 250)", "oklch(47% 0.008 250)", "oklch(60% 0.008 250)", "oklch(72% 0.008 250)", "oklch(84% 0.008 250)", "oklch(95% 0.008 250)"] },
+      "surface-soft": { "role": "neutral", "displayName": "柔和表面", "canonical": "#222428", "tonalRamp": ["oklch(15% 0.009 250)", "oklch(25% 0.009 250)", "oklch(35% 0.009 250)", "oklch(47% 0.009 250)", "oklch(60% 0.009 250)", "oklch(72% 0.009 250)", "oklch(84% 0.009 250)", "oklch(95% 0.009 250)"] },
+      "field-recessed": { "role": "neutral", "displayName": "凹陷字段", "canonical": "#101113", "tonalRamp": ["oklch(15% 0.006 250)", "oklch(25% 0.006 250)", "oklch(35% 0.006 250)", "oklch(47% 0.006 250)", "oklch(60% 0.006 250)", "oklch(72% 0.006 250)", "oklch(84% 0.006 250)", "oklch(95% 0.006 250)"] },
+      "text-primary": { "role": "neutral", "displayName": "主文本", "canonical": "#eeefec", "tonalRamp": ["oklch(15% 0.005 110)", "oklch(25% 0.005 110)", "oklch(35% 0.005 110)", "oklch(47% 0.005 110)", "oklch(60% 0.005 110)", "oklch(72% 0.005 110)", "oklch(84% 0.005 110)", "oklch(95% 0.005 110)"] },
+      "text-secondary": { "role": "neutral", "displayName": "次级文本", "canonical": "#c7c8c4", "tonalRamp": ["oklch(15% 0.004 110)", "oklch(25% 0.004 110)", "oklch(35% 0.004 110)", "oklch(47% 0.004 110)", "oklch(60% 0.004 110)", "oklch(72% 0.004 110)", "oklch(84% 0.004 110)", "oklch(95% 0.004 110)"] },
+      "text-muted": { "role": "neutral", "displayName": "弱文本", "canonical": "#8e9196", "tonalRamp": ["oklch(15% 0.008 250)", "oklch(25% 0.008 250)", "oklch(35% 0.008 250)", "oklch(47% 0.008 250)", "oklch(60% 0.008 250)", "oklch(72% 0.008 250)", "oklch(84% 0.008 250)", "oklch(95% 0.008 250)"] },
+      "text-faint": { "role": "neutral", "displayName": "极弱文本", "canonical": "#60636a", "tonalRamp": ["oklch(15% 0.01 250)", "oklch(25% 0.01 250)", "oklch(35% 0.01 250)", "oklch(47% 0.01 250)", "oklch(60% 0.01 250)", "oklch(72% 0.01 250)", "oklch(84% 0.01 250)", "oklch(95% 0.01 250)"] },
+      "accent-text": { "role": "neutral", "displayName": "强调色前景", "canonical": "#121315", "tonalRamp": ["oklch(15% 0.006 250)", "oklch(25% 0.006 250)", "oklch(35% 0.006 250)", "oklch(47% 0.006 250)", "oklch(60% 0.006 250)", "oklch(72% 0.006 250)", "oklch(84% 0.006 250)", "oklch(95% 0.006 250)"] },
+      "navigation-blue": { "role": "primary", "displayName": "导航蓝", "canonical": "#6ea8ff", "tonalRamp": ["oklch(15% 0.14 250)", "oklch(25% 0.14 250)", "oklch(35% 0.14 250)", "oklch(47% 0.14 250)", "oklch(60% 0.14 250)", "oklch(72% 0.14 250)", "oklch(84% 0.14 250)", "oklch(95% 0.14 250)"] },
+      "navigation-blue-hover": { "role": "primary", "displayName": "导航蓝悬停", "canonical": "#8bb9ff", "tonalRamp": ["oklch(15% 0.11 250)", "oklch(25% 0.11 250)", "oklch(35% 0.11 250)", "oklch(47% 0.11 250)", "oklch(60% 0.11 250)", "oklch(72% 0.11 250)", "oklch(84% 0.11 250)", "oklch(95% 0.11 250)"] },
+      "validation-teal": { "role": "secondary", "displayName": "校验青", "canonical": "#72b39f", "tonalRamp": ["oklch(15% 0.09 165)", "oklch(25% 0.09 165)", "oklch(35% 0.09 165)", "oklch(47% 0.09 165)", "oklch(60% 0.09 165)", "oklch(72% 0.09 165)", "oklch(84% 0.09 165)", "oklch(95% 0.09 165)"] },
+      "validation-teal-hover": { "role": "secondary", "displayName": "校验青悬停", "canonical": "#86c0ae", "tonalRamp": ["oklch(15% 0.075 165)", "oklch(25% 0.075 165)", "oklch(35% 0.075 165)", "oklch(47% 0.075 165)", "oklch(60% 0.075 165)", "oklch(72% 0.075 165)", "oklch(84% 0.075 165)", "oklch(95% 0.075 165)"] },
+      "archive-violet": { "role": "tertiary", "displayName": "归档紫", "canonical": "#b394e0", "tonalRamp": ["oklch(15% 0.12 300)", "oklch(25% 0.12 300)", "oklch(35% 0.12 300)", "oklch(47% 0.12 300)", "oklch(60% 0.12 300)", "oklch(72% 0.12 300)", "oklch(84% 0.12 300)", "oklch(95% 0.12 300)"] },
+      "archive-violet-hover": { "role": "tertiary", "displayName": "归档紫悬停", "canonical": "#c3a8e8", "tonalRamp": ["oklch(15% 0.095 300)", "oklch(25% 0.095 300)", "oklch(35% 0.095 300)", "oklch(47% 0.095 300)", "oklch(60% 0.095 300)", "oklch(72% 0.095 300)", "oklch(84% 0.095 300)", "oklch(95% 0.095 300)"] },
+      "danger": { "role": "tertiary", "displayName": "危险红", "canonical": "#e2797e", "tonalRamp": ["oklch(15% 0.12 20)", "oklch(25% 0.12 20)", "oklch(35% 0.12 20)", "oklch(47% 0.12 20)", "oklch(60% 0.12 20)", "oklch(72% 0.12 20)", "oklch(84% 0.12 20)", "oklch(95% 0.12 20)"] },
+      "success": { "role": "secondary", "displayName": "成功绿", "canonical": "#8fbaa1", "tonalRamp": ["oklch(15% 0.07 155)", "oklch(25% 0.07 155)", "oklch(35% 0.07 155)", "oklch(47% 0.07 155)", "oklch(60% 0.07 155)", "oklch(72% 0.07 155)", "oklch(84% 0.07 155)", "oklch(95% 0.07 155)"] },
+      "warning": { "role": "tertiary", "displayName": "警告金", "canonical": "#c7aa72", "tonalRamp": ["oklch(15% 0.09 85)", "oklch(25% 0.09 85)", "oklch(35% 0.09 85)", "oklch(47% 0.09 85)", "oklch(60% 0.09 85)", "oklch(72% 0.09 85)", "oklch(84% 0.09 85)", "oklch(95% 0.09 85)"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "详情主标题和关键完成态标题。" },
+      "headline": { "displayName": "Headline", "purpose": "对话框与空状态标题。" },
+      "title": { "displayName": "Title", "purpose": "面板与分组标题。" },
+      "body": { "displayName": "Body", "purpose": "正文、说明和表单内容。" },
+      "label": { "displayName": "Label", "purpose": "字段、状态与紧凑控件标签。" },
+      "meta": { "displayName": "Meta", "purpose": "版本、时间、来源和辅助信息。" },
+      "code": { "displayName": "Technical Value", "purpose": "验证码、commit、版本和日志。" }
+    },
+    "shadows": [
+      { "name": "ambient-small", "value": "0 8px 24px rgb(0 0 0 / 20%), inset 0 1px rgb(255 255 255 / 4%)", "purpose": "基础面板、账户控件和空状态。" },
+      { "name": "ambient-large", "value": "0 28px 90px rgb(0 0 0 / 44%), inset 0 1px rgb(255 255 255 / 5%)", "purpose": "活动抽屉和最高层级浮层。" },
+      { "name": "recessed-field", "value": "inset 0 0 0 1px rgb(255 255 255 / 4%), inset 0 2px 8px rgb(0 0 0 / 26%)", "purpose": "输入框与选择控件的凹陷感。" }
+    ],
+    "motion": [
+      { "name": "interaction-fast", "value": "0.16s ease", "purpose": "按钮、字段和图标的即时状态反馈。" },
+      { "name": "surface-shift", "value": "0.18s ease", "purpose": "卡片抬升与面板进入。" },
+      { "name": "state-change", "value": "0.28s ease", "purpose": "主题色和阶段状态变化。" },
+      { "name": "selection-slide", "value": "0.32s cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "主导航和分段控件选中层移动。" },
+      { "name": "reduced-motion", "value": "0.01ms", "purpose": "用户偏好减少动态效果时替代所有过渡。" }
+    ],
+    "breakpoints": [
+      { "name": "compact-desktop", "value": "980px" },
+      { "name": "mobile", "value": "720px" },
+      { "name": "narrow-mobile", "value": "520px" },
+      { "name": "minimum", "value": "320px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "当前工作域唯一的主要推进动作。",
+      "html": "<button class=\"ds-btn-primary\">下载此版本</button>",
+      "css": ".ds-btn-primary { min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px; color: #121315; background: #6ea8ff; box-shadow: 0 8px 24px rgb(0 0 0 / 25%), inset 0 1px rgb(255 255 255 / 60%); font: 600 14px Inter, ui-sans-serif, system-ui, sans-serif; transition: background-color .16s ease, transform .16s ease, box-shadow .16s ease; cursor: pointer; } .ds-btn-primary:hover { background: #8bb9ff; transform: translateY(-1px); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 8px 24px rgb(0 0 0 / 25%), 0 0 0 3px rgb(110 168 255 / 18%); } .ds-btn-primary:active { transform: translateY(0); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "主操作旁的辅助执行动作。",
+      "html": "<button class=\"ds-btn-secondary\">打开工作流目录</button>",
+      "css": ".ds-btn-secondary { min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px; color: #eeefec; background: #222428; box-shadow: inset 0 1px rgb(255 255 255 / 5%); font: 600 14px Inter, ui-sans-serif, system-ui, sans-serif; transition: color .16s ease, background-color .16s ease, box-shadow .16s ease; cursor: pointer; } .ds-btn-secondary:hover { color: #6ea8ff; background: rgb(110 168 255 / 7%); } .ds-btn-secondary:focus-visible { outline: none; box-shadow: inset 0 0 0 1px rgb(110 168 255 / 32%), 0 0 0 3px rgb(110 168 255 / 6%); }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "返回、取消、刷新和低优先级操作。",
+      "html": "<button class=\"ds-btn-ghost\">取消</button>",
+      "css": ".ds-btn-ghost { min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px; color: #8e9196; background: transparent; font: 600 14px Inter, ui-sans-serif, system-ui, sans-serif; transition: color .16s ease, background-color .16s ease; cursor: pointer; } .ds-btn-ghost:hover { color: #6ea8ff; background: rgb(110 168 255 / 7%); } .ds-btn-ghost:focus-visible { outline: none; color: #eeefec; box-shadow: inset 0 0 0 1px rgb(110 168 255 / 32%); }"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "input-default",
+      "description": "带快捷键提示和容器级焦点反馈的目录搜索。",
+      "html": "<label class=\"ds-search\"><svg viewBox=\"0 0 24 24\" width=\"18\" height=\"18\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg><input placeholder=\"搜索名称、说明或标签\"><kbd>/</kbd></label>",
+      "css": ".ds-search { display: flex; width: min(460px, 100%); min-height: 42px; padding: 0 13px; border-radius: 10px; align-items: center; gap: 9px; color: #60636a; background: #101113; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%); font-family: Inter, ui-sans-serif, system-ui, sans-serif; } .ds-search:focus-within { color: #6ea8ff; box-shadow: inset 0 0 0 1px rgb(110 168 255 / 32%), 0 0 0 3px rgb(110 168 255 / 6%); } .ds-search input { min-width: 0; flex: 1; border: 0; outline: 0; color: #eeefec; background: transparent; font: 400 14px Inter, ui-sans-serif, system-ui, sans-serif; } .ds-search input::placeholder { color: #60636a; } .ds-search kbd { display: grid; width: 22px; height: 22px; border-radius: 6px; place-items: center; color: #60636a; background: rgb(255 255 255 / 5%); box-shadow: inset 0 0 0 1px rgb(255 255 255 / 5%); font: 500 12px Inter, sans-serif; } .ds-search:focus-within kbd { color: #6ea8ff; background: rgb(110 168 255 / 9%); }"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "primary-nav",
+      "description": "以滑动选中层区分订阅、发布和管理工作域。",
+      "html": "<nav class=\"ds-nav\"><button class=\"active\">订阅工作流</button><button>发布工作流</button><button>管理已发布</button></nav>",
+      "css": ".ds-nav { position: relative; display: grid; width: min(460px, 100%); padding: 4px; border-radius: 14px; background: #0d0e10; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 4%), 0 10px 28px rgb(0 0 0 / 20%); grid-template-columns: repeat(3, minmax(0, 1fr)); font-family: Inter, ui-sans-serif, system-ui, sans-serif; } .ds-nav::before { position: absolute; inset: 4px auto 4px 4px; width: calc((100% - 8px) / 3); border-radius: 10px; background: rgb(110 168 255 / 16%); box-shadow: 0 8px 22px rgb(110 168 255 / 7%); content: ''; } .ds-nav button { position: relative; z-index: 1; min-height: 38px; padding: 0 10px; border: 0; border-radius: 11px; color: #8e9196; background: transparent; font: 500 14px Inter, ui-sans-serif, system-ui, sans-serif; cursor: pointer; } .ds-nav button:hover { color: #6ea8ff; } .ds-nav button.active { color: #eeefec; } .ds-nav button:focus-visible { outline: none; box-shadow: inset 0 0 0 1px rgb(110 168 255 / 32%); }"
+    },
+    {
+      "name": "Filter Segmented Control",
+      "kind": "chip",
+      "refersTo": "segmented",
+      "description": "由滑动背景承担选中态的目录过滤器。",
+      "html": "<div class=\"ds-segmented\"><button class=\"active\">全部</button><button>已下载</button><button>有更新</button><button>已归档</button></div>",
+      "css": ".ds-segmented { position: relative; display: flex; min-width: 244px; padding: 4px; border-radius: 11px; background: #101113; gap: 3px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; } .ds-segmented::before { position: absolute; inset: 4px auto 4px 4px; width: calc((100% - 8px) / 4); border-radius: 8px; background: rgb(110 168 255 / 12%); box-shadow: 0 4px 14px rgb(110 168 255 / 7%); content: ''; } .ds-segmented button { position: relative; z-index: 1; min-width: 0; min-height: 32px; padding: 0 8px; flex: 1; border: 0; border-radius: 8px; color: #8e9196; background: transparent; font: 400 14px Inter, ui-sans-serif, system-ui, sans-serif; cursor: pointer; } .ds-segmented button:hover { color: #c7c8c4; } .ds-segmented button.active { color: #6ea8ff; } .ds-segmented button:focus-visible { outline: none; box-shadow: inset 0 0 0 1px rgb(110 168 255 / 28%); }"
+    },
+    {
+      "name": "Workflow Card",
+      "kind": "card",
+      "refersTo": "workflow-card",
+      "description": "工作流目录的核心内容单元，组合预览、版本、标签和来源。",
+      "html": "<article class=\"ds-card\"><div class=\"ds-card-preview\"><span>v1.2.7</span></div><div class=\"ds-card-body\"><h3>工作流示例</h3><p>简短说明帮助用户快速判断用途与适用场景。</p><div class=\"ds-card-tags\"><i>生成</i><i>图片</i></div><footer>aaalice/workflows <b>已下载</b></footer></div></article>",
+      "css": ".ds-card { width: 300px; overflow: hidden; border-radius: 13px; color: #eeefec; background: #1c1e21; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 3%), 0 10px 28px rgb(0 0 0 / 15%); font-family: Inter, ui-sans-serif, system-ui, sans-serif; transition: transform .18s ease, background-color .18s ease, box-shadow .18s ease; } .ds-card:hover { background: #202226; box-shadow: inset 0 0 0 1px rgb(110 168 255 / 18%), 0 16px 38px rgb(0 0 0 / 25%), 0 0 22px rgb(110 168 255 / 4%); transform: translateY(-2px); } .ds-card-preview { position: relative; height: 120px; background: radial-gradient(circle at 20% 20%, rgb(255 255 255 / 5%), transparent 35%), repeating-linear-gradient(135deg, transparent 0 18px, rgb(255 255 255 / 1.8%) 18px 19px), #121315; } .ds-card-preview span { position: absolute; right: 10px; top: 10px; padding: 5px 8px; border-radius: 8px; color: #6ea8ff; background: rgb(15 16 18 / 78%); font-size: 13px; } .ds-card-body { padding: 16px; } .ds-card h3 { margin: 0 0 7px; font-size: 17px; font-weight: 620; } .ds-card p { margin: 0; color: #8e9196; font-size: 14px; line-height: 1.55; } .ds-card-tags { display: flex; margin-top: 12px; gap: 6px; } .ds-card-tags i { padding: 4px 7px; border-radius: 7px; color: #9eb9de; background: rgb(110 168 255 / 7%); font-size: 12px; font-style: normal; } .ds-card footer { display: flex; margin-top: 15px; justify-content: space-between; color: #60636a; font-size: 12px; } .ds-card footer b { color: #8fbaa1; font-weight: 500; }"
+    },
+    {
+      "name": "Detail Workbench",
+      "kind": "custom",
+      "refersTo": "detail",
+      "description": "版本栏与单版本内容并列的右侧详情工作台。",
+      "html": "<section class=\"ds-detail\"><header><div class=\"ds-cover\"></div><div><small>工作流详情</small><h3>工作流示例</h3><p>历史版本、依赖状态与下载操作集中在同一工作区。</p></div></header><div class=\"ds-detail-body\"><aside><button class=\"active\">v1.2.7<small>当前</small></button><button>v1.2.6<small>历史</small></button></aside><main><div class=\"ds-status\"><span>内核<br><b>已匹配</b></span><span>插件<br><b>已通过</b></span><span>图像<br><b>2 张</b></span></div></main></div></section>",
+      "css": ".ds-detail { width: 620px; overflow: hidden; border-radius: 16px; color: #eeefec; background: #121315; box-shadow: 0 28px 90px rgb(0 0 0 / 44%), inset 1px 0 rgb(255 255 255 / 4%); font-family: Inter, ui-sans-serif, system-ui, sans-serif; } .ds-detail > header { display: grid; padding: 20px; align-items: center; background: #151618; box-shadow: inset 0 -1px rgb(255 255 255 / 4%); grid-template-columns: 112px 1fr; gap: 16px; } .ds-cover { height: 86px; border-radius: 14px; background: radial-gradient(circle, rgb(110 168 255 / 12%), transparent 65%), #0c0d0f; box-shadow: inset 0 1px rgb(255 255 255 / 5%); } .ds-detail small { color: #60636a; font-size: 12px; } .ds-detail h3 { margin: 4px 0 6px; font-size: 22px; letter-spacing: -.03em; } .ds-detail p { margin: 0; color: #8e9196; font-size: 14px; line-height: 1.55; } .ds-detail-body { display: grid; padding: 16px; grid-template-columns: 132px 1fr; gap: 16px; } .ds-detail aside { display: grid; padding: 8px; border-radius: 13px; align-content: start; background: rgb(255 255 255 / 2.5%); gap: 4px; } .ds-detail aside button { display: flex; min-height: 48px; padding: 8px 10px; border: 0; border-radius: 10px; align-items: center; justify-content: space-between; color: #c7c8c4; background: transparent; } .ds-detail aside button.active { color: #6ea8ff; background: rgb(110 168 255 / 11%); box-shadow: inset 0 1px rgb(255 255 255 / 5%); } .ds-status { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; } .ds-status span { padding: 10px; border-radius: 11px; color: #60636a; background: rgb(110 168 255 / 6%); font-size: 12px; line-height: 1.6; } .ds-status b { color: #c7c8c4; font-size: 13px; }"
+    },
+    {
+      "name": "Activity Operation",
+      "kind": "custom",
+      "refersTo": "operation",
+      "description": "同时呈现真实阶段、当前进度和终态的异步操作项。",
+      "html": "<article class=\"ds-operation\"><header><strong>正在补全插件</strong><time>14:32</time></header><div class=\"ds-stages\"><i class=\"done\"></i><i class=\"current\"></i><i></i><i></i></div><small>安装插件 · 2/4</small><div class=\"ds-progress\"><i></i></div></article>",
+      "css": ".ds-operation { width: 340px; padding: 12px; border-radius: 11px; color: #eeefec; background: #17181b; box-shadow: inset 0 1px rgb(255 255 255 / 4%); font-family: Inter, ui-sans-serif, system-ui, sans-serif; } .ds-operation header { display: flex; align-items: center; justify-content: space-between; } .ds-operation strong { font-size: 14px; font-weight: 620; } .ds-operation time, .ds-operation small { color: #60636a; font-size: 12px; } .ds-stages { display: grid; margin: 12px 0 7px; grid-template-columns: repeat(4, 1fr); gap: 4px; } .ds-stages i { height: 6px; border-radius: 999px; background: rgb(255 255 255 / 8%); } .ds-stages i.done { background: rgb(110 168 255 / 42%); } .ds-stages i.current { background: #6ea8ff; box-shadow: 0 0 10px rgb(110 168 255 / 26%); } .ds-progress { height: 4px; margin-top: 10px; overflow: hidden; border-radius: 999px; background: rgb(255 255 255 / 8%); } .ds-progress i { display: block; width: 50%; height: 100%; border-radius: inherit; background: #6ea8ff; transition: width .2s ease; }"
+    },
+    {
+      "name": "Publish Console",
+      "kind": "custom",
+      "refersTo": "publish-console-shell",
+      "description": "资源确认、资料填写、复核与完成共用的单列发布工作台。",
+      "html": "<section class=\"ds-publish\"><header><div><small>当前画布</small><strong>workflow-v1.2.json</strong></div><nav><button class=\"done\">1</button><button class=\"active\">2</button><button>3</button><button>4</button></nav></header><main><small>发布信息</small><h3>填写版本资料</h3><div class=\"ds-publish-field\">版本号 <b>1.2</b></div><div class=\"ds-publish-field\">更新日志 <b>已填写</b></div></main><footer><span>信息完整，可以继续</span><button>下一步</button></footer></section>",
+      "css": ".ds-publish { width: 560px; overflow: hidden; border-radius: 16px; color: #eeefec; background: #151618; box-shadow: 0 18px 54px rgb(0 0 0 / 24%), inset 0 1px rgb(255 255 255 / 5%); font-family: Inter, ui-sans-serif, system-ui, sans-serif; } .ds-publish > header { display: flex; min-height: 68px; padding: 12px 18px; align-items: center; justify-content: space-between; background: linear-gradient(120deg, rgb(104 166 148 / 12%), transparent); box-shadow: inset 0 -1px rgb(255 255 255 / 4%); } .ds-publish header div { display: grid; gap: 3px; } .ds-publish small { color: #60636a; font-size: 12px; } .ds-publish strong { font-size: 14px; } .ds-publish nav { display: flex; padding: 3px; border-radius: 11px; background: rgb(0 0 0 / 25%); gap: 2px; } .ds-publish nav button { width: 30px; height: 30px; border: 0; border-radius: 8px; color: #8e9196; background: transparent; } .ds-publish nav button.done { color: #72b39f; } .ds-publish nav button.active { color: #121315; background: #72b39f; } .ds-publish main { min-height: 220px; padding: 28px; } .ds-publish h3 { margin: 5px 0 18px; font-size: 20px; } .ds-publish-field { display: flex; min-height: 46px; margin-top: 8px; padding: 0 12px; border-radius: 10px; align-items: center; justify-content: space-between; color: #8e9196; background: #1c1e21; box-shadow: inset 0 1px rgb(255 255 255 / 4%); font-size: 13px; } .ds-publish-field b { color: #c7c8c4; } .ds-publish footer { display: flex; min-height: 62px; padding: 12px 16px; align-items: center; justify-content: space-between; background: rgb(17 18 20 / 88%); box-shadow: inset 0 1px rgb(255 255 255 / 4%); } .ds-publish footer span { color: #8fbaa1; font-size: 12px; } .ds-publish footer button { min-height: 38px; padding: 0 15px; border: 0; border-radius: 10px; color: #121315; background: #72b39f; font: 600 14px Inter, sans-serif; cursor: pointer; } .ds-publish footer button:hover { background: #86c0ae; } .ds-publish footer button:focus-visible { outline: none; box-shadow: 0 0 0 3px rgb(104 166 148 / 18%); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "精密工作台",
+    "overview": "这套界面像一张经过校准的桌面工作台：深色画布压低环境噪声，清晰的表面层级组织复杂信息，有限的主题色只负责指示当前工作域、交互状态和任务进度。它不追求装饰性的“科技感”，而通过准确的密度、稳定的控件尺寸和可追踪的状态反馈建立专业感与可信度。\n\n整体气质冷静、专业、可信。界面允许承载较高信息密度，但重要操作、选中、聚焦、加载、失败和重试始终拥有明确视觉反馈；动效只帮助用户理解切换、进入和进度变化，不成为注意力中心。",
+    "keyCharacteristics": [
+      "黑灰分层的桌面工作台，而非纯黑平面。",
+      "订阅、发布、管理使用各自的低饱和主题色区分工作域。",
+      "无边框为主，依靠背景明度、内侧高光和柔和阴影表达结构。",
+      "紧凑但不拥挤，正文和操作文字保持稳定可读。",
+      "状态优先：进度、成功、警告、失败和焦点一眼可辨。"
+    ],
+    "rules": [
+      { "name": "The Work-Domain Color Rule", "body": "每个运行面只由当前工作域主题色主导；订阅蓝、发布青和管理紫不能在同一局部竞争主要操作。", "section": "colors" },
+      { "name": "The State Is Not Decoration Rule", "body": "`danger`、`success`、`warning` 只表达真实状态，不作为装饰色使用。", "section": "colors" },
+      { "name": "The Twelve-Pixel Floor Rule", "body": "12px 只用于元数据和辅助标签；正文、表单与操作文字使用 14px，不通过缩小文字制造紧凑感。", "section": "typography" },
+      { "name": "The Technical Value Rule", "body": "只有需要逐字符读取的值使用等宽字体，产品名称、按钮和说明保持无衬线。", "section": "typography" },
+      { "name": "The Stable Geometry Rule", "body": "状态变化不能改变列表宽度、按钮尺寸或组件占位；加载、成功和失败在既有几何内切换。", "section": "layout" },
+      { "name": "The Tonal-First Rule", "body": "静止表面先靠明度和留白分层，不为每张卡片添加边框；阴影只在层级或状态确实变化时增强。", "section": "elevation" },
+      { "name": "The No Hard Outline Rule", "body": "组件边缘不使用 1px 实线或 `inset 0 0 0 1px` 作为主要轮廓；现有极弱内描边只承担高光和聚焦辅助。", "section": "elevation" },
+      { "name": "The Nested-Radius Rule", "body": "内层控件圆角必须小于外层容器，并保留清晰的内边距，避免圆角相切。", "section": "shapes" }
+    ],
+    "dos": [
+      "**Do** 使用画布、基础表面、抬升表面、柔和表面和凹陷字段形成连续黑灰层级。",
+      "**Do** 让当前工作域主题色统一驱动主要操作、焦点、选中和进度。",
+      "**Do** 保持按钮 38px、输入 42px 的稳定控件高度，并为重要状态预留固定空间。",
+      "**Do** 使用明确的成功、警告、危险和弱化文本角色表达真实状态。",
+      "**Do** 为 `prefers-reduced-motion` 保留近乎即时的替代过渡。"
+    ],
+    "donts": [
+      "**Don't** 同时混用订阅蓝、发布青和管理紫作为竞争强调色。",
+      "**Don't** 用实线边框或 1px inset 描边包围每个弹窗、卡片、输入框和选中层。",
+      "**Don't** 通过小于 12px 的文字、低透明正文或过密堆叠换取紧凑。",
+      "**Don't** 用阴影和光晕装饰静止的普通内容；它们只表达层级、交互和状态。",
+      "**Don't** 让动画延迟操作、伪造进度或在状态切换时造成布局抖动。"
+    ]
+  }
+}
